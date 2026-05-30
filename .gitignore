@@ -1,0 +1,5 @@
+.env
+.sessions/
+.state/
+artifacts/
+/telegram-study-harvest

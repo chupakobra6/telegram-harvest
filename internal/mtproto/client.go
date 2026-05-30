@@ -1,0 +1,1436 @@
+package mtproto
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/chupakobra6/telegram-study-harvest/internal/config"
+	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/dcs"
+	"github.com/gotd/td/telegram/message/peer"
+	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
+)
+
+const (
+	defaultRPCTimeout      = 30 * time.Second
+	defaultDialogTimeout   = 45 * time.Second
+	defaultHistoryTimeout  = 45 * time.Second
+	maxFloodWaitRetries    = 3
+	defaultDialogBatchSize = 100
+)
+
+var linkPattern = regexp.MustCompile(`(?i)\b(?:https?://|t\.me/|telegram\.me/)[^\s<>()"'` + "`" + `]+`)
+
+type Client struct {
+	cfg config.Config
+}
+
+type AuthStatus struct {
+	Authorized bool
+}
+
+type Session struct {
+	raw        *tg.Client
+	rpcSpacing time.Duration
+
+	mu          sync.Mutex
+	nextRPCAt   time.Time
+	floodWaits  int
+	dialogCache map[string]resolvedTarget
+}
+
+type resolvedTarget struct {
+	Raw       string
+	Chat      harvest.Chat
+	InputPeer tg.InputPeerClass
+}
+
+func New(cfg config.Config) *Client {
+	return &Client{cfg: cfg}
+}
+
+func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
+	if err := c.cfg.ValidateLogin(); err != nil {
+		return err
+	}
+	if err := ensureSessionDir(c.cfg.SessionPath); err != nil {
+		return err
+	}
+	client := c.newTelegramClient()
+	reader := bufio.NewReader(in)
+	_, _ = fmt.Fprintf(out, "starting read-only MTProto login for %s\n", maskPhone(c.cfg.Phone))
+	_, _ = fmt.Fprintln(out, "connecting to Telegram...")
+	return client.Run(ctx, func(runCtx context.Context) error {
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("auth status: %w", err)
+		}
+		if status.Authorized {
+			_, _ = fmt.Fprintln(out, "session already authorized")
+			return nil
+		}
+
+		_, _ = fmt.Fprintf(out, "connected, authenticating as %s\n", maskPhone(c.cfg.Phone))
+		_, _ = fmt.Fprintln(out, "requesting login code...")
+		sentCodeClass, err := client.Auth().SendCode(runCtx, c.cfg.Phone, auth.SendCodeOptions{})
+		if err != nil {
+			return fmt.Errorf("send code: %w", err)
+		}
+
+		sentCode, ok := sentCodeClass.(*tg.AuthSentCode)
+		if !ok {
+			if _, ok := sentCodeClass.(*tg.AuthSentCodeSuccess); ok {
+				_, _ = fmt.Fprintln(out, "login successful")
+				return nil
+			}
+			return fmt.Errorf("unexpected sent code type %T", sentCodeClass)
+		}
+
+		_, _ = fmt.Fprintf(out, "code requested via %s\n", sentCodeTypeSummary(sentCode))
+		code, err := promptLine(out, reader, "code: ")
+		if err != nil {
+			return fmt.Errorf("read code: %w", err)
+		}
+
+		if _, err := client.Auth().SignIn(runCtx, c.cfg.Phone, code, sentCode.PhoneCodeHash); err != nil {
+			if !errors.Is(err, auth.ErrPasswordAuthNeeded) {
+				return fmt.Errorf("sign in: %w", err)
+			}
+			password := strings.TrimSpace(c.cfg.Password)
+			if password == "" {
+				_, _ = fmt.Fprintln(out, "two-factor authentication is enabled")
+				password, err = promptLine(out, reader, "password: ")
+				if err != nil {
+					return fmt.Errorf("read password: %w", err)
+				}
+			}
+			if _, err := client.Auth().Password(runCtx, password); err != nil {
+				return fmt.Errorf("sign in with password: %w", err)
+			}
+		}
+
+		_, _ = fmt.Fprintln(out, "login successful")
+		return nil
+	})
+}
+
+func (c *Client) AuthStatus(ctx context.Context) (AuthStatus, error) {
+	if c.cfg.AppID == 0 {
+		return AuthStatus{}, fmt.Errorf("TG_STUDY_APP_ID is required")
+	}
+	if strings.TrimSpace(c.cfg.AppHash) == "" {
+		return AuthStatus{}, fmt.Errorf("TG_STUDY_APP_HASH is required")
+	}
+	if strings.TrimSpace(c.cfg.SessionPath) == "" {
+		return AuthStatus{}, fmt.Errorf("TG_STUDY_SESSION_PATH is required")
+	}
+	if err := ensureSessionDir(c.cfg.SessionPath); err != nil {
+		return AuthStatus{}, err
+	}
+	client := c.newTelegramClient()
+	var status AuthStatus
+	err := client.Run(ctx, func(runCtx context.Context) error {
+		authStatus, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("auth status: %w", err)
+		}
+		status.Authorized = authStatus.Authorized
+		return nil
+	})
+	if err != nil {
+		return AuthStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) RunAuthorized(ctx context.Context, fn func(context.Context, *Session) error) error {
+	if err := c.cfg.ValidateRuntime(); err != nil {
+		return err
+	}
+	if err := ensureSessionDir(c.cfg.SessionPath); err != nil {
+		return err
+	}
+	client := c.newTelegramClient()
+	return client.Run(ctx, func(runCtx context.Context) error {
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("auth status: %w", err)
+		}
+		if !status.Authorized {
+			return unauthorizedRuntimeError(c.cfg.SessionPath)
+		}
+		session := &Session{
+			raw:         tg.NewClient(client),
+			rpcSpacing:  c.cfg.RPCSpacing,
+			dialogCache: map[string]resolvedTarget{},
+		}
+		return fn(runCtx, session)
+	})
+}
+
+func unauthorizedRuntimeError(sessionPath string) error {
+	if sessionFileExists(sessionPath) {
+		return fmt.Errorf("telegram session is not authorized: session file exists at %s, but Telegram requires re-login; run `telegram-study-harvest login` again", sessionPath)
+	}
+	return fmt.Errorf("telegram session is not authorized: no valid Telegram session is available; run `telegram-study-harvest login`")
+}
+
+func (s *Session) ListDialogs(ctx context.Context, limit int, query string) ([]harvest.Chat, error) {
+	if limit <= 0 {
+		limit = defaultDialogBatchSize
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	dialogs, err := s.loadDialogs(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	if query == "" {
+		return dialogs, nil
+	}
+	filtered := make([]harvest.Chat, 0, len(dialogs))
+	for _, chat := range dialogs {
+		haystack := strings.ToLower(strings.Join([]string{chat.Title, chat.Username, chat.Display, strconv.FormatInt(chat.ID, 10)}, " "))
+		if strings.Contains(haystack, query) {
+			filtered = append(filtered, chat)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *Session) ListTopics(ctx context.Context, chat string, limit int, query string) ([]harvest.Topic, error) {
+	target, err := s.resolveTarget(ctx, chat)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	query = strings.TrimSpace(query)
+	topics := make([]harvest.Topic, 0, limit)
+	offsetTopic := 0
+	offsetID := 0
+	offsetDate := 0
+	for len(topics) < limit {
+		batchLimit := min(100, limit-len(topics))
+		var result *tg.MessagesForumTopics
+		err := s.performRPC(ctx, "get_forum_topics", func(callCtx context.Context) error {
+			var callErr error
+			req := &tg.MessagesGetForumTopicsRequest{
+				Peer:        target.InputPeer,
+				OffsetDate:  offsetDate,
+				OffsetID:    offsetID,
+				OffsetTopic: offsetTopic,
+				Limit:       batchLimit,
+			}
+			if query != "" {
+				req.SetQ(query)
+			}
+			result, callErr = s.raw.MessagesGetForumTopics(callCtx, req)
+			return callErr
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load forum topics: %w", err)
+		}
+		if len(result.Topics) == 0 {
+			break
+		}
+		topMessages := map[int]tg.MessageClass{}
+		for _, msg := range result.Messages {
+			topMessages[messageID(msg)] = msg
+		}
+		for _, topicClass := range result.Topics {
+			topic, ok := topicFromClass(topicClass, topMessages)
+			if !ok {
+				continue
+			}
+			topics = append(topics, topic)
+		}
+		last, ok := lastTopic(result.Topics, topMessages)
+		if !ok || len(result.Topics) < batchLimit {
+			break
+		}
+		offsetTopic = last.ID
+		offsetID = last.TopMessageID
+		if !last.LastMessageAt.IsZero() {
+			offsetDate = int(last.LastMessageAt.Unix())
+		}
+	}
+	return topics, nil
+}
+
+func (s *Session) SelfProfile(ctx context.Context) (harvest.SelfProfile, error) {
+	var result *tg.UsersUserFull
+	err := s.performRPC(ctx, "get_self", func(callCtx context.Context) error {
+		var callErr error
+		result, callErr = s.raw.UsersGetFullUser(callCtx, &tg.InputUserSelf{})
+		return callErr
+	})
+	if err != nil {
+		return harvest.SelfProfile{}, err
+	}
+	full := result.GetFullUser()
+	profile := harvest.SelfProfile{ID: full.ID}
+	for _, userClass := range result.GetUsers() {
+		user, ok := userClass.(*tg.User)
+		if !ok || user.ID != full.ID {
+			continue
+		}
+		username, _ := user.GetUsername()
+		phone, _ := user.GetPhone()
+		display := strings.TrimSpace(strings.Join([]string{user.FirstName, user.LastName}, " "))
+		if display == "" {
+			display = usernameOrID(username, user.ID)
+		}
+		profile.Username = username
+		profile.FirstName = user.FirstName
+		profile.LastName = user.LastName
+		profile.Phone = phone
+		profile.Display = display
+		break
+	}
+	return profile, nil
+}
+
+func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.HistoryOptions, emit func(harvest.MessageRecord) error) (harvest.Chat, harvest.HistoryStats, error) {
+	target, err := s.resolveTarget(ctx, chat)
+	if err != nil {
+		return harvest.Chat{}, harvest.HistoryStats{}, err
+	}
+	opts = normalizeHistoryOptions(opts)
+	topicByID := map[int]harvest.Topic{}
+	if opts.TopicID > 0 {
+		topicByID[opts.TopicID] = harvest.Topic{ID: opts.TopicID, Title: opts.TopicTitle, TopMessageID: opts.TopicID}
+	} else if target.Chat.Forum {
+		if topics, err := s.ListTopics(ctx, chat, 500, ""); err == nil {
+			for _, topic := range topics {
+				storeTopic(topicByID, topic.ID, topic)
+				if topic.TopMessageID > 0 {
+					storeTopic(topicByID, topic.TopMessageID, topic)
+				}
+			}
+		}
+	}
+	if opts.All {
+		return s.dumpHistoryStreaming(ctx, target, opts, emit, topicByID)
+	}
+
+	records := make([]harvest.MessageRecord, 0, initialHistoryCapacity(opts))
+	offsetID := 0
+	batches := 0
+	for shouldContinueHistory(opts, len(records), batches) {
+		batches++
+		batchLimit := nextBatchLimit(opts, len(records))
+		var result tg.MessagesMessagesClass
+		if opts.TopicID > 0 {
+			err = s.performRPC(ctx, "get_replies", func(callCtx context.Context) error {
+				var callErr error
+				result, callErr = s.raw.MessagesGetReplies(callCtx, &tg.MessagesGetRepliesRequest{
+					Peer:     target.InputPeer,
+					MsgID:    opts.TopicID,
+					OffsetID: offsetID,
+					Limit:    batchLimit,
+					MinID:    opts.MinID,
+					Hash:     0,
+				})
+				return callErr
+			})
+		} else {
+			err = s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
+				var callErr error
+				result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
+					Peer:     target.InputPeer,
+					OffsetID: offsetID,
+					Limit:    batchLimit,
+					MinID:    opts.MinID,
+					Hash:     0,
+				})
+				return callErr
+			})
+		}
+		if err != nil {
+			return harvest.Chat{}, harvest.HistoryStats{}, err
+		}
+		entities := historyEntities(result)
+		messages := historyMessages(result)
+		if len(messages) == 0 {
+			break
+		}
+		mergeTopicMap(topicByID, historyTopics(result), messages)
+
+		minSeenID := 0
+		for _, msgClass := range messages {
+			record, ok := normalizeRecord(msgClass, target.Chat, entities)
+			if !ok {
+				continue
+			}
+			annotateRecordTopic(&record, opts, topicByID)
+			if opts.MinID > 0 && record.MessageID <= opts.MinID {
+				continue
+			}
+			records = append(records, record)
+			if minSeenID == 0 || record.MessageID < minSeenID {
+				minSeenID = record.MessageID
+			}
+		}
+		if minSeenID == 0 || len(messages) < batchLimit {
+			break
+		}
+		offsetID = minSeenID
+	}
+
+	sort.Slice(records, func(i, j int) bool { return records[i].MessageID < records[j].MessageID })
+	stats := harvest.HistoryStats{Records: len(records), Batches: batches, FloodWaits: s.FloodWaits()}
+	for _, record := range records {
+		if stats.FirstID == 0 || record.MessageID < stats.FirstID {
+			stats.FirstID = record.MessageID
+		}
+		if record.MessageID > stats.LastID {
+			stats.LastID = record.MessageID
+		}
+		if emit != nil {
+			if err := emit(record); err != nil {
+				return harvest.Chat{}, harvest.HistoryStats{}, err
+			}
+		}
+	}
+	stats.Complete = true
+	return target.Chat, stats, nil
+}
+
+func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarget, opts harvest.HistoryOptions, emit func(harvest.MessageRecord) error, topicByID map[int]harvest.Topic) (harvest.Chat, harvest.HistoryStats, error) {
+	offsetID := opts.StartOffsetID
+	stats := harvest.HistoryStats{}
+	for shouldContinueHistory(opts, stats.Records, stats.Batches) {
+		stats.Batches++
+		batchLimit := opts.BatchSize
+		var result tg.MessagesMessagesClass
+		var err error
+		if opts.TopicID > 0 {
+			err = s.performRPC(ctx, "get_replies", func(callCtx context.Context) error {
+				var callErr error
+				result, callErr = s.raw.MessagesGetReplies(callCtx, &tg.MessagesGetRepliesRequest{
+					Peer:     target.InputPeer,
+					MsgID:    opts.TopicID,
+					OffsetID: offsetID,
+					Limit:    batchLimit,
+					MinID:    opts.MinID,
+					Hash:     0,
+				})
+				return callErr
+			})
+		} else {
+			err = s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
+				var callErr error
+				result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
+					Peer:     target.InputPeer,
+					OffsetID: offsetID,
+					Limit:    batchLimit,
+					MinID:    opts.MinID,
+					Hash:     0,
+				})
+				return callErr
+			})
+		}
+		if err != nil {
+			stats.FloodWaits = s.FloodWaits()
+			return harvest.Chat{}, stats, err
+		}
+		entities := historyEntities(result)
+		messages := historyMessages(result)
+		if len(messages) == 0 {
+			stats.Complete = true
+			stats.FloodWaits = s.FloodWaits()
+			if opts.Progress != nil {
+				if err := opts.Progress(historyProgress(stats, 0, offsetID, true)); err != nil {
+					return harvest.Chat{}, stats, err
+				}
+			}
+			break
+		}
+		mergeTopicMap(topicByID, historyTopics(result), messages)
+
+		batchRecords := make([]harvest.MessageRecord, 0, len(messages))
+		minMessageID := 0
+		for _, msgClass := range messages {
+			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
+				minMessageID = id
+			}
+			record, ok := normalizeRecord(msgClass, target.Chat, entities)
+			if !ok {
+				continue
+			}
+			annotateRecordTopic(&record, opts, topicByID)
+			if opts.MinID > 0 && record.MessageID <= opts.MinID {
+				continue
+			}
+			batchRecords = append(batchRecords, record)
+		}
+		sort.Slice(batchRecords, func(i, j int) bool { return batchRecords[i].MessageID < batchRecords[j].MessageID })
+		for _, record := range batchRecords {
+			if emit != nil {
+				if err := emit(record); err != nil {
+					stats.FloodWaits = s.FloodWaits()
+					return harvest.Chat{}, stats, err
+				}
+			}
+			stats.Records++
+			if stats.FirstID == 0 || record.MessageID < stats.FirstID {
+				stats.FirstID = record.MessageID
+			}
+			if record.MessageID > stats.LastID {
+				stats.LastID = record.MessageID
+			}
+		}
+		done := minMessageID == 0 || len(messages) < batchLimit
+		if done {
+			stats.Complete = true
+		}
+		stats.FloodWaits = s.FloodWaits()
+		if opts.Progress != nil {
+			if err := opts.Progress(historyProgress(stats, len(batchRecords), minMessageID, done)); err != nil {
+				return harvest.Chat{}, stats, err
+			}
+		}
+		if done {
+			break
+		}
+		offsetID = minMessageID
+	}
+	stats.FloodWaits = s.FloodWaits()
+	return target.Chat, stats, nil
+}
+
+func historyProgress(stats harvest.HistoryStats, batchRecords int, nextOffsetID int, done bool) harvest.HistoryProgress {
+	return harvest.HistoryProgress{
+		BatchRecords: batchRecords,
+		Records:      stats.Records,
+		FirstID:      stats.FirstID,
+		LastID:       stats.LastID,
+		Batches:      stats.Batches,
+		NextOffsetID: nextOffsetID,
+		Done:         done,
+		FloodWaits:   stats.FloodWaits,
+	}
+}
+
+func normalizeHistoryOptions(opts harvest.HistoryOptions) harvest.HistoryOptions {
+	if opts.Limit <= 0 && !opts.All {
+		opts.Limit = config.DefaultHistoryLimit
+	}
+	if opts.BatchSize <= 0 {
+		opts.BatchSize = config.DefaultBatchSize
+	}
+	if opts.BatchSize > 100 {
+		opts.BatchSize = 100
+	}
+	if opts.MaxBatches <= 0 && !opts.All {
+		opts.MaxBatches = config.DefaultMaxBatches
+	}
+	return opts
+}
+
+func initialHistoryCapacity(opts harvest.HistoryOptions) int {
+	if opts.All {
+		return 0
+	}
+	return min(opts.Limit, opts.BatchSize*max(opts.MaxBatches, 1))
+}
+
+func shouldContinueHistory(opts harvest.HistoryOptions, records int, batches int) bool {
+	if !opts.All && records >= opts.Limit {
+		return false
+	}
+	if opts.MaxBatches > 0 && batches >= opts.MaxBatches {
+		return false
+	}
+	return true
+}
+
+func nextBatchLimit(opts harvest.HistoryOptions, records int) int {
+	if opts.All {
+		return opts.BatchSize
+	}
+	return min(opts.BatchSize, opts.Limit-records)
+}
+
+func (s *Session) loadDialogs(ctx context.Context, limit int) ([]harvest.Chat, error) {
+	all := make([]harvest.Chat, 0, limit)
+	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
+	offsetID := 0
+	offsetDate := 0
+
+	for len(all) < limit {
+		batchLimit := min(defaultDialogBatchSize, limit-len(all))
+		var result tg.MessagesDialogsClass
+		err := s.performRPC(ctx, "get_dialogs", func(callCtx context.Context) error {
+			var callErr error
+			result, callErr = s.raw.MessagesGetDialogs(callCtx, &tg.MessagesGetDialogsRequest{
+				ExcludePinned: false,
+				OffsetDate:    offsetDate,
+				OffsetID:      offsetID,
+				OffsetPeer:    offsetPeer,
+				Limit:         batchLimit,
+				Hash:          0,
+			})
+			return callErr
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load dialogs: %w", err)
+		}
+		modified, ok := result.AsModified()
+		if !ok {
+			break
+		}
+		entities := dialogEntities(result)
+		for _, dialog := range modified.GetDialogs() {
+			chat, inputPeer, ok := chatFromPeer(dialog.GetPeer(), entities)
+			if !ok {
+				continue
+			}
+			chat.Pinned = dialog.GetPinned()
+			chat.UnreadCount = dialogUnreadCount(dialog)
+			chat.TopMessageID = dialog.GetTopMessage()
+			if top := topMessageByID(modified.GetMessages(), chat.TopMessageID); top != nil {
+				chat.LastMessageAt = time.Unix(int64(messageDate(top)), 0).UTC()
+			}
+			all = append(all, chat)
+			s.cacheTarget(chat, inputPeer)
+		}
+		messages := modified.GetMessages()
+		if len(messages) == 0 || len(messages) < batchLimit {
+			break
+		}
+		last := messages[len(messages)-1]
+		lastID, lastDate, lastPeer, ok := messageOffset(last)
+		if !ok {
+			break
+		}
+		offsetID = lastID
+		offsetDate = lastDate
+		offsetPeer = inputPeerFromMessagePeer(lastPeer, entities)
+		if offsetPeer == nil {
+			break
+		}
+	}
+	return all, nil
+}
+
+func (s *Session) resolveTarget(ctx context.Context, raw string) (resolvedTarget, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return resolvedTarget{}, fmt.Errorf("target chat is empty")
+	}
+	if cached, ok := s.dialogCache[raw]; ok {
+		return cached, nil
+	}
+	if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if _, err := s.loadDialogs(ctx, 1000); err != nil {
+			return resolvedTarget{}, err
+		}
+		for _, candidate := range numericPeerCandidates(id) {
+			if cached, ok := s.dialogCache[strconv.FormatInt(candidate, 10)]; ok {
+				return cached, nil
+			}
+		}
+		return resolvedTarget{}, fmt.Errorf("numeric peer id %d was not found in dialogs; run `chats --query ...` and use an exact listed id or @username", id)
+	}
+	username := strings.TrimPrefix(raw, "@")
+	var resolved *tg.ContactsResolvedPeer
+	err := s.performRPC(ctx, "resolve_username", func(callCtx context.Context) error {
+		var callErr error
+		resolved, callErr = s.raw.ContactsResolveUsername(callCtx, &tg.ContactsResolveUsernameRequest{
+			Username: username,
+		})
+		return callErr
+	})
+	if err != nil {
+		return resolvedTarget{}, fmt.Errorf("resolve username %q: %w", raw, err)
+	}
+	entities := peer.EntitiesFromResult(resolved)
+	inputPeer, err := entities.ExtractPeer(resolved.Peer)
+	if err != nil {
+		return resolvedTarget{}, err
+	}
+	chat, _, ok := chatFromPeer(resolved.Peer, entities)
+	if !ok {
+		chat = harvest.Chat{ID: peerClassID(resolved.Peer), Type: peerType(resolved.Peer), Display: "@" + username, Username: username}
+	}
+	target := resolvedTarget{Raw: raw, Chat: chat, InputPeer: inputPeer}
+	s.dialogCache[raw] = target
+	s.dialogCache["@"+username] = target
+	s.dialogCache[strconv.FormatInt(chat.ID, 10)] = target
+	return target, nil
+}
+
+func (s *Session) cacheTarget(chat harvest.Chat, inputPeer tg.InputPeerClass) {
+	if inputPeer == nil || chat.ID == 0 {
+		return
+	}
+	target := resolvedTarget{Raw: strconv.FormatInt(chat.ID, 10), Chat: chat, InputPeer: inputPeer}
+	s.dialogCache[strconv.FormatInt(chat.ID, 10)] = target
+	if chat.Username != "" {
+		s.dialogCache["@"+chat.Username] = target
+		s.dialogCache[chat.Username] = target
+	}
+	if chat.Title != "" {
+		s.dialogCache[chat.Title] = target
+	}
+}
+
+func (s *Session) performRPC(ctx context.Context, operation string, fn func(context.Context) error) error {
+	attempt := func() error {
+		if err := s.beforeRPC(ctx); err != nil {
+			return err
+		}
+		callCtx, cancel := context.WithTimeout(ctx, rpcTimeoutForOperation(operation))
+		defer cancel()
+		return fn(callCtx)
+	}
+	var lastErr error
+	for attemptNo := 0; attemptNo < maxFloodWaitRetries; attemptNo++ {
+		if attemptNo > 0 {
+			delay, ok := floodWaitDelay(lastErr)
+			if !ok {
+				break
+			}
+			s.noteFloodWait()
+			if err := sleepContext(ctx, delay+s.rpcSpacing); err != nil {
+				return err
+			}
+		}
+		if err := attempt(); err != nil {
+			lastErr = err
+			if _, ok := floodWaitDelay(err); ok && attemptNo < maxFloodWaitRetries-1 {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func rpcTimeoutForOperation(operation string) time.Duration {
+	switch operation {
+	case "get_dialogs":
+		return defaultDialogTimeout
+	case "get_history", "get_replies", "get_forum_topics":
+		return defaultHistoryTimeout
+	default:
+		return defaultRPCTimeout
+	}
+}
+
+func (s *Session) beforeRPC(ctx context.Context) error {
+	delay := s.reserveRPCSlot(time.Now())
+	if delay <= 0 {
+		return nil
+	}
+	return sleepContext(ctx, delay)
+}
+
+func (s *Session) reserveRPCSlot(now time.Time) time.Duration {
+	if s.rpcSpacing <= 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nextRPCAt.IsZero() || s.nextRPCAt.Before(now) {
+		s.nextRPCAt = now
+	}
+	delay := s.nextRPCAt.Sub(now)
+	s.nextRPCAt = s.nextRPCAt.Add(s.rpcSpacing)
+	return delay
+}
+
+func (s *Session) noteFloodWait() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.floodWaits++
+}
+
+func (s *Session) FloodWaits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.floodWaits
+}
+
+func floodWaitDelay(err error) (time.Duration, bool) {
+	delay, ok := tgerr.AsFloodWait(err)
+	if !ok {
+		return 0, false
+	}
+	if delay <= 0 {
+		return time.Second, true
+	}
+	return delay, true
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func historyEntities(result tg.MessagesMessagesClass) peer.Entities {
+	modified, ok := result.AsModified()
+	if !ok {
+		return peer.Entities{}
+	}
+	chats := tg.ChatClassArray(modified.GetChats())
+	return peer.NewEntities(
+		tg.UserClassArray(modified.GetUsers()).UserToMap(),
+		chats.ChatToMap(),
+		chats.ChannelToMap(),
+	)
+}
+
+func historyMessages(result tg.MessagesMessagesClass) []tg.MessageClass {
+	modified, ok := result.AsModified()
+	if !ok {
+		return nil
+	}
+	return modified.GetMessages()
+}
+
+func historyTopics(result tg.MessagesMessagesClass) []tg.ForumTopicClass {
+	modified, ok := result.AsModified()
+	if !ok {
+		return nil
+	}
+	return modified.GetTopics()
+}
+
+func dialogEntities(result tg.MessagesDialogsClass) peer.Entities {
+	modified, ok := result.AsModified()
+	if !ok {
+		return peer.Entities{}
+	}
+	chats := tg.ChatClassArray(modified.GetChats())
+	return peer.NewEntities(
+		tg.UserClassArray(modified.GetUsers()).UserToMap(),
+		chats.ChatToMap(),
+		chats.ChannelToMap(),
+	)
+}
+
+func dialogUnreadCount(dialog tg.DialogClass) int {
+	typed, ok := dialog.(*tg.Dialog)
+	if !ok {
+		return 0
+	}
+	return typed.UnreadCount
+}
+
+func chatFromPeer(peerClass tg.PeerClass, entities peer.Entities) (harvest.Chat, tg.InputPeerClass, bool) {
+	switch typed := peerClass.(type) {
+	case *tg.PeerUser:
+		user, ok := entities.User(typed.UserID)
+		if !ok {
+			return harvest.Chat{}, nil, false
+		}
+		username, _ := user.GetUsername()
+		display := strings.TrimSpace(strings.Join([]string{user.FirstName, user.LastName}, " "))
+		if display == "" {
+			display = usernameOrID(username, user.ID)
+		}
+		return harvest.Chat{
+			ID:       user.ID,
+			Type:     "user",
+			Title:    display,
+			Username: username,
+			Display:  display,
+		}, user.AsInputPeer(), true
+	case *tg.PeerChat:
+		chat, ok := entities.Chat(typed.ChatID)
+		if !ok {
+			return harvest.Chat{}, nil, false
+		}
+		return harvest.Chat{
+			ID:                   chat.ID,
+			Type:                 "basic_group",
+			Title:                chat.Title,
+			Display:              chat.Title,
+			ParticipantsEstimate: chat.ParticipantsCount,
+		}, chat.AsInputPeer(), true
+	case *tg.PeerChannel:
+		channel, ok := entities.Channel(typed.ChannelID)
+		if !ok {
+			return harvest.Chat{}, nil, false
+		}
+		username, _ := channel.GetUsername()
+		chatType := "channel"
+		if channel.Megagroup {
+			chatType = "supergroup"
+		}
+		return harvest.Chat{
+			ID:                   channel.ID,
+			Type:                 chatType,
+			Title:                channel.Title,
+			Username:             username,
+			Display:              displayChannel(channel.Title, username, channel.ID),
+			Forum:                channel.Forum,
+			ParticipantsEstimate: channel.ParticipantsCount,
+		}, channel.AsInputPeer(), true
+	default:
+		return harvest.Chat{}, nil, false
+	}
+}
+
+func topicFromClass(topicClass tg.ForumTopicClass, topMessages map[int]tg.MessageClass) (harvest.Topic, bool) {
+	switch typed := topicClass.(type) {
+	case *tg.ForumTopic:
+		topic := harvest.Topic{
+			ID:            typed.ID,
+			Title:         typed.Title,
+			TopMessageID:  typed.TopMessage,
+			LastMessageAt: time.Unix(int64(typed.Date), 0).UTC(),
+			Pinned:        typed.Pinned,
+			Closed:        typed.Closed,
+			Hidden:        typed.Hidden,
+			UnreadCount:   typed.UnreadCount,
+		}
+		if typed.TopMessage > 0 {
+			if msg := topMessages[typed.TopMessage]; msg != nil {
+				if date := messageDate(msg); date > 0 {
+					topic.LastMessageAt = time.Unix(int64(date), 0).UTC()
+				}
+			}
+		}
+		return topic, true
+	case *tg.ForumTopicDeleted:
+		return harvest.Topic{ID: typed.ID, Title: "[deleted topic]"}, typed.ID > 0
+	default:
+		return harvest.Topic{}, false
+	}
+}
+
+func lastTopic(topicClasses []tg.ForumTopicClass, topMessages map[int]tg.MessageClass) (harvest.Topic, bool) {
+	for i := len(topicClasses) - 1; i >= 0; i-- {
+		topic, ok := topicFromClass(topicClasses[i], topMessages)
+		if ok {
+			return topic, true
+		}
+	}
+	return harvest.Topic{}, false
+}
+
+func mergeTopicMap(topicByID map[int]harvest.Topic, topicClasses []tg.ForumTopicClass, messages []tg.MessageClass) {
+	if len(topicClasses) == 0 {
+		return
+	}
+	topMessages := make(map[int]tg.MessageClass, len(messages))
+	for _, msg := range messages {
+		topMessages[messageID(msg)] = msg
+	}
+	for _, topicClass := range topicClasses {
+		topic, ok := topicFromClass(topicClass, topMessages)
+		if !ok || topic.ID == 0 {
+			continue
+		}
+		storeTopic(topicByID, topic.ID, topic)
+		if topic.TopMessageID > 0 {
+			storeTopic(topicByID, topic.TopMessageID, topic)
+		}
+	}
+}
+
+func storeTopic(topicByID map[int]harvest.Topic, key int, topic harvest.Topic) {
+	if key == 0 {
+		return
+	}
+	if existing, ok := topicByID[key]; ok {
+		topicByID[key] = mergeTopic(existing, topic)
+		return
+	}
+	topicByID[key] = topic
+}
+
+func mergeTopic(existing harvest.Topic, incoming harvest.Topic) harvest.Topic {
+	merged := existing
+	if merged.ID == 0 {
+		merged.ID = incoming.ID
+	}
+	if merged.Title == "" {
+		merged.Title = incoming.Title
+	}
+	if incoming.TopMessageID > 0 {
+		merged.TopMessageID = incoming.TopMessageID
+	}
+	if merged.LastMessageAt.IsZero() || incoming.TopMessageID > 0 {
+		if !incoming.LastMessageAt.IsZero() {
+			merged.LastMessageAt = incoming.LastMessageAt
+		}
+	}
+	merged.Pinned = merged.Pinned || incoming.Pinned
+	merged.Closed = merged.Closed || incoming.Closed
+	merged.Hidden = merged.Hidden || incoming.Hidden
+	if incoming.UnreadCount > merged.UnreadCount {
+		merged.UnreadCount = incoming.UnreadCount
+	}
+	return merged
+}
+
+func annotateRecordTopic(record *harvest.MessageRecord, opts harvest.HistoryOptions, topicByID map[int]harvest.Topic) {
+	if opts.TopicID > 0 {
+		topic, ok := topicByID[opts.TopicID]
+		if !ok {
+			topic = harvest.Topic{ID: opts.TopicID, Title: opts.TopicTitle}
+		}
+		if record.ThreadTopMessageID == 0 {
+			record.ThreadTopMessageID = opts.TopicID
+		}
+		record.Topic = &topic
+		return
+	}
+	if record.ThreadTopMessageID > 0 {
+		if topic, ok := topicByID[record.ThreadTopMessageID]; ok {
+			record.Topic = &topic
+			return
+		}
+	}
+	if record.ReplyToMessageID > 0 {
+		if topic, ok := topicByID[record.ReplyToMessageID]; ok {
+			if record.ThreadTopMessageID == 0 {
+				record.ThreadTopMessageID = topic.ID
+			}
+			record.Topic = &topic
+			return
+		}
+	}
+	if topic, ok := topicByID[record.MessageID]; ok {
+		if record.ThreadTopMessageID == 0 {
+			record.ThreadTopMessageID = topic.ID
+		}
+		record.Topic = &topic
+		return
+	}
+	if record.Chat.Forum && record.Kind != "service" {
+		if topic, ok := topicByID[1]; ok {
+			record.ThreadTopMessageID = topic.ID
+			record.Topic = &topic
+		}
+	}
+}
+
+func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.Entities) (harvest.MessageRecord, bool) {
+	switch msg := msgClass.(type) {
+	case *tg.Message:
+		record := harvest.MessageRecord{
+			Source:      "telegram",
+			SourceURL:   messageURL(chat, msg.ID),
+			Chat:        chat,
+			MessageID:   msg.ID,
+			Date:        time.Unix(int64(msg.Date), 0).UTC(),
+			Sender:      senderFromPeer(msg.FromID, msg.Out, entities),
+			Outgoing:    msg.Out,
+			Kind:        messageKind(msg.Media),
+			Text:        strings.TrimSpace(msg.Message),
+			Pinned:      msg.Pinned,
+			Views:       msg.Views,
+			Links:       extractLinks(msg.Message, msg.Entities),
+			Attachments: extractAttachments(msg.Media),
+		}
+		if replyID, topID := replyInfo(msg.ReplyTo); replyID > 0 || topID > 0 {
+			record.ReplyToMessageID = replyID
+			record.ThreadTopMessageID = topID
+		}
+		return record, true
+	case *tg.MessageService:
+		record := harvest.MessageRecord{
+			Source:    "telegram",
+			SourceURL: messageURL(chat, msg.ID),
+			Chat:      chat,
+			MessageID: msg.ID,
+			Date:      time.Unix(int64(msg.Date), 0).UTC(),
+			Sender:    senderFromPeer(msg.FromID, msg.Out, entities),
+			Outgoing:  msg.Out,
+			Kind:      "service",
+			Text:      serviceActionText(msg.Action),
+			RawAction: rawActionName(msg.Action),
+		}
+		if replyID, topID := replyInfo(msg.ReplyTo); replyID > 0 || topID > 0 {
+			record.ReplyToMessageID = replyID
+			record.ThreadTopMessageID = topID
+		}
+		return record, true
+	default:
+		return harvest.MessageRecord{}, false
+	}
+}
+
+func senderFromPeer(from tg.PeerClass, outgoing bool, entities peer.Entities) harvest.Sender {
+	if from == nil {
+		if outgoing {
+			return harvest.Sender{Type: "self", Display: "self", Self: true}
+		}
+		return harvest.Sender{}
+	}
+	switch typed := from.(type) {
+	case *tg.PeerUser:
+		user, ok := entities.User(typed.UserID)
+		if !ok {
+			return harvest.Sender{ID: typed.UserID, Type: "user", Display: strconv.FormatInt(typed.UserID, 10), Self: outgoing}
+		}
+		username, _ := user.GetUsername()
+		display := strings.TrimSpace(strings.Join([]string{user.FirstName, user.LastName}, " "))
+		if display == "" {
+			display = usernameOrID(username, user.ID)
+		}
+		return harvest.Sender{ID: user.ID, Type: "user", Username: username, Display: display, Self: user.Self || outgoing, Bot: user.Bot}
+	case *tg.PeerChat:
+		chat, ok := entities.Chat(typed.ChatID)
+		display := strconv.FormatInt(typed.ChatID, 10)
+		if ok {
+			display = chat.Title
+		}
+		return harvest.Sender{ID: typed.ChatID, Type: "basic_group", Display: display}
+	case *tg.PeerChannel:
+		channel, ok := entities.Channel(typed.ChannelID)
+		display := strconv.FormatInt(typed.ChannelID, 10)
+		username := ""
+		if ok {
+			display = channel.Title
+			username, _ = channel.GetUsername()
+		}
+		return harvest.Sender{ID: typed.ChannelID, Type: "channel", Username: username, Display: display}
+	default:
+		return harvest.Sender{ID: peerClassID(from), Type: peerType(from), Display: fmt.Sprintf("%T", from)}
+	}
+}
+
+func messageKind(media tg.MessageMediaClass) string {
+	switch typed := media.(type) {
+	case nil:
+		return "text"
+	case *tg.MessageMediaPhoto:
+		return "photo"
+	case *tg.MessageMediaDocument:
+		return documentKind(typed)
+	case *tg.MessageMediaUnsupported:
+		return "unsupported_media"
+	default:
+		return "media"
+	}
+}
+
+func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
+	switch typed := media.(type) {
+	case *tg.MessageMediaPhoto:
+		return []harvest.Attachment{{Kind: "photo"}}
+	case *tg.MessageMediaDocument:
+		attachment := harvest.Attachment{Kind: documentKind(typed)}
+		if document, ok := typed.GetDocument(); ok {
+			if doc, ok := document.(*tg.Document); ok {
+				attachment.MIMEType = doc.MimeType
+				attachment.Size = doc.Size
+				attachment.FileName = documentFileName(doc)
+			}
+		}
+		return []harvest.Attachment{attachment}
+	default:
+		return nil
+	}
+}
+
+func documentKind(media *tg.MessageMediaDocument) string {
+	if media == nil {
+		return "document"
+	}
+	if media.Voice {
+		return "voice"
+	}
+	if media.Round {
+		return "round_video"
+	}
+	if media.Video {
+		return "video"
+	}
+	if document, ok := media.GetDocument(); ok {
+		if doc, ok := document.(*tg.Document); ok {
+			for _, attr := range doc.Attributes {
+				audio, ok := attr.(*tg.DocumentAttributeAudio)
+				if !ok {
+					continue
+				}
+				if audio.Voice {
+					return "voice"
+				}
+				return "audio"
+			}
+		}
+	}
+	return "document"
+}
+
+func documentFileName(doc *tg.Document) string {
+	for _, attr := range doc.Attributes {
+		if filename, ok := attr.(*tg.DocumentAttributeFilename); ok {
+			return filename.FileName
+		}
+	}
+	return ""
+}
+
+func extractLinks(text string, entities []tg.MessageEntityClass) []string {
+	seen := map[string]struct{}{}
+	var links []string
+	add := func(link string) {
+		link = strings.TrimRight(strings.TrimSpace(link), ".,;:!?)]}")
+		if link == "" {
+			return
+		}
+		if strings.HasPrefix(strings.ToLower(link), "t.me/") || strings.HasPrefix(strings.ToLower(link), "telegram.me/") {
+			link = "https://" + link
+		}
+		if _, err := url.ParseRequestURI(link); err != nil {
+			return
+		}
+		if _, ok := seen[link]; ok {
+			return
+		}
+		seen[link] = struct{}{}
+		links = append(links, link)
+	}
+	for _, match := range linkPattern.FindAllString(text, -1) {
+		add(match)
+	}
+	for _, entity := range entities {
+		if textURL, ok := entity.(*tg.MessageEntityTextURL); ok {
+			add(textURL.URL)
+		}
+	}
+	return links
+}
+
+func replyInfo(reply tg.MessageReplyHeaderClass) (int, int) {
+	header, ok := reply.(*tg.MessageReplyHeader)
+	if !ok || header == nil {
+		return 0, 0
+	}
+	replyID, _ := header.GetReplyToMsgID()
+	topID, _ := header.GetReplyToTopID()
+	return replyID, topID
+}
+
+func serviceActionText(action tg.MessageActionClass) string {
+	if action == nil {
+		return "[service]"
+	}
+	switch action.(type) {
+	case *tg.MessageActionPinMessage:
+		return "[service] message pinned"
+	default:
+		return "[service] " + action.TypeName()
+	}
+}
+
+func rawActionName(action tg.MessageActionClass) string {
+	if action == nil {
+		return ""
+	}
+	return action.TypeName()
+}
+
+func topMessageByID(messages []tg.MessageClass, id int) tg.MessageClass {
+	for _, msg := range messages {
+		if messageID(msg) == id {
+			return msg
+		}
+	}
+	return nil
+}
+
+func messageID(msg tg.MessageClass) int {
+	switch typed := msg.(type) {
+	case *tg.Message:
+		return typed.ID
+	case *tg.MessageService:
+		return typed.ID
+	default:
+		return 0
+	}
+}
+
+func messageDate(msg tg.MessageClass) int {
+	switch typed := msg.(type) {
+	case *tg.Message:
+		return typed.Date
+	case *tg.MessageService:
+		return typed.Date
+	default:
+		return 0
+	}
+}
+
+func messageOffset(msg tg.MessageClass) (int, int, tg.PeerClass, bool) {
+	switch typed := msg.(type) {
+	case *tg.Message:
+		return typed.ID, typed.Date, typed.PeerID, typed.PeerID != nil
+	case *tg.MessageService:
+		return typed.ID, typed.Date, typed.PeerID, typed.PeerID != nil
+	default:
+		return 0, 0, nil, false
+	}
+}
+
+func inputPeerFromMessagePeer(peerClass tg.PeerClass, entities peer.Entities) tg.InputPeerClass {
+	switch typed := peerClass.(type) {
+	case *tg.PeerUser:
+		if user, ok := entities.User(typed.UserID); ok {
+			return user.AsInputPeer()
+		}
+	case *tg.PeerChat:
+		return &tg.InputPeerChat{ChatID: typed.ChatID}
+	case *tg.PeerChannel:
+		if channel, ok := entities.Channel(typed.ChannelID); ok {
+			return channel.AsInputPeer()
+		}
+	}
+	return nil
+}
+
+func peerClassID(peerClass tg.PeerClass) int64 {
+	switch peer := peerClass.(type) {
+	case *tg.PeerUser:
+		return peer.UserID
+	case *tg.PeerChat:
+		return peer.ChatID
+	case *tg.PeerChannel:
+		return peer.ChannelID
+	default:
+		return 0
+	}
+}
+
+func peerType(peerClass tg.PeerClass) string {
+	switch peerClass.(type) {
+	case *tg.PeerUser:
+		return "user"
+	case *tg.PeerChat:
+		return "basic_group"
+	case *tg.PeerChannel:
+		return "channel"
+	default:
+		return ""
+	}
+}
+
+func usernameOrID(username string, id int64) string {
+	if strings.TrimSpace(username) != "" {
+		return "@" + username
+	}
+	return strconv.FormatInt(id, 10)
+}
+
+func numericPeerCandidates(id int64) []int64 {
+	candidates := []int64{id}
+	if id < 0 {
+		candidates = append(candidates, -id)
+		const channelPrefix = int64(1000000000000)
+		if -id > channelPrefix {
+			candidates = append(candidates, -id-channelPrefix)
+		}
+	}
+	return candidates
+}
+
+func displayChannel(title string, username string, id int64) string {
+	if title != "" {
+		return title
+	}
+	return usernameOrID(username, id)
+}
+
+func messageURL(chat harvest.Chat, messageID int) string {
+	if chat.Username != "" {
+		return fmt.Sprintf("https://t.me/%s/%d", strings.TrimPrefix(chat.Username, "@"), messageID)
+	}
+	if chat.Type == "supergroup" || chat.Type == "channel" {
+		return fmt.Sprintf("https://t.me/c/%d/%d", chat.ID, messageID)
+	}
+	return ""
+}
+
+func ensureSessionDir(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
+func sessionFileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func (c *Client) newTelegramClient() *telegram.Client {
+	return telegram.NewClient(c.cfg.AppID, c.cfg.AppHash, telegram.Options{
+		SessionStorage: &session.FileStorage{Path: c.cfg.SessionPath},
+		Resolver:       dcs.Plain(dcs.PlainOptions{Dial: proxyAwareDialContext}),
+	})
+}
+
+func promptLine(out *os.File, reader *bufio.Reader, label string) (string, error) {
+	_, _ = fmt.Fprint(out, label)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func maskPhone(phone string) string {
+	trimmed := strings.TrimSpace(phone)
+	if len(trimmed) <= 4 {
+		return trimmed
+	}
+	return trimmed[:2] + strings.Repeat("*", max(0, len(trimmed)-4)) + trimmed[len(trimmed)-2:]
+}
+
+func sentCodeTypeSummary(sentCode *tg.AuthSentCode) string {
+	switch sentCode.Type.(type) {
+	case *tg.AuthSentCodeTypeApp:
+		return "Telegram app"
+	case *tg.AuthSentCodeTypeSMS:
+		return "SMS"
+	case *tg.AuthSentCodeTypeCall:
+		return "phone call"
+	case *tg.AuthSentCodeTypeFlashCall:
+		return "flash call"
+	case *tg.AuthSentCodeTypeMissedCall:
+		return "missed call"
+	case *tg.AuthSentCodeTypeEmailCode:
+		return "email"
+	case *tg.AuthSentCodeTypeSetUpEmailRequired:
+		return "email setup required"
+	case *tg.AuthSentCodeTypeFragmentSMS:
+		return "fragment SMS"
+	default:
+		return fmt.Sprintf("%T", sentCode.Type)
+	}
+}
