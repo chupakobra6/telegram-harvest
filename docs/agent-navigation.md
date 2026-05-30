@@ -33,15 +33,15 @@ Only open `messages.jsonl` when the Markdown view lacks a field needed for audit
 Search Markdown first:
 
 ```bash
-cd /Users/igor/projects/study/.study_state/telegram/agent-view
+cd .state/agent-view
 rg -n "дедлайн|deadline|домаш|дз|задал|сдать|экзамен|зачет|SmartLMS" .
 ```
 
 When the chat or topic is known, narrow the search before reading:
 
 ```bash
-rg -n "сдать|дз|deadline" chats/chat-2949606711
-rg -n "модуль|контрольная|домаш" chats/chat-2949606711/topics/topic-43745
+rg -n "сдать|дз|deadline" chats/chat-1234567890
+rg -n "модуль|контрольная|домаш" chats/chat-1234567890/topics/topic-100
 ```
 
 ## Source References
@@ -49,7 +49,7 @@ rg -n "модуль|контрольная|домаш" chats/chat-2949606711/top
 Every visible message line ends with `#message_id`. Cite Telegram facts as:
 
 ```text
-agent-view/chats/chat-2949606711/topics/topic-43745/2026-05-12.md #60634
+agent-view/chats/chat-1234567890/topics/topic-100/2026-05-12.md #456
 ```
 
 The path gives chat, topic, and date. The id points back to the raw JSONL record if audit is needed.
@@ -80,7 +80,7 @@ It keeps:
 After Telegram sync, update agent files:
 
 ```bash
-cd /Users/igor/projects/telegram-study-harvest
+cd telegram-study-harvest
 make refresh-agent-view
 ```
 

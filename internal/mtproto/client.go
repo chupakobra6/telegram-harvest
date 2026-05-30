@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chupakobra6/telegram-study-harvest/internal/config"
+	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -22,8 +24,6 @@ import (
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
-	"github.com/igor/telegram-study-harvest/internal/config"
-	"github.com/igor/telegram-study-harvest/internal/harvest"
 )
 
 const (

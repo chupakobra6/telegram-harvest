@@ -9,7 +9,7 @@ buttons, join chats, delete content, or mark chats read.
 ## Setup
 
 ```bash
-cd /Users/igor/projects/telegram-study-harvest
+cd telegram-study-harvest
 cp .env.example .env
 make setup
 make doctor
@@ -25,11 +25,11 @@ go run ./cmd/telegram-study-harvest me
 ```
 
 The CLI auto-loads `.env` from the current directory and the project root. In this local setup,
-`TG_STUDY_ALLOWED_CHATS` should contain only the study chat IDs:
+`TG_STUDY_ALLOWED_CHATS` should contain only the study chat IDs or usernames you explicitly allow:
 
 ```dotenv
-TG_STUDY_STATE_DIR=/Users/igor/projects/study/.study_state/telegram
-TG_STUDY_ALLOWED_CHATS=4894337038,2949606711,2992807434
+TG_STUDY_STATE_DIR=.state
+TG_STUDY_ALLOWED_CHATS=1234567890,@study_chat
 ```
 
 ## Commands
@@ -40,7 +40,7 @@ make setup
 make test
 make doctor
 make chats QUERY=вшэ
-make topics CHAT=2949606711
+make topics CHAT=1234567890
 make compact
 make agent-view
 make refresh-agent-view
@@ -51,7 +51,7 @@ The direct CLI is still available when a command needs flags not wrapped by `mak
 ```bash
 go run ./cmd/telegram-study-harvest print-config
 go run ./cmd/telegram-study-harvest me
-go run ./cmd/telegram-study-harvest sync --chat 2949606711 --name hse-boltalka --merged-out messages.jsonl
+go run ./cmd/telegram-study-harvest sync --chat 1234567890 --name study-main --merged-out messages.jsonl
 go run ./cmd/telegram-study-harvest compact --in messages.jsonl --out messages.toon
 go run ./cmd/telegram-study-harvest agent-view --in messages.jsonl --out-dir agent-view
 make refresh-agent-view
@@ -77,22 +77,21 @@ Start a full history rebuild with `--all --reset`. Use `--reset-merged` only on 
 when rebuilding a shared `messages.jsonl`:
 
 ```bash
-go run ./cmd/telegram-study-harvest sync --chat 4894337038 --name hse-mptshniki --all --reset --reset-merged --batch-size 100 --merged-out messages.jsonl
-go run ./cmd/telegram-study-harvest sync --chat 2949606711 --name hse-boltalka --all --reset --batch-size 100 --merged-out messages.jsonl
-go run ./cmd/telegram-study-harvest sync --chat 2992807434 --name hse-psa-2025 --all --reset --batch-size 100 --merged-out messages.jsonl
+go run ./cmd/telegram-study-harvest sync --chat 1234567890 --name study-main --all --reset --reset-merged --batch-size 100 --merged-out messages.jsonl
+go run ./cmd/telegram-study-harvest sync --chat @study_chat --name study-chat --all --reset --batch-size 100 --merged-out messages.jsonl
 ```
 
 Full sync prints progress after each committed batch. If it is interrupted, the state file keeps
 `backfill.next_offset_id`; continue without `--reset`:
 
 ```bash
-go run ./cmd/telegram-study-harvest sync --chat 2949606711 --name hse-boltalka --all --batch-size 100 --merged-out messages.jsonl
+go run ./cmd/telegram-study-harvest sync --chat 1234567890 --name study-main --all --batch-size 100 --merged-out messages.jsonl
 ```
 
 After `complete=true`, weekly incremental sync uses `last_id`:
 
 ```bash
-go run ./cmd/telegram-study-harvest sync --chat 2949606711 --name hse-boltalka --merged-out messages.jsonl
+go run ./cmd/telegram-study-harvest sync --chat 1234567890 --name study-main --merged-out messages.jsonl
 ```
 
 Forum chats include topic metadata on message records. Service messages that Telegram exposes
@@ -121,8 +120,8 @@ per-chat, per-topic, per-day files:
 agent-view/
   README.md
   all-recent.md
-  chats/chat-2949606711/README.md
-  chats/chat-2949606711/topics/topic-3/2026-05-12.md
+  chats/chat-1234567890/README.md
+  chats/chat-1234567890/topics/topic-3/2026-05-12.md
 ```
 
 The Markdown view is optimized for context economy: it skips service messages by default and omits

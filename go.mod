@@ -1,4 +1,4 @@
-module github.com/igor/telegram-study-harvest
+module github.com/chupakobra6/telegram-study-harvest
 
 go 1.26.0
 

@@ -66,7 +66,7 @@ func TestLoadDotEnvDoesNotOverrideExistingEnv(t *testing.T) {
 }
 
 func TestLoadAllowedChats(t *testing.T) {
-	t.Setenv("TG_STUDY_ALLOWED_CHATS", "4894337038, @study_chat 4894337038")
+	t.Setenv("TG_STUDY_ALLOWED_CHATS", "1234567890, @study_chat 1234567890")
 
 	cfg, err := Load()
 	if err != nil {
@@ -75,7 +75,7 @@ func TestLoadAllowedChats(t *testing.T) {
 	if got := cfg.AllowedChatCount(); got != 2 {
 		t.Fatalf("AllowedChatCount = %d", got)
 	}
-	if !cfg.ChatAllowed("4894337038") {
+	if !cfg.ChatAllowed("1234567890") {
 		t.Fatalf("expected numeric chat to be allowed")
 	}
 	if !cfg.ChatAllowed("study_chat") {

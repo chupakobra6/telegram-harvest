@@ -3,8 +3,8 @@ package mtproto
 import (
 	"testing"
 
+	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
 	"github.com/gotd/td/tg"
-	"github.com/igor/telegram-study-harvest/internal/harvest"
 )
 
 func TestNumericPeerCandidatesSupportsTelegramChannelIDs(t *testing.T) {
@@ -87,13 +87,13 @@ func TestMessageURLAndMaskPhone(t *testing.T) {
 	if got := messageURL(harvest.Chat{Username: "study_group"}, 42); got != "https://t.me/study_group/42" {
 		t.Fatalf("username url = %s", got)
 	}
-	if got := messageURL(harvest.Chat{ID: 2949606711, Type: "supergroup"}, 60634); got != "https://t.me/c/2949606711/60634" {
+	if got := messageURL(harvest.Chat{ID: 1234567890, Type: "supergroup"}, 456); got != "https://t.me/c/1234567890/456" {
 		t.Fatalf("private supergroup url = %s", got)
 	}
 	if got := messageURL(harvest.Chat{ID: 1, Type: "basic_group"}, 7); got != "" {
 		t.Fatalf("basic group url = %s", got)
 	}
-	if got := maskPhone("+79999401317"); got != "+7********17" {
+	if got := maskPhone("+10000000017"); got != "+1********17" {
 		t.Fatalf("masked phone = %s", got)
 	}
 	if got := maskPhone("1234"); got != "1234" {

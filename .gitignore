@@ -2,5 +2,4 @@
 .sessions/
 .state/
 artifacts/
-telegram-study-harvest
-
+/telegram-study-harvest

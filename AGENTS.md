@@ -2,8 +2,8 @@
 
 ## Project Overview
 - Local Go CLI for read-only Telegram study chat harvesting through MTProto user authorization.
-- The tool exists to supply `/Users/igor/projects/study` with raw Telegram data for later assignment extraction.
-- Keep it separate from git for now unless Igor explicitly asks to initialize or move it.
+- The tool exports selected study chat data for downstream study automation and agent context.
+- Keep runtime credentials, sessions, state, dumps, and generated agent views out of git.
 - Runtime scope is the configured study-chat allowlist; do not dump or persist unrelated account dialogs.
 
 ## Safety
@@ -11,7 +11,7 @@
 - Keep Telegram API calls sequential and paced. Do not add concurrent history crawlers.
 - Treat `.env`, `.sessions/`, `.state/`, dumps, and chat exports as private local data.
 - Never print app hashes, passwords, session data, or full phone numbers.
-- Do not keep broad dialog dumps in the repo-local `.state/`; only study chat streams/state belong in `/Users/igor/projects/study/.study_state/telegram`.
+- Do not keep broad dialog dumps in the repo-local `.state/`; only explicitly allowed study chat streams belong in the configured state directory.
 
 ## Commands
 - Install/update dependencies: `go mod tidy`
@@ -30,7 +30,7 @@
 - Markdown navigation for agents: `go run ./cmd/telegram-study-harvest agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
 
 ## Code Policy
-- Prefer nearby patterns from `/Users/igor/projects/telegram-bot-e2e-test-tool`, especially env loading, MTProto auth, runtime lock, and flood-wait handling.
+- Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.
 - Keep JSONL output stable and source-rich: every record should include chat, message id, date, sender, text/media metadata, and Telegram source pointer.
 - Treat `.toon` outputs as rebuildable agent views only; JSONL remains the canonical lossless dump.
 - Treat `agent-view/README.md` as the first file agents should open. It points to `all-recent.md`, then chat/topic/day Markdown files so agents do not read raw JSONL by default.
