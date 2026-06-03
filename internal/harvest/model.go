@@ -53,6 +53,8 @@ type Attachment struct {
 	FileName string `json:"file_name,omitempty"`
 	MIMEType string `json:"mime_type,omitempty"`
 	Size     int64  `json:"size,omitempty"`
+	Title    string `json:"title,omitempty"`
+	URL      string `json:"url,omitempty"`
 }
 
 type MessageRecord struct {

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
+	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 )
 
@@ -80,6 +81,92 @@ func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing
 		if got[i] != want[i] {
 			t.Fatalf("links[%d]=%q want %q; all=%#v", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestMediaLinksAndAttachmentsKeepUsefulNonDownloadedMetadata(t *testing.T) {
+	webpage := &tg.MessageMediaWebPage{
+		Webpage: &tg.WebPage{URL: "https://edu.hse.ru/mod/page/view.php?id=10", Title: "Task page"},
+	}
+	if got := extractMediaLinks(webpage); len(got) != 1 || got[0] != "https://edu.hse.ru/mod/page/view.php?id=10" {
+		t.Fatalf("webpage media links=%#v", got)
+	}
+	webpageAttachments := extractAttachments(webpage)
+	if len(webpageAttachments) != 1 ||
+		webpageAttachments[0].Kind != "webpage" ||
+		webpageAttachments[0].Title != "Task page" ||
+		webpageAttachments[0].URL != "https://edu.hse.ru/mod/page/view.php?id=10" {
+		t.Fatalf("webpage attachments=%#v", webpageAttachments)
+	}
+
+	cases := []struct {
+		name  string
+		media tg.MessageMediaClass
+		kind  string
+		title string
+	}{
+		{
+			name:  "poll",
+			media: &tg.MessageMediaPoll{Poll: tg.Poll{Question: tg.TextWithEntities{Text: "Readiness?"}}},
+			kind:  "poll",
+			title: "Readiness?",
+		},
+		{
+			name:  "venue",
+			media: &tg.MessageMediaVenue{Title: "Lecture hall", Address: "Campus"},
+			kind:  "venue",
+			title: "Lecture hall",
+		},
+		{
+			name:  "contact",
+			media: &tg.MessageMediaContact{FirstName: "Ivan", LastName: "Ivanov"},
+			kind:  "contact",
+			title: "Ivan Ivanov",
+		},
+		{
+			name:  "dice",
+			media: &tg.MessageMediaDice{Emoticon: "dice", Value: 6},
+			kind:  "dice",
+			title: "dice",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractAttachments(tc.media)
+			if len(got) != 1 || got[0].Kind != tc.kind || got[0].Title != tc.title {
+				t.Fatalf("attachments=%#v want kind=%q title=%q", got, tc.kind, tc.title)
+			}
+		})
+	}
+}
+
+func TestNormalizeRecordMergesTextAndWebpageLinks(t *testing.T) {
+	record, ok := normalizeRecord(
+		&tg.Message{
+			ID:      10,
+			Date:    1,
+			Message: "read https://example.com/a",
+			Media: &tg.MessageMediaWebPage{
+				Webpage: &tg.WebPage{URL: "https://edu.hse.ru/mod/page/view.php?id=10", Title: "Task page"},
+			},
+		},
+		harvest.Chat{ID: 1, Display: "Study"},
+		peer.Entities{},
+	)
+	if !ok {
+		t.Fatal("record was not normalized")
+	}
+	wantLinks := []string{"https://example.com/a", "https://edu.hse.ru/mod/page/view.php?id=10"}
+	if len(record.Links) != len(wantLinks) {
+		t.Fatalf("links=%#v want %#v", record.Links, wantLinks)
+	}
+	for i := range wantLinks {
+		if record.Links[i] != wantLinks[i] {
+			t.Fatalf("links[%d]=%q want %q; all=%#v", i, record.Links[i], wantLinks[i], record.Links)
+		}
+	}
+	if len(record.Attachments) != 1 || record.Attachments[0].Kind != "webpage" {
+		t.Fatalf("attachments=%#v", record.Attachments)
 	}
 }
 

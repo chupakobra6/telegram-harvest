@@ -195,6 +195,10 @@ func displayAttachments(attachments []Attachment) string {
 		label := attachment.Kind
 		if attachment.FileName != "" {
 			label += ":" + attachment.FileName
+		} else if attachment.Title != "" {
+			label += ":" + attachment.Title
+		} else if attachment.URL != "" {
+			label += ":" + attachment.URL
 		} else if attachment.MIMEType != "" {
 			label += ":" + attachment.MIMEType
 		}

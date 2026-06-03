@@ -1048,7 +1048,7 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			Text:        strings.TrimSpace(msg.Message),
 			Pinned:      msg.Pinned,
 			Views:       msg.Views,
-			Links:       extractLinks(msg.Message, msg.Entities),
+			Links:       mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media)),
 			Attachments: extractAttachments(msg.Media),
 		}
 		if replyID, topID := replyInfo(msg.ReplyTo); replyID > 0 || topID > 0 {
@@ -1127,6 +1127,36 @@ func messageKind(media tg.MessageMediaClass) string {
 		return "photo"
 	case *tg.MessageMediaDocument:
 		return documentKind(typed)
+	case *tg.MessageMediaWebPage:
+		return "webpage"
+	case *tg.MessageMediaGeo:
+		return "geo"
+	case *tg.MessageMediaGeoLive:
+		return "geo_live"
+	case *tg.MessageMediaVenue:
+		return "venue"
+	case *tg.MessageMediaContact:
+		return "contact"
+	case *tg.MessageMediaPoll:
+		return "poll"
+	case *tg.MessageMediaGame:
+		return "game"
+	case *tg.MessageMediaInvoice:
+		return "invoice"
+	case *tg.MessageMediaDice:
+		return "dice"
+	case *tg.MessageMediaStory:
+		return "story"
+	case *tg.MessageMediaGiveaway:
+		return "giveaway"
+	case *tg.MessageMediaGiveawayResults:
+		return "giveaway_results"
+	case *tg.MessageMediaPaidMedia:
+		return "paid_media"
+	case *tg.MessageMediaToDo:
+		return "todo"
+	case *tg.MessageMediaVideoStream:
+		return "video_stream"
 	case *tg.MessageMediaUnsupported:
 		return "unsupported_media"
 	default:
@@ -1148,6 +1178,43 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 			}
 		}
 		return []harvest.Attachment{attachment}
+	case *tg.MessageMediaWebPage:
+		link, title := webPageMetadata(typed.Webpage)
+		return []harvest.Attachment{{Kind: "webpage", Title: title, URL: link}}
+	case *tg.MessageMediaGeo:
+		return []harvest.Attachment{{Kind: "geo"}}
+	case *tg.MessageMediaGeoLive:
+		return []harvest.Attachment{{Kind: "geo_live"}}
+	case *tg.MessageMediaVenue:
+		return []harvest.Attachment{{Kind: "venue", Title: firstNonEmpty(typed.Title, typed.Address)}}
+	case *tg.MessageMediaContact:
+		return []harvest.Attachment{{Kind: "contact", Title: strings.TrimSpace(strings.Join([]string{typed.FirstName, typed.LastName}, " "))}}
+	case *tg.MessageMediaPoll:
+		attachments := []harvest.Attachment{{Kind: "poll", Title: typed.Poll.Question.Text}}
+		if attached, ok := typed.GetAttachedMedia(); ok {
+			attachments = append(attachments, extractAttachments(attached)...)
+		}
+		return attachments
+	case *tg.MessageMediaGame:
+		return []harvest.Attachment{{Kind: "game", Title: firstNonEmpty(typed.Game.Title, typed.Game.ShortName)}}
+	case *tg.MessageMediaInvoice:
+		return []harvest.Attachment{{Kind: "invoice", Title: typed.Title}}
+	case *tg.MessageMediaDice:
+		return []harvest.Attachment{{Kind: "dice", Title: typed.Emoticon}}
+	case *tg.MessageMediaStory:
+		return []harvest.Attachment{{Kind: "story"}}
+	case *tg.MessageMediaGiveaway:
+		return []harvest.Attachment{{Kind: "giveaway"}}
+	case *tg.MessageMediaGiveawayResults:
+		return []harvest.Attachment{{Kind: "giveaway_results"}}
+	case *tg.MessageMediaPaidMedia:
+		return []harvest.Attachment{{Kind: "paid_media"}}
+	case *tg.MessageMediaToDo:
+		return []harvest.Attachment{{Kind: "todo", Title: typed.Todo.Title.Text}}
+	case *tg.MessageMediaVideoStream:
+		return []harvest.Attachment{{Kind: "video_stream"}}
+	case *tg.MessageMediaUnsupported:
+		return []harvest.Attachment{{Kind: "unsupported_media"}}
 	default:
 		return nil
 	}
@@ -1193,34 +1260,92 @@ func documentFileName(doc *tg.Document) string {
 }
 
 func extractLinks(text string, entities []tg.MessageEntityClass) []string {
-	seen := map[string]struct{}{}
 	var links []string
-	add := func(link string) {
-		link = strings.TrimRight(strings.TrimSpace(link), ".,;:!?)]}")
-		if link == "" {
-			return
-		}
-		if strings.HasPrefix(strings.ToLower(link), "t.me/") || strings.HasPrefix(strings.ToLower(link), "telegram.me/") {
-			link = "https://" + link
-		}
-		if _, err := url.ParseRequestURI(link); err != nil {
-			return
-		}
-		if _, ok := seen[link]; ok {
-			return
-		}
-		seen[link] = struct{}{}
-		links = append(links, link)
-	}
 	for _, match := range linkPattern.FindAllString(text, -1) {
-		add(match)
+		links = appendNormalizedLink(links, match)
 	}
 	for _, entity := range entities {
 		if textURL, ok := entity.(*tg.MessageEntityTextURL); ok {
-			add(textURL.URL)
+			links = appendNormalizedLink(links, textURL.URL)
 		}
 	}
 	return links
+}
+
+func extractMediaLinks(media tg.MessageMediaClass) []string {
+	switch typed := media.(type) {
+	case *tg.MessageMediaWebPage:
+		link, _ := webPageMetadata(typed.Webpage)
+		if link == "" {
+			return nil
+		}
+		return []string{link}
+	case *tg.MessageMediaPoll:
+		if attached, ok := typed.GetAttachedMedia(); ok {
+			return extractMediaLinks(attached)
+		}
+	}
+	return nil
+}
+
+func mergeLinks(groups ...[]string) []string {
+	var links []string
+	for _, group := range groups {
+		for _, link := range group {
+			links = appendNormalizedLink(links, link)
+		}
+	}
+	return links
+}
+
+func appendNormalizedLink(links []string, link string) []string {
+	normalized := normalizeLink(link)
+	if normalized == "" {
+		return links
+	}
+	for _, existing := range links {
+		if existing == normalized {
+			return links
+		}
+	}
+	return append(links, normalized)
+}
+
+func normalizeLink(link string) string {
+	link = strings.TrimRight(strings.TrimSpace(link), ".,;:!?)]}")
+	if link == "" {
+		return ""
+	}
+	lower := strings.ToLower(link)
+	if strings.HasPrefix(lower, "t.me/") || strings.HasPrefix(lower, "telegram.me/") {
+		link = "https://" + link
+	}
+	if _, err := url.ParseRequestURI(link); err != nil {
+		return ""
+	}
+	return link
+}
+
+func webPageMetadata(webpage tg.WebPageClass) (string, string) {
+	switch typed := webpage.(type) {
+	case *tg.WebPage:
+		return typed.URL, firstNonEmpty(typed.Title, typed.SiteName, typed.DisplayURL)
+	case *tg.WebPagePending:
+		return typed.URL, ""
+	case *tg.WebPageEmpty:
+		return typed.URL, ""
+	default:
+		return "", ""
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func replyInfo(reply tg.MessageReplyHeaderClass) (int, int) {

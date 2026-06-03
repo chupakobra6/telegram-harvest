@@ -13,7 +13,7 @@ func TestWriteAgentMarkdownViewSplitsChatsTopicsAndDays(t *testing.T) {
 	output := filepath.Join(dir, "agent-view")
 	writeFile(t, input, strings.Join([]string{
 		`{"source":"telegram","chat":{"id":100,"display":"Main Study"},"message_id":1,"date":"2026-05-10T21:00:00Z","sender":{"username":"student"},"kind":"text","text":"basic chat message","reply_to_message_id":99}`,
-		`{"source":"telegram","chat":{"id":200,"display":"Forum Study","forum":true},"message_id":2,"date":"2026-05-11T08:00:00Z","sender":{"display":"Teacher"},"kind":"text","topic":{"id":7,"title":"Math"},"thread_top_message_id":7,"text":"homework by Friday","links":["https://example.com/task"],"attachments":[{"kind":"document","file_name":"task.pdf"}]}`,
+		`{"source":"telegram","chat":{"id":200,"display":"Forum Study","forum":true},"message_id":2,"date":"2026-05-11T08:00:00Z","sender":{"display":"Teacher"},"kind":"text","topic":{"id":7,"title":"Math"},"thread_top_message_id":7,"text":"homework by Friday","links":["https://example.com/task"],"attachments":[{"kind":"document","file_name":"task.pdf"},{"kind":"webpage","title":"Task page","url":"https://example.com/task"}]}`,
 		`{"source":"telegram","chat":{"id":200,"display":"Forum Study","forum":true},"message_id":3,"date":"2026-05-11T09:00:00Z","sender":{"display":"Teacher"},"kind":"text","topic":{"id":8,"title":"Admin"},"thread_top_message_id":8,"text":"admin message"}`,
 		`{"source":"telegram","chat":{"id":200,"display":"Forum Study","forum":true},"message_id":4,"date":"2026-05-11T10:00:00Z","sender":{"display":"Teacher"},"kind":"service","topic":{"id":7,"title":"Math"},"thread_top_message_id":7,"text":"[service] pinned"}`,
 	}, "\n")+"\n")
@@ -55,7 +55,8 @@ func TestWriteAgentMarkdownViewSplitsChatsTopicsAndDays(t *testing.T) {
 		t.Fatalf("expected admin day file: %v", err)
 	}
 	math := readFile(t, mathDay)
-	if !strings.Contains(math, "homework by Friday") || !strings.Contains(math, "files: document:task.pdf") {
+	if !strings.Contains(math, "homework by Friday") ||
+		!strings.Contains(math, "files: document:task.pdf; webpage:Task page") {
 		t.Fatalf("math day missing useful content:\n%s", math)
 	}
 	if strings.Contains(math, "reply_to_message_id") || strings.Contains(math, "thread_top_message_id") {
