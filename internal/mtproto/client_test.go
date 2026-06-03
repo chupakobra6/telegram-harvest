@@ -84,7 +84,7 @@ func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing
 	}
 }
 
-func TestMediaLinksAndAttachmentsKeepUsefulNonDownloadedMetadata(t *testing.T) {
+func TestMediaLinksAndAttachmentsKeepAcademicMaterialsOnly(t *testing.T) {
 	webpage := &tg.MessageMediaWebPage{
 		Webpage: &tg.WebPage{URL: "https://edu.hse.ru/mod/page/view.php?id=10", Title: "Task page"},
 	}
@@ -99,42 +99,76 @@ func TestMediaLinksAndAttachmentsKeepUsefulNonDownloadedMetadata(t *testing.T) {
 		t.Fatalf("webpage attachments=%#v", webpageAttachments)
 	}
 
+	document := &tg.MessageMediaDocument{}
+	document.SetDocument(
+		&tg.Document{
+			MimeType: "application/pdf",
+			Size:     123,
+			Attributes: []tg.DocumentAttributeClass{
+				&tg.DocumentAttributeFilename{FileName: "task.pdf"},
+			},
+		},
+	)
+	documentAttachments := extractAttachments(document)
+	if len(documentAttachments) != 1 ||
+		documentAttachments[0].Kind != "document" ||
+		documentAttachments[0].FileName != "task.pdf" ||
+		documentAttachments[0].MIMEType != "application/pdf" ||
+		documentAttachments[0].Size != 123 {
+		t.Fatalf("document attachments=%#v", documentAttachments)
+	}
+
+	if photoAttachments := extractAttachments(&tg.MessageMediaPhoto{}); len(photoAttachments) != 1 || photoAttachments[0].Kind != "photo" {
+		t.Fatalf("photo attachments=%#v", photoAttachments)
+	}
+}
+
+func TestExtractAttachmentsIgnoresNonAcademicTelegramMedia(t *testing.T) {
 	cases := []struct {
 		name  string
 		media tg.MessageMediaClass
-		kind  string
-		title string
 	}{
 		{
-			name:  "poll",
+			name:  "poll without attached material",
 			media: &tg.MessageMediaPoll{Poll: tg.Poll{Question: tg.TextWithEntities{Text: "Readiness?"}}},
-			kind:  "poll",
-			title: "Readiness?",
 		},
 		{
 			name:  "venue",
 			media: &tg.MessageMediaVenue{Title: "Lecture hall", Address: "Campus"},
-			kind:  "venue",
-			title: "Lecture hall",
 		},
 		{
 			name:  "contact",
 			media: &tg.MessageMediaContact{FirstName: "Ivan", LastName: "Ivanov"},
-			kind:  "contact",
-			title: "Ivan Ivanov",
 		},
 		{
 			name:  "dice",
 			media: &tg.MessageMediaDice{Emoticon: "dice", Value: 6},
-			kind:  "dice",
-			title: "dice",
+		},
+		{
+			name:  "game",
+			media: &tg.MessageMediaGame{},
+		},
+		{
+			name:  "invoice",
+			media: &tg.MessageMediaInvoice{Title: "Payment"},
+		},
+		{
+			name:  "voice",
+			media: &tg.MessageMediaDocument{Voice: true},
+		},
+		{
+			name:  "video",
+			media: &tg.MessageMediaDocument{Video: true},
+		},
+		{
+			name:  "unsupported",
+			media: &tg.MessageMediaUnsupported{},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := extractAttachments(tc.media)
-			if len(got) != 1 || got[0].Kind != tc.kind || got[0].Title != tc.title {
-				t.Fatalf("attachments=%#v want kind=%q title=%q", got, tc.kind, tc.title)
+			if got := extractAttachments(tc.media); len(got) != 0 {
+				t.Fatalf("attachments=%#v; want no academic material attachment", got)
 			}
 		})
 	}

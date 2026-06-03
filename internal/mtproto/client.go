@@ -1169,7 +1169,11 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 	case *tg.MessageMediaPhoto:
 		return []harvest.Attachment{{Kind: "photo"}}
 	case *tg.MessageMediaDocument:
-		attachment := harvest.Attachment{Kind: documentKind(typed)}
+		kind := documentKind(typed)
+		if kind != "document" {
+			return nil
+		}
+		attachment := harvest.Attachment{Kind: kind}
 		if document, ok := typed.GetDocument(); ok {
 			if doc, ok := document.(*tg.Document); ok {
 				attachment.MIMEType = doc.MimeType
@@ -1180,41 +1184,15 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 		return []harvest.Attachment{attachment}
 	case *tg.MessageMediaWebPage:
 		link, title := webPageMetadata(typed.Webpage)
-		return []harvest.Attachment{{Kind: "webpage", Title: title, URL: link}}
-	case *tg.MessageMediaGeo:
-		return []harvest.Attachment{{Kind: "geo"}}
-	case *tg.MessageMediaGeoLive:
-		return []harvest.Attachment{{Kind: "geo_live"}}
-	case *tg.MessageMediaVenue:
-		return []harvest.Attachment{{Kind: "venue", Title: firstNonEmpty(typed.Title, typed.Address)}}
-	case *tg.MessageMediaContact:
-		return []harvest.Attachment{{Kind: "contact", Title: strings.TrimSpace(strings.Join([]string{typed.FirstName, typed.LastName}, " "))}}
-	case *tg.MessageMediaPoll:
-		attachments := []harvest.Attachment{{Kind: "poll", Title: typed.Poll.Question.Text}}
-		if attached, ok := typed.GetAttachedMedia(); ok {
-			attachments = append(attachments, extractAttachments(attached)...)
+		if link == "" && title == "" {
+			return nil
 		}
-		return attachments
-	case *tg.MessageMediaGame:
-		return []harvest.Attachment{{Kind: "game", Title: firstNonEmpty(typed.Game.Title, typed.Game.ShortName)}}
-	case *tg.MessageMediaInvoice:
-		return []harvest.Attachment{{Kind: "invoice", Title: typed.Title}}
-	case *tg.MessageMediaDice:
-		return []harvest.Attachment{{Kind: "dice", Title: typed.Emoticon}}
-	case *tg.MessageMediaStory:
-		return []harvest.Attachment{{Kind: "story"}}
-	case *tg.MessageMediaGiveaway:
-		return []harvest.Attachment{{Kind: "giveaway"}}
-	case *tg.MessageMediaGiveawayResults:
-		return []harvest.Attachment{{Kind: "giveaway_results"}}
-	case *tg.MessageMediaPaidMedia:
-		return []harvest.Attachment{{Kind: "paid_media"}}
-	case *tg.MessageMediaToDo:
-		return []harvest.Attachment{{Kind: "todo", Title: typed.Todo.Title.Text}}
-	case *tg.MessageMediaVideoStream:
-		return []harvest.Attachment{{Kind: "video_stream"}}
-	case *tg.MessageMediaUnsupported:
-		return []harvest.Attachment{{Kind: "unsupported_media"}}
+		return []harvest.Attachment{{Kind: "webpage", Title: title, URL: link}}
+	case *tg.MessageMediaPoll:
+		if attached, ok := typed.GetAttachedMedia(); ok {
+			return extractAttachments(attached)
+		}
+		return nil
 	default:
 		return nil
 	}
