@@ -3,3 +3,9 @@
 .state/
 artifacts/
 /telegram-study-harvest
+messages.jsonl
+messages.toon
+agent-view/
+media/
+media-refresh/
+*.log

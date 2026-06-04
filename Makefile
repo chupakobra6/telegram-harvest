@@ -52,5 +52,6 @@ agent-view:
 refresh-agent-view: agent-view compact
 
 clean:
-	rm -rf .state artifacts telegram-study-harvest
+	rm -rf .state artifacts telegram-study-harvest agent-view media media-refresh
+	rm -f messages.jsonl messages.toon *.log
 	rm -f .sessions/runtime.lock
