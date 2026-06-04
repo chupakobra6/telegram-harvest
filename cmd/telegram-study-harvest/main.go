@@ -328,11 +328,25 @@ func runMe(cfg config.Config, client *mtproto.Client, args []string, out io.Writ
 				fmt.Fprintf(out, "display=%s\n", profile.Display)
 			}
 			if profile.Phone != "" {
-				fmt.Fprintf(out, "phone=+%s\n", profile.Phone)
+				fmt.Fprintf(out, "phone=%s\n", maskCLIPhone(profile.Phone))
 			}
 			return nil
 		})
 	})
+}
+
+func maskCLIPhone(phone string) string {
+	trimmed := strings.TrimSpace(phone)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "+") {
+		trimmed = "+" + trimmed
+	}
+	if len(trimmed) <= 5 {
+		return trimmed
+	}
+	return trimmed[:2] + strings.Repeat("*", len(trimmed)-4) + trimmed[len(trimmed)-2:]
 }
 
 func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {

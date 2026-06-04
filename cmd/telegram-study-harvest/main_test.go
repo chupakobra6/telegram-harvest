@@ -41,6 +41,15 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 	}
 }
 
+func TestMaskCLIPhone(t *testing.T) {
+	if got := maskCLIPhone("10000000017"); got != "+1********17" {
+		t.Fatalf("masked phone = %s", got)
+	}
+	if got := maskCLIPhone("+1234"); got != "+1234" {
+		t.Fatalf("short masked phone = %s", got)
+	}
+}
+
 func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
