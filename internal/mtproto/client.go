@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"mime"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,8 +31,10 @@ const (
 	defaultRPCTimeout      = 30 * time.Second
 	defaultDialogTimeout   = 45 * time.Second
 	defaultHistoryTimeout  = 45 * time.Second
+	defaultDownloadTimeout = 2 * time.Minute
 	maxFloodWaitRetries    = 3
 	defaultDialogBatchSize = 100
+	defaultMaxMediaBytes   = 50 * 1024 * 1024
 )
 
 var linkPattern = regexp.MustCompile(`(?i)\b(?:https?://|t\.me/|telegram\.me/)[^\s<>()"'` + "`" + `]+`)
@@ -45,6 +48,7 @@ type AuthStatus struct {
 }
 
 type Session struct {
+	client     *telegram.Client
 	raw        *tg.Client
 	rpcSpacing time.Duration
 
@@ -175,6 +179,7 @@ func (c *Client) RunAuthorized(ctx context.Context, fn func(context.Context, *Se
 			return unauthorizedRuntimeError(c.cfg.SessionPath)
 		}
 		session := &Session{
+			client:      client,
 			raw:         tg.NewClient(client),
 			rpcSpacing:  c.cfg.RPCSpacing,
 			dialogCache: map[string]resolvedTarget{},
@@ -382,6 +387,7 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 			if opts.MinID > 0 && record.MessageID <= opts.MinID {
 				continue
 			}
+			s.downloadRecordMedia(ctx, msgClass, &record, opts)
 			records = append(records, record)
 			if minSeenID == 0 || record.MessageID < minSeenID {
 				minSeenID = record.MessageID
@@ -478,6 +484,7 @@ func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarge
 			if opts.MinID > 0 && record.MessageID <= opts.MinID {
 				continue
 			}
+			s.downloadRecordMedia(ctx, msgClass, &record, opts)
 			batchRecords = append(batchRecords, record)
 		}
 		sort.Slice(batchRecords, func(i, j int) bool { return batchRecords[i].MessageID < batchRecords[j].MessageID })
@@ -1196,6 +1203,240 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 	default:
 		return nil
 	}
+}
+
+func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
+	if !opts.DownloadMedia || strings.TrimSpace(opts.MediaDir) == "" || record == nil || len(record.Attachments) == 0 {
+		return
+	}
+	msg, ok := msgClass.(*tg.Message)
+	if !ok {
+		return
+	}
+	switch typed := msg.Media.(type) {
+	case *tg.MessageMediaPhoto:
+		if len(record.Attachments) == 0 {
+			return
+		}
+		location, fileName, ok := photoDownload(typed)
+		if !ok {
+			record.Attachments[0].DownloadError = "photo location is unavailable"
+			return
+		}
+		record.Attachments[0].MIMEType = "image/jpeg"
+		record.Attachments[0].FileName = fileName
+		s.downloadAttachment(ctx, record, 0, location, fileName, opts)
+	case *tg.MessageMediaDocument:
+		if len(record.Attachments) == 0 {
+			return
+		}
+		document, ok := typed.GetDocument()
+		if !ok {
+			record.Attachments[0].DownloadError = "document location is unavailable"
+			return
+		}
+		doc, ok := document.(*tg.Document)
+		if !ok {
+			record.Attachments[0].DownloadError = "document location is unavailable"
+			return
+		}
+		fileName := documentFileName(doc)
+		if strings.TrimSpace(fileName) == "" {
+			fileName = fallbackFileName("document", record.MessageID, doc.MimeType)
+		}
+		record.Attachments[0].MIMEType = doc.MimeType
+		record.Attachments[0].Size = doc.Size
+		record.Attachments[0].FileName = fileName
+		if maxBytes := maxMediaBytes(opts); maxBytes > 0 && doc.Size > maxBytes {
+			record.Attachments[0].DownloadError = fmt.Sprintf("skipped: file size %d exceeds limit %d", doc.Size, maxBytes)
+			return
+		}
+		s.downloadAttachment(ctx, record, 0, doc.AsInputDocumentFileLocation(), fileName, opts)
+	case *tg.MessageMediaPoll:
+		if attached, ok := typed.GetAttachedMedia(); ok {
+			copyMsg := *msg
+			copyMsg.Media = attached
+			s.downloadRecordMedia(ctx, &copyMsg, record, opts)
+		}
+	}
+}
+
+func (s *Session) downloadAttachment(
+	ctx context.Context,
+	record *harvest.MessageRecord,
+	index int,
+	location tg.InputFileLocationClass,
+	fileName string,
+	opts harvest.HistoryOptions,
+) {
+	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
+		return
+	}
+	target := mediaTargetPath(opts.MediaDir, *record, index, fileName)
+	record.Attachments[index].LocalPath = target
+	if existing, err := os.Stat(target); err == nil && existing.Size() > 0 {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		record.Attachments[index].DownloadError = fmt.Sprintf("prepare media dir: %v", err)
+		return
+	}
+	if err := s.beforeRPC(ctx); err != nil {
+		record.Attachments[index].DownloadError = err.Error()
+		return
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
+	defer cancel()
+	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, target); err != nil {
+		_ = os.Remove(target)
+		record.Attachments[index].DownloadError = err.Error()
+	}
+}
+
+func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, bool) {
+	if media == nil {
+		return nil, "", false
+	}
+	photoClass, ok := media.GetPhoto()
+	if !ok {
+		return nil, "", false
+	}
+	photo, ok := photoClass.AsNotEmpty()
+	if !ok {
+		return nil, "", false
+	}
+	thumbSize := bestPhotoThumbSize(photo)
+	if thumbSize == "" {
+		return nil, "", false
+	}
+	fileName := fmt.Sprintf("photo-%d-%s.jpg", photo.ID, time.Unix(int64(photo.Date), 0).UTC().Format("20060102T150405"))
+	return &tg.InputPhotoFileLocation{
+		ID:            photo.ID,
+		AccessHash:    photo.AccessHash,
+		FileReference: photo.FileReference,
+		ThumbSize:     thumbSize,
+	}, fileName, true
+}
+
+func bestPhotoThumbSize(photo *tg.Photo) string {
+	if photo == nil {
+		return ""
+	}
+	bestType := ""
+	bestArea := -1
+	for _, size := range photo.Sizes {
+		width, height, ok := photoSizeDimensions(size)
+		if !ok {
+			continue
+		}
+		area := width * height
+		if area > bestArea {
+			bestArea = area
+			bestType = size.GetType()
+		}
+	}
+	return bestType
+}
+
+func photoSizeDimensions(size tg.PhotoSizeClass) (int, int, bool) {
+	switch typed := size.(type) {
+	case *tg.PhotoSize:
+		return typed.W, typed.H, true
+	case *tg.PhotoCachedSize:
+		return typed.W, typed.H, true
+	case *tg.PhotoSizeProgressive:
+		return typed.W, typed.H, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func maxMediaBytes(opts harvest.HistoryOptions) int64 {
+	if opts.MaxMediaBytes > 0 {
+		return opts.MaxMediaBytes
+	}
+	return defaultMaxMediaBytes
+}
+
+func mediaTargetPath(mediaDir string, record harvest.MessageRecord, index int, fileName string) string {
+	day := record.Date.In(time.FixedZone("Europe/Moscow", 3*60*60)).Format("2006-01-02")
+	chatDir := safePathSegment(displayChannel(record.Chat.Title, record.Chat.Username, record.Chat.ID))
+	if chatDir == "" {
+		chatDir = strconv.FormatInt(record.Chat.ID, 10)
+	}
+	name := safeFileName(fileName)
+	if name == "" {
+		name = fallbackFileName(record.Kind, record.MessageID, "")
+	}
+	name = fmt.Sprintf("%d-%02d-%s", record.MessageID, index+1, name)
+	return filepath.Join(mediaDir, chatDir, day, name)
+}
+
+func fallbackFileName(kind string, messageID int, mimeType string) string {
+	extension := ".bin"
+	if mimeType != "" {
+		if extensions, err := mime.ExtensionsByType(mimeType); err == nil && len(extensions) > 0 {
+			extension = extensions[0]
+		}
+	}
+	kind = safePathSegment(kind)
+	if kind == "" {
+		kind = "attachment"
+	}
+	return fmt.Sprintf("%s-%d%s", kind, messageID, extension)
+}
+
+func safePathSegment(value string) string {
+	value = safeFileName(value)
+	value = strings.Trim(value, ". ")
+	value = truncateRunes(value, 80)
+	value = strings.TrimRight(value, ". ")
+	return value
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit])
+	}
+	return value
+}
+
+func safeFileName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		"/", "_",
+		"\\", "_",
+		":", "_",
+		"\n", " ",
+		"\r", " ",
+		"\t", " ",
+	)
+	value = replacer.Replace(value)
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.Trim(value, ". ")
+	if value == "" {
+		return ""
+	}
+	if len([]rune(value)) > 160 {
+		ext := filepath.Ext(value)
+		stem := strings.TrimSuffix(value, ext)
+		if len(ext) > 16 {
+			ext = ""
+		}
+		maxStem := 160 - len(ext)
+		if maxStem < 1 {
+			maxStem = 1
+		}
+		value = strings.TrimRight(truncateRunes(stem, maxStem), ". ") + ext
+	}
+	return value
 }
 
 func documentKind(media *tg.MessageMediaDocument) string {

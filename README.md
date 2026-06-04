@@ -31,7 +31,7 @@ content, join chats, pin/unpin messages, or mark chats read.
 | --- | --- |
 | Allowlisted reads | Commands refuse chats outside `TG_STUDY_ALLOWED_CHATS` when the allowlist is set. |
 | Resumable sync | Full backfills can resume from `backfill.next_offset_id` after interruption. |
-| JSONL source layer | Every message record keeps chat, message id, date, sender, text, links, and attachments. |
+| JSONL source layer | Every message record keeps chat, message id, date, sender, text, links, attachments, and optional local attachment paths. |
 | Topic awareness | Forum chats preserve `topic` and `thread_top_message_id`. |
 | Compact agent views | Markdown navigation and TOON-style summaries are generated from the same JSONL source. |
 | Conservative pacing | RPC calls are sequential, spaced, and flood-wait aware. |
@@ -132,7 +132,7 @@ For the full read protocol, see [docs/agent-navigation.md](docs/agent-navigation
 ## Safety
 
 - `.env`, `.sessions/`, `.state/`, generated chat dumps, and local binaries are ignored by git.
-- The harvester stores attachment metadata only; file download is intentionally not part of sync.
+- `sync` and `dump` can download supported photo/document attachments with `--download-media --media-dir <dir>`. Downloaded files stay in private local state and are referenced from JSONL/agent views through `local_path`.
 - Runtime reads are constrained by `TG_STUDY_ALLOWED_CHATS` when set.
 - Full-account broad dialog dumps do not belong in this repository.
 - Live Telegram access is validated manually; automated tests use local fixtures.

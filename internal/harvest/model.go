@@ -49,12 +49,14 @@ type SelfProfile struct {
 }
 
 type Attachment struct {
-	Kind     string `json:"kind"`
-	FileName string `json:"file_name,omitempty"`
-	MIMEType string `json:"mime_type,omitempty"`
-	Size     int64  `json:"size,omitempty"`
-	Title    string `json:"title,omitempty"`
-	URL      string `json:"url,omitempty"`
+	Kind          string `json:"kind"`
+	FileName      string `json:"file_name,omitempty"`
+	MIMEType      string `json:"mime_type,omitempty"`
+	Size          int64  `json:"size,omitempty"`
+	Title         string `json:"title,omitempty"`
+	URL           string `json:"url,omitempty"`
+	LocalPath     string `json:"local_path,omitempty"`
+	DownloadError string `json:"download_error,omitempty"`
 }
 
 type MessageRecord struct {
@@ -108,6 +110,9 @@ type HistoryOptions struct {
 	All           bool
 	TopicID       int
 	TopicTitle    string
+	DownloadMedia bool
+	MediaDir      string
+	MaxMediaBytes int64
 	Progress      func(HistoryProgress) error
 }
 

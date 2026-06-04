@@ -116,8 +116,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by TG_STUDY_ALLOWED_CHATS when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
-	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --limit 500 --out hse-main.jsonl")
-	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl]")
+	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --limit 500 --out hse-main.jsonl [--download-media --media-dir media]")
+	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
 }
@@ -347,6 +347,9 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	all := fs.Bool("all", false, "export all available history")
 	topicID := fs.Int("topic", 0, "forum topic id to export via replies")
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in output metadata")
+	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while exporting")
+	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
+	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -368,6 +371,11 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		All:        *all,
 		TopicID:    *topicID,
 		TopicTitle: *topicTitle,
+	}
+	if *downloadMedia {
+		history.DownloadMedia = true
+		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
+		history.MaxMediaBytes = *maxMediaBytes
 	}
 	if *all {
 		history.Limit = 0
@@ -415,6 +423,9 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	resetMerged := fs.Bool("reset-merged", false, "truncate merged output before writing")
 	topicID := fs.Int("topic", 0, "forum topic id to sync via replies")
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in state metadata")
+	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while syncing")
+	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
+	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -440,6 +451,11 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		All:        *all,
 		TopicID:    *topicID,
 		TopicTitle: *topicTitle,
+	}
+	if *downloadMedia {
+		history.DownloadMedia = true
+		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
+		history.MaxMediaBytes = *maxMediaBytes
 	}
 	if *all {
 		history.Limit = 0

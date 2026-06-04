@@ -72,7 +72,7 @@ It keeps:
 - sender display;
 - text;
 - links;
-- attachment kind and file name;
+- attachment kind, file name, and local path when the wrapper downloaded the file;
 - `#message_id` source reference.
 
 ## Updates

@@ -202,6 +202,12 @@ func displayAttachments(attachments []Attachment) string {
 		} else if attachment.MIMEType != "" {
 			label += ":" + attachment.MIMEType
 		}
+		if attachment.LocalPath != "" {
+			label += " -> " + attachment.LocalPath
+		}
+		if attachment.DownloadError != "" {
+			label += " [download_error: " + attachment.DownloadError + "]"
+		}
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, "; ")
