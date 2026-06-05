@@ -804,7 +804,6 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	if markdownPath != "" {
 		if err := harvest.WriteDailyMarkdown(harvest.DailyMarkdownOptions{
 			OutputPath: markdownPath,
-			SourcePath: outputPath,
 			Date:       dateLabel,
 			Start:      start,
 			End:        end,

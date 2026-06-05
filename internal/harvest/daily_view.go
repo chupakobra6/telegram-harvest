@@ -13,7 +13,6 @@ const dailyTranscriptPreviewRunes = 4000
 
 type DailyMarkdownOptions struct {
 	OutputPath string
-	SourcePath string
 	Date       string
 	Start      time.Time
 	End        time.Time
@@ -40,9 +39,6 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 	b.WriteString("## Сводка\n\n")
 	if !opts.Start.IsZero() && !opts.End.IsZero() {
 		b.WriteString(fmt.Sprintf("- Период: %s .. %s\n", formatDailySummaryTime(opts.Start), formatDailySummaryTime(opts.End)))
-	}
-	if strings.TrimSpace(opts.SourcePath) != "" {
-		b.WriteString(fmt.Sprintf("- JSONL: %s\n", opts.SourcePath))
 	}
 	writeDailySummaryCount(&b, "Исходящих сообщений", len(records))
 	writeDailySummaryCount(&b, "Чатов с сообщениями", dailyChatCount(records))
@@ -113,7 +109,7 @@ func dailyMessageLine(record MessageRecord) string {
 	if topic := displayTopic(record); topic != "" {
 		destination += " / " + topic
 	}
-	text := compactText(record.Text)
+	text := dailyMarkdownText(record.Text)
 	if text == "" {
 		text = "[" + record.Kind + "]"
 	}
@@ -167,7 +163,7 @@ func dailyChatCount(records []MessageRecord) int {
 }
 
 func compactTranscript(value string) string {
-	value = compactText(value)
+	value = dailyMarkdownText(value)
 	if value == "" {
 		return ""
 	}
@@ -176,6 +172,10 @@ func compactTranscript(value string) string {
 	}
 	runes := []rune(value)
 	return string(runes[:dailyTranscriptPreviewRunes]) + " ... [truncated, see transcript_path]"
+}
+
+func dailyMarkdownText(value string) string {
+	return strings.ReplaceAll(compactText(value), "\\n", "<br>")
 }
 
 func DailyDefaultOutputPaths(stateDir string, date string) (string, string) {

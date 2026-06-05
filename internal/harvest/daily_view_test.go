@@ -35,12 +35,11 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 			MessageID: 10,
 			Date:      start.Add(9 * time.Hour),
 			Kind:      "text",
-			Text:      "Запланировал задачу",
+			Text:      "Запланировал задачу\n\nПроверил формат",
 		},
 	}
 	err := WriteDailyMarkdown(DailyMarkdownOptions{
 		OutputPath: output,
-		SourcePath: filepath.Join(dir, "day.jsonl"),
 		Date:       "2026-06-05",
 		Start:      start,
 		End:        start.AddDate(0, 0, 1),
@@ -63,7 +62,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		"- Вложений: 1",
 		"- Транскриптов: 1",
 		"## Хронология",
-		"09:00 в Notes: Запланировал задачу `#10`",
+		"09:00 в Notes: Запланировал задачу<br><br>Проверил формат `#10`",
 		"10:00 в Work: [voice] [`#20`](https://t.me/c/2/20)",
 		"файл: voice; media_id=document:123; voice.ogg",
 		"transcript_cached=true",
@@ -73,7 +72,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 			t.Fatalf("markdown missing %q:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "Ошибок: 0") || strings.Contains(content, "Flood waits: 0") {
+	if strings.Contains(content, "JSONL:") || strings.Contains(content, "Ошибок: 0") || strings.Contains(content, "Flood waits: 0") {
 		t.Fatalf("markdown includes zero summary fields:\n%s", content)
 	}
 }
