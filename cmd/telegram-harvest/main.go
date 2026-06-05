@@ -17,11 +17,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chupakobra6/telegram-study-harvest/internal/config"
-	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
-	"github.com/chupakobra6/telegram-study-harvest/internal/mtproto"
-	"github.com/chupakobra6/telegram-study-harvest/internal/runlock"
-	"github.com/chupakobra6/telegram-study-harvest/internal/transcribe"
+	"github.com/chupakobra6/telegram-harvest/internal/config"
+	"github.com/chupakobra6/telegram-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-harvest/internal/mtproto"
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
+	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 )
 
 func main() {
@@ -161,7 +161,7 @@ func shouldUseTelegramDesktopDefaults(command string) bool {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-study-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
@@ -494,7 +494,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		history.DownloadMedia = true
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
 		applyMediaLimits(&history, mediaLimits)
-		history.ManualDownloadCommand = "telegram-study-harvest download-media"
+		history.ManualDownloadCommand = "telegram-harvest download-media"
 	}
 	if *all {
 		history.Limit = 0
@@ -575,7 +575,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		history.DownloadMedia = true
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
 		applyMediaLimits(&history, mediaLimits)
-		history.ManualDownloadCommand = "telegram-study-harvest download-media"
+		history.ManualDownloadCommand = "telegram-harvest download-media"
 	}
 	if *all {
 		history.Limit = 0
@@ -700,7 +700,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		FFmpegCommand:     *ffmpegCommand,
 	}
 	applyMediaLimits(&history, mediaLimits)
-	history.ManualDownloadCommand = "telegram-study-harvest daily-download-media"
+	history.ManualDownloadCommand = "telegram-harvest daily-download-media"
 	if *downloadMedia {
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
 	}

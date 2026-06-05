@@ -289,7 +289,7 @@ func renderAgentViewInstructions(opts AgentViewOptions) string {
 	b.WriteString("\n")
 	b.WriteString("## Source\n")
 	b.WriteString(fmt.Sprintf("- Raw JSONL source: `%s`\n", opts.InputPath))
-	b.WriteString("- Update with `telegram-study-harvest agent-view --in messages.jsonl --out-dir agent-view` after every sync.\n")
+	b.WriteString("- Update with `telegram-harvest agent-view --in messages.jsonl --out-dir agent-view` after every sync.\n")
 	b.WriteString("- Use `--rebuild` only when forcing a full rewrite; normal runs use the stored source offset.\n")
 	return b.String()
 }

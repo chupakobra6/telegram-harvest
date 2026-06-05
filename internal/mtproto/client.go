@@ -18,9 +18,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chupakobra6/telegram-study-harvest/internal/config"
-	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
-	"github.com/chupakobra6/telegram-study-harvest/internal/transcribe"
+	"github.com/chupakobra6/telegram-harvest/internal/config"
+	"github.com/chupakobra6/telegram-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -2119,7 +2119,7 @@ func mediaLimitOrDefault(value int64, fallback int64) int64 {
 func manualDownloadHint(record harvest.MessageRecord, index int, command string) string {
 	command = strings.TrimSpace(command)
 	if command == "" {
-		command = "telegram-study-harvest download-media"
+		command = "telegram-harvest download-media"
 	}
 	chat := record.Chat.Username
 	if chat != "" {

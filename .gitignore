@@ -2,7 +2,7 @@
 .sessions/
 .state/
 artifacts/
-/telegram-study-harvest
+/telegram-harvest
 messages.jsonl
 messages.toon
 agent-view/

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 )
@@ -151,7 +151,7 @@ func TestMediaSizeLimitExceededWritesActionableHint(t *testing.T) {
 	}
 	if !mediaSizeLimitExceeded(&record, 0, harvest.HistoryOptions{
 		MaxDocumentBytes:      10 * 1024 * 1024,
-		ManualDownloadCommand: "telegram-study-harvest download-media",
+		ManualDownloadCommand: "telegram-harvest download-media",
 	}) {
 		t.Fatalf("expected size limit to be exceeded")
 	}

@@ -1,4 +1,4 @@
-CLI := go run ./cmd/telegram-study-harvest
+CLI := go run ./cmd/telegram-harvest
 MEDIA_LIMIT_FLAGS = \
 	$(if $(strip $(MAX_PHOTO_BYTES)),--max-photo-bytes "$(MAX_PHOTO_BYTES)",) \
 	$(if $(strip $(MAX_DOCUMENT_BYTES)),--max-document-bytes "$(MAX_DOCUMENT_BYTES)",) \
@@ -84,6 +84,6 @@ agent-view:
 refresh-agent-view: agent-view compact
 
 clean:
-	rm -rf .state artifacts telegram-study-harvest agent-view media media-refresh
+	rm -rf .state artifacts telegram-harvest agent-view media media-refresh
 	rm -f messages.jsonl messages.toon *.log
 	rm -f .sessions/runtime.lock

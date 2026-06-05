@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-var ErrAlreadyLocked = errors.New("another telegram-study-harvest runtime is active for this session")
+var ErrAlreadyLocked = errors.New("another telegram-harvest runtime is active for this session")
 
 type Handle struct {
 	file *os.File

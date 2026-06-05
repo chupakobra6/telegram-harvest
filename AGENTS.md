@@ -17,20 +17,20 @@
 - Install/update dependencies: `go mod tidy`
 - Format: `gofmt -w ./cmd ./internal`
 - Tests: `go test ./...`
-- Doctor: `go run ./cmd/telegram-study-harvest doctor`
-- Login: `go run ./cmd/telegram-study-harvest login`
-- Daily doctor: `go run ./cmd/telegram-study-harvest daily-doctor`
-- Daily login: `go run ./cmd/telegram-study-harvest daily-login`
-- Daily outgoing harvest: `go run ./cmd/telegram-study-harvest daily --date yesterday`
-- Import Telegram Desktop session: `go run ./cmd/telegram-study-harvest import-tdesktop --account-index <n>`, then verify with `go run ./cmd/telegram-study-harvest me`
-- List chats: `go run ./cmd/telegram-study-harvest chats --query вшэ`
-- List forum topics: `go run ./cmd/telegram-study-harvest topics --chat <forum-id-or-username>`
-- Dump chat: `go run ./cmd/telegram-study-harvest dump --chat <id-or-username> --out .state/chat.jsonl`
-- Start full sync: `go run ./cmd/telegram-study-harvest sync --chat <id-or-username> --name hse-main --all --reset --batch-size 100`
+- Doctor: `go run ./cmd/telegram-harvest doctor`
+- Login: `go run ./cmd/telegram-harvest login`
+- Daily doctor: `go run ./cmd/telegram-harvest daily-doctor`
+- Daily login: `go run ./cmd/telegram-harvest daily-login`
+- Daily outgoing harvest: `go run ./cmd/telegram-harvest daily --date yesterday`
+- Import Telegram Desktop session: `go run ./cmd/telegram-harvest import-tdesktop --account-index <n>`, then verify with `go run ./cmd/telegram-harvest me`
+- List chats: `go run ./cmd/telegram-harvest chats --query вшэ`
+- List forum topics: `go run ./cmd/telegram-harvest topics --chat <forum-id-or-username>`
+- Dump chat: `go run ./cmd/telegram-harvest dump --chat <id-or-username> --out .state/chat.jsonl`
+- Start full sync: `go run ./cmd/telegram-harvest sync --chat <id-or-username> --name hse-main --all --reset --batch-size 100`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
-- Incremental sync after full sync completion: `go run ./cmd/telegram-study-harvest sync --chat <id-or-username> --name hse-main`
-- Compact agent view: `go run ./cmd/telegram-study-harvest compact --in messages.jsonl --out messages.toon`
-- Markdown navigation for agents: `go run ./cmd/telegram-study-harvest agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
+- Incremental sync after full sync completion: `go run ./cmd/telegram-harvest sync --chat <id-or-username> --name hse-main`
+- Compact agent view: `go run ./cmd/telegram-harvest compact --in messages.jsonl --out messages.toon`
+- Markdown navigation for agents: `go run ./cmd/telegram-harvest agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.

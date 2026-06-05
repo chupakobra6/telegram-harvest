@@ -206,9 +206,9 @@ func (c Config) EnvNames(suffix string) string {
 
 func (c Config) LoginCommand() string {
 	if c.Mode == ModeDaily {
-		return "telegram-study-harvest daily-login"
+		return "telegram-harvest daily-login"
 	}
-	return "telegram-study-harvest login"
+	return "telegram-harvest login"
 }
 
 func (c Config) RuntimeLockPath() string {

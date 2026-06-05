@@ -22,7 +22,7 @@
 
 ## Why
 
-`telegram-study-harvest` is the current CLI path for Telegram Harvest. It reads
+`telegram-harvest` is the current CLI path for Telegram Harvest. It reads
 Telegram through MTProto user authorization and writes local data for downstream agents.
 
 Study commands stay scoped by an explicit allowlist. Daily commands use the main harvest account
@@ -44,7 +44,7 @@ buttons, delete content, join chats, pin/unpin messages, or mark chats read.
 ## Quick Start
 
 ```bash
-cd telegram-study-harvest
+cd telegram-harvest
 cp .env.example .env
 make setup
 make daily-doctor
@@ -57,8 +57,8 @@ If Telegram Desktop is already logged in locally, you can import its `tdata` ses
 instead:
 
 ```bash
-go run ./cmd/telegram-study-harvest import-tdesktop --account-index 1
-go run ./cmd/telegram-study-harvest me
+go run ./cmd/telegram-harvest import-tdesktop --account-index 1
+go run ./cmd/telegram-harvest me
 ```
 
 The CLI auto-loads `.env` from the current directory and the project root. Keep the allowlist narrow:
@@ -94,15 +94,15 @@ TG_HARVEST_STATE_DIR=.state/daily
 Login and verify:
 
 ```bash
-go run ./cmd/telegram-study-harvest daily-login
-go run ./cmd/telegram-study-harvest daily-doctor
-go run ./cmd/telegram-study-harvest daily-me
+go run ./cmd/telegram-harvest daily-login
+go run ./cmd/telegram-harvest daily-doctor
+go run ./cmd/telegram-harvest daily-me
 ```
 
 Export a day. Relative output paths live under `TG_HARVEST_STATE_DIR`:
 
 ```bash
-go run ./cmd/telegram-study-harvest daily --date yesterday
+go run ./cmd/telegram-harvest daily --date yesterday
 ```
 
 Default outputs:
@@ -160,7 +160,7 @@ with the exact manual command. Manual downloads are explicit one-off reads and d
 caps:
 
 ```bash
-go run ./cmd/telegram-study-harvest daily-download-media \
+go run ./cmd/telegram-harvest daily-download-media \
   --chat 1234567890 \
   --message-id 777 \
   --index 1 \
@@ -173,7 +173,7 @@ Start a full history rebuild with `--all --reset`. Use `--reset-merged` only on 
 when rebuilding a shared `messages.jsonl`:
 
 ```bash
-go run ./cmd/telegram-study-harvest sync \
+go run ./cmd/telegram-harvest sync \
   --chat 1234567890 \
   --name study-main \
   --all \
@@ -186,7 +186,7 @@ go run ./cmd/telegram-study-harvest sync \
 If interrupted, rerun without `--reset`:
 
 ```bash
-go run ./cmd/telegram-study-harvest sync \
+go run ./cmd/telegram-harvest sync \
   --chat 1234567890 \
   --name study-main \
   --all \
@@ -197,7 +197,7 @@ go run ./cmd/telegram-study-harvest sync \
 Weekly incremental sync omits `--all` and uses `last_id`:
 
 ```bash
-go run ./cmd/telegram-study-harvest sync \
+go run ./cmd/telegram-harvest sync \
   --chat 1234567890 \
   --name study-main \
   --merged-out messages.jsonl
@@ -219,7 +219,7 @@ When `--download-media` is enabled, study `dump` and `sync` use the same caps as
 file is needed later, use the study-account manual download command:
 
 ```bash
-go run ./cmd/telegram-study-harvest download-media \
+go run ./cmd/telegram-harvest download-media \
   --chat 1234567890 \
   --message-id 777 \
   --index 1 \
@@ -231,8 +231,8 @@ go run ./cmd/telegram-study-harvest download-media \
 JSONL is the canonical lossless dump. Compact files are derived and can be regenerated:
 
 ```bash
-go run ./cmd/telegram-study-harvest agent-view --in messages.jsonl --out-dir agent-view
-go run ./cmd/telegram-study-harvest compact --in messages.jsonl --out messages.toon
+go run ./cmd/telegram-harvest agent-view --in messages.jsonl --out-dir agent-view
+go run ./cmd/telegram-harvest compact --in messages.jsonl --out messages.toon
 ```
 
 `agent-view/README.md` is the default agent entrypoint. Generated `agent-view/AGENTS.md` contains
@@ -281,7 +281,7 @@ make fmt
 
 | Path | Purpose |
 | --- | --- |
-| `cmd/telegram-study-harvest` | CLI entrypoint and command wiring. |
+| `cmd/telegram-harvest` | CLI entrypoint and command wiring. |
 | `internal/config` | Env loading, study and daily mode defaults, and study-chat allowlist. |
 | `internal/mtproto` | Telegram transport, Telegram Desktop import, history, topic, and daily outgoing reads. |
 | `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |
