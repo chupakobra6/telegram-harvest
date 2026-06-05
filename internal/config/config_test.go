@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,6 +144,37 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 				t.Fatalf("expected validation error")
 			}
 		})
+	}
+}
+
+func TestValidateRuntimeRejectsDailyStudyImportSessionPath(t *testing.T) {
+	valid := Config{
+		Mode:         ModeDaily,
+		AppID:        1,
+		AppHash:      "hash",
+		SessionPath:  DefaultDailySessionPath,
+		StateDir:     DefaultDailyStateDir,
+		RPCSpacing:   time.Second,
+		BatchSize:    80,
+		HistoryLimit: 500,
+		MaxBatches:   20,
+	}
+	if err := valid.ValidateRuntime(); err != nil {
+		t.Fatalf("daily session rejected: %v", err)
+	}
+	for _, sessionPath := range []string{
+		DefaultSessionPath,
+		filepath.Join("/repo", DefaultSessionPath),
+	} {
+		cfg := valid
+		cfg.SessionPath = sessionPath
+		err := cfg.ValidateRuntime()
+		if err == nil {
+			t.Fatalf("expected %s to be rejected", sessionPath)
+		}
+		if !strings.Contains(err.Error(), "must not point to the study Telegram Desktop import session") {
+			t.Fatalf("unexpected error: %v", err)
+		}
 	}
 }
 

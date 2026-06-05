@@ -153,14 +153,8 @@ func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
 }
 
 func (c *Client) AuthStatus(ctx context.Context) (AuthStatus, error) {
-	if c.cfg.AppID == 0 {
-		return AuthStatus{}, fmt.Errorf("%s is required", c.cfg.EnvName("APP_ID"))
-	}
-	if strings.TrimSpace(c.cfg.AppHash) == "" {
-		return AuthStatus{}, fmt.Errorf("%s is required", c.cfg.EnvName("APP_HASH"))
-	}
-	if strings.TrimSpace(c.cfg.SessionPath) == "" {
-		return AuthStatus{}, fmt.Errorf("%s is required", c.cfg.EnvName("SESSION_PATH"))
+	if err := c.cfg.ValidateRuntime(); err != nil {
+		return AuthStatus{}, err
 	}
 	if err := ensureSessionDir(c.cfg.SessionPath); err != nil {
 		return AuthStatus{}, err

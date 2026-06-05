@@ -168,6 +168,14 @@ func (c Config) ValidateRuntime() error {
 	if strings.TrimSpace(c.SessionPath) == "" {
 		return fmt.Errorf("%s is required", c.EnvName("SESSION_PATH"))
 	}
+	if c.Mode == ModeDaily && isDefaultStudySessionPath(c.SessionPath) {
+		return fmt.Errorf("%s must not point to the study Telegram Desktop import session %s; use a dedicated main-account session such as %s and run %s",
+			c.EnvName("SESSION_PATH"),
+			DefaultSessionPath,
+			DefaultDailySessionPath,
+			c.LoginCommand(),
+		)
+	}
 	if strings.TrimSpace(c.StateDir) == "" {
 		return fmt.Errorf("%s is required", c.EnvName("STATE_DIR"))
 	}
@@ -184,6 +192,12 @@ func (c Config) ValidateRuntime() error {
 		return fmt.Errorf("max batches must be > 0")
 	}
 	return nil
+}
+
+func isDefaultStudySessionPath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	study := filepath.ToSlash(filepath.Clean(DefaultSessionPath))
+	return clean == study || strings.HasSuffix(clean, "/"+study)
 }
 
 func (c Config) WithRoot(root string) Config {

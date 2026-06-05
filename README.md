@@ -54,7 +54,7 @@ make daily-login
 For fresh daily login, create Telegram app credentials at <https://my.telegram.org>. For study mode,
 configure `TG_HARVEST_STUDY_*`, then run `make doctor` and `make login`.
 If Telegram Desktop is already logged in locally, you can import its `tdata` session for study mode
-instead:
+instead. Do not use this import path for daily reports:
 
 ```bash
 go run ./cmd/telegram-harvest import-tdesktop --account-index 1
@@ -81,7 +81,8 @@ make topics CHAT=1234567890
 ## Daily Harvest
 
 Daily harvest is intended for the main-account session. It does not use the Telegram Desktop
-test-app fallback; configure app credentials from <https://my.telegram.org> with `TG_HARVEST_*`:
+test-app fallback or the study `tdata` import session; configure app credentials from
+<https://my.telegram.org> with `TG_HARVEST_*`:
 
 ```dotenv
 TG_HARVEST_APP_ID=12345678
@@ -90,6 +91,9 @@ TG_HARVEST_PHONE=+10000000000
 TG_HARVEST_SESSION_PATH=.sessions/daily.json
 TG_HARVEST_STATE_DIR=.state/daily
 ```
+
+`TG_HARVEST_SESSION_PATH` must point to a dedicated daily/main-account session, not
+`.sessions/user.json`. That file is reserved for study-mode Telegram Desktop imports.
 
 Login and verify:
 
