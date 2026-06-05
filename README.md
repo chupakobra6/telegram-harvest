@@ -1,117 +1,116 @@
-<h1 align="center">telegram-harvest</h1>
+# Telegram Harvest
 
-<p align="center">
-  Read-only MTProto harvester for study automation and daily personal Telegram context.
-</p>
+Локальный read-only CLI для сбора Telegram-данных через MTProto user authorization.
+Проект рассчитан на два практических сценария:
 
-<p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
-  <img alt="Telegram" src="https://img.shields.io/badge/Telegram-MTProto-26A5E4?logo=telegram&logoColor=white">
-  <img alt="Markdown reports" src="https://img.shields.io/badge/reports-Markdown-111111">
-  <img alt="Read only" src="https://img.shields.io/badge/default-read--only-0E7C7B">
-</p>
+- **daily reports** - личные исходящие сообщения за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/video через Vosk;
+- **study harvest** - выгрузка, синк и агентские Markdown-представления для учебных чатов из allowlist.
 
-<p align="center">
-  <a href="#why">Why</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#daily-harvest">Daily harvest</a> ·
-  <a href="#agent-views">Agent views</a> ·
-  <a href="#safety">Safety</a> ·
-  <a href="#repository-map">Repository map</a>
-</p>
+CLI один и тот же для всех сценариев. Аккаунт выбирается профилем `main` или `study`, а не отдельными account-specific командами.
 
-## Why
+## Что умеет
 
-`telegram-harvest` is the current CLI path for Telegram Harvest. It reads
-Telegram through MTProto user authorization and writes local data for downstream agents.
-
-Study commands stay scoped by an explicit allowlist. Account selection is profile-based:
-`--profile study` uses `TG_HARVEST_STUDY_*`, while `--profile main` uses `TG_HARVEST_*`.
-Daily export is a scenario, not an account type, and exports only messages sent by the authorized user.
-The tool does not send messages, click buttons, delete content, join chats, pin/unpin messages, or mark
-chats read.
-
-| Capability | What it gives |
+| Область | Поведение |
 | --- | --- |
-| Study profile | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows default to `TG_HARVEST_STUDY_*`. |
-| Main profile | `daily` defaults to `TG_HARVEST_*` and exports only outgoing/self messages for one day. |
-| Allowlisted reads | Study commands refuse chats outside the study allowlist when it is set. |
-| Resumable sync | Full backfills can resume from `backfill.next_offset_id` after interruption. |
-| JSONL source layer | Every message record keeps chat, message id, date, sender, text, links, attachments, and optional local attachment paths. |
-| Daily media | Daily harvest saves photos/image documents, transcribes voice/audio/video through local Vosk, and keeps only transcript cache for audio/video. |
-| Topic awareness | Forum chats preserve `topic` and `thread_top_message_id`. |
-| Compact agent views | Markdown navigation and TOON-style summaries are generated from the same JSONL source. |
-| Conservative pacing | RPC calls are sequential, spaced, and flood-wait aware. |
+| Авторизация | MTProto user session через `login`; для study можно импортировать локальный Telegram Desktop `tdata`. |
+| Профили | `main` читает `TG_HARVEST_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей нет. |
+| Daily | Сканирует диалоги за один московский день и пишет только outgoing/self сообщения авторизованного аккаунта. |
+| Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
+| Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации. |
+| Vosk | Go helper `bin/vosk-transcribe` работает как session worker: модель грузится один раз на запуск `daily`. |
+| Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
+| Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
+| Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. RPC идут последовательно и с pacing. |
 
-## Quick Start
+## Быстрый старт
 
 ```bash
 cd telegram-harvest
 cp .env.example .env
 make setup
-go run ./cmd/telegram-harvest doctor
-go run ./cmd/telegram-harvest login
-```
-
-For fresh main-profile login, create Telegram app credentials at <https://my.telegram.org>. For study
-mode, configure `TG_HARVEST_STUDY_*`, then run `make doctor` and `make login`.
-If Telegram Desktop is already logged in locally, you can import its `tdata` session. The command
-defaults to the study profile; pass `--profile main` only when you explicitly want that profile:
-
-```bash
-go run ./cmd/telegram-harvest import-tdesktop --account-index 1
-go run ./cmd/telegram-harvest me
-```
-
-The CLI auto-loads `.env` from the current directory and the project root. Keep the allowlist narrow:
-
-```dotenv
-TG_HARVEST_STUDY_STATE_DIR=.state
-TG_HARVEST_STUDY_ALLOWED_CHATS=1234567890,@study_chat
-```
-
-Useful commands:
-
-```bash
-make help
 make test
-make doctor
-make chats QUERY=study
-make topics CHAT=1234567890
 ```
 
-## Daily Harvest
-
-Daily harvest defaults to the main-account profile. It uses the same universal profile selector as the
-other commands; configure main app credentials from <https://my.telegram.org> with `TG_HARVEST_*`:
+Заполнить `.env`:
 
 ```dotenv
 TG_HARVEST_APP_ID=12345678
-TG_HARVEST_APP_HASH=your_main_account_app_hash
+TG_HARVEST_APP_HASH=main_account_app_hash
 TG_HARVEST_PHONE=+10000000000
-TG_HARVEST_SESSION_PATH=.sessions/main.json
-TG_HARVEST_STATE_DIR=.state/daily
+
+# Опционально для учебного аккаунта:
+TG_HARVEST_STUDY_APP_ID=12345678
+TG_HARVEST_STUDY_APP_HASH=study_account_app_hash
+TG_HARVEST_STUDY_PHONE=+10000000000
+TG_HARVEST_STUDY_ALLOWED_CHATS=1234567890,@study_chat
 ```
 
-`TG_HARVEST_SESSION_PATH` defaults to a dedicated main-account session. Study-mode Telegram Desktop
-imports default to `TG_HARVEST_STUDY_SESSION_PATH=.sessions/study.json`.
+Telegram app credentials создаются на <https://my.telegram.org>. Секреты, сессии, `.state/`, модели и отчеты игнорируются git.
 
-Login and verify:
+Логин основного аккаунта:
 
 ```bash
-go run ./cmd/telegram-harvest login
-go run ./cmd/telegram-harvest doctor
+make login
+make doctor
 go run ./cmd/telegram-harvest me
 ```
 
-Export a day. User-facing reports are written to the visible `reports/daily` directory in the project
-root. Relative override paths still resolve under `TG_HARVEST_STATE_DIR`:
+Логин учебного аккаунта через API credentials:
 
 ```bash
-go run ./cmd/telegram-harvest daily --date yesterday
+make login PROFILE=study
+make doctor PROFILE=study
+go run ./cmd/telegram-harvest --profile study me
 ```
 
-Default outputs:
+Если для учебного аккаунта используется локальный Telegram Desktop fallback:
+
+```bash
+go run ./cmd/telegram-harvest --profile study import-tdesktop --account-index 1
+go run ./cmd/telegram-harvest --profile study me
+```
+
+## Профили и дефолты
+
+Глобальный флаг:
+
+```bash
+go run ./cmd/telegram-harvest --profile main  <command>
+go run ./cmd/telegram-harvest --profile study <command>
+```
+
+Если `--profile` не указан, CLI выбирает профиль по команде:
+
+| Команды | Дефолтный профиль |
+| --- | --- |
+| `login`, `doctor`, `print-config`, `me` | `main` |
+| `daily`, `daily-download-media` | `main` |
+| `chats`, `topics`, `dump`, `sync`, `download-media`, `compact`, `agent-view`, `import-tdesktop` | `study` |
+
+Makefile повторяет эту модель: `make daily`, `make login`, `make chats` используют CLI-дефолты. Для явного выбора добавляй один и тот же параметр:
+
+```bash
+make doctor PROFILE=study
+make daily DATE=2026-06-04 PROFILE=main
+make sync CHAT=1234567890 NAME=study-main PROFILE=study
+```
+
+## Daily reports
+
+Один день:
+
+```bash
+make daily DATE=yesterday
+make daily DATE=2026-06-04
+```
+
+То же напрямую через CLI:
+
+```bash
+go run ./cmd/telegram-harvest daily --date 2026-06-04
+```
+
+Выходные файлы по умолчанию:
 
 ```text
 reports/daily/YYYY-MM-DD.md
@@ -120,53 +119,34 @@ reports/daily/YYYY-MM-DD.md
 .state/daily/transcripts/cache/...
 ```
 
-The Markdown file is the Finder-friendly daily surface: each line shows local time, destination chat,
-message text or media kind, Telegram message links when Telegram can produce them, saved image paths,
-and transcripts when available. Photos and image documents are kept under `.state/daily/media/`.
-Voice, audio, round video, and regular video are downloaded to a temporary file, converted with
-`ffmpeg`, transcribed, then deleted; the report keeps only transcript text and `transcript_path`.
-Raw JSONL stays under `.state/daily/jsonl/` for audit/debug and is not the user-facing report output.
+Markdown в `reports/daily` - основной человекочитаемый результат. Он содержит время, чат назначения, текст сообщения, ссылку на Telegram-сообщение когда она доступна, сведения о вложениях, локальные пути к сохраненным картинкам и транскрипты.
 
-Vosk is the default transcription path. Build the local helper with `make vosk-transcribe`, place a
-Russian model under `models/vosk-model-small-ru-0.22`, and Harvest will auto-detect both local paths
-when they exist. For a daily run, Harvest starts the Vosk command lazily as a session-scoped worker
-with `--session <model-dir> [grammar-json-path]`; the worker keeps the model loaded until the command
-finishes:
+JSONL в `.state/daily/jsonl` - технический audit/source layer. Он нужен для отладки, пересборки и анализа, но не является пользовательским отчетом.
 
-```dotenv
-TG_HARVEST_VOSK_COMMAND=bin/vosk-transcribe
-TG_HARVEST_VOSK_MODEL_PATH=models/vosk-model-small-ru-0.22
-TG_HARVEST_FFMPEG_COMMAND=ffmpeg
-TG_HARVEST_RETENTION_DAYS=14
+Полезные флаги:
+
+```bash
+go run ./cmd/telegram-harvest daily --date 2026-06-04 --progress
+go run ./cmd/telegram-harvest daily --date 2026-06-04 --download-media=false
+go run ./cmd/telegram-harvest daily --date 2026-06-04 --transcribe=false
+go run ./cmd/telegram-harvest daily --date 2026-06-04 --retain-days 0
+go run ./cmd/telegram-harvest daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
-`telegram-harvest daily --help` shows Vosk and media defaults. Vosk itself is CPU-based; `ffmpeg`
-handles audio extraction/conversion.
-Transcript cache is keyed by Telegram media id when available, so reruns skip already-transcribed
-audio/video without downloading it again and do not start the Vosk worker for cache hits.
+Daily retention по умолчанию хранит 14 дней state-артефактов. `--retain-days 0` отключает pruning для конкретного запуска.
 
-A custom command-template hook can override Vosk; placeholders are shell-quoted by the CLI:
+## Медиа и лимиты
 
-```dotenv
-TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
-```
+Автоматические лимиты защищают локальную машину от слишком тяжелых скачиваний:
 
-The command may either write `{output}` or print transcript text to stdout. Use
-`--download-media=false` to skip media downloads/transcription, `--transcribe=false` to skip
-audio/video transcription, or `--retain-days` to change the default two-week daily buffer.
-
-Daily media caps are intentionally conservative:
-
-| Kind | Default cap | Behavior |
+| Тип | Дефолт | Поведение |
 | --- | ---: | --- |
-| Photo or image document | 10 MiB | Saved under `media/` when inside cap. |
-| Generic document | 10 MiB | Saved under `media/` when inside cap. |
-| Voice/audio | 50 MiB | Temporarily downloaded for transcription when inside cap. |
-| Video/round video | 200 MiB | Temporarily downloaded for transcription when inside cap. |
+| Photo / image document | 10 MiB | Сохраняется под `.state/.../media`. |
+| Generic document | 10 MiB | Сохраняется под `.state/.../media`. |
+| Voice / audio | 50 MiB | Временно скачивается для транскрибации. |
+| Video / round video | 200 MiB | Временно скачивается для транскрибации. |
 
-If a file exceeds its cap, the JSONL/Markdown record keeps `download_error` and a `download_hint`
-with the exact manual command. Manual downloads are explicit one-off reads and do not apply these
-caps:
+Если файл выше лимита, запись сохраняет `download_error` и `download_hint`. Ручное скачивание делается отдельной командой и лимиты не применяет:
 
 ```bash
 go run ./cmd/telegram-harvest daily-download-media \
@@ -176,10 +156,74 @@ go run ./cmd/telegram-harvest daily-download-media \
   --out-dir media-manual
 ```
 
-## Sync
+## Vosk
 
-Start a full history rebuild with `--all --reset`. Use `--reset-merged` only on the first stream
-when rebuilding a shared `messages.jsonl`:
+Daily-транскрибация использует локальный Vosk helper на Go:
+
+```bash
+make vosk-transcribe
+```
+
+Ожидаемая настройка:
+
+```dotenv
+TG_HARVEST_VOSK_COMMAND=bin/vosk-transcribe
+TG_HARVEST_VOSK_MODEL_PATH=models/vosk-model-small-ru-0.22
+TG_HARVEST_FFMPEG_COMMAND=ffmpeg
+
+# Если libvosk не лежит в /opt/homebrew/lib или /usr/local/lib:
+TG_HARVEST_VOSK_LIBRARY_PATH=.state/vosk-runtime/libvosk.dylib
+```
+
+Worker protocol:
+
+```text
+vosk-transcribe --session <model-dir> [grammar-json-path]
+{"id":1,"wav_path":"/tmp/.vosk-123.wav"}
+{"id":1,"text":"recognized text"}
+```
+
+Это гибридный режим: постоянного демона нет, но внутри одного `daily`-запуска модель грузится один раз и переиспользуется для всех voice/audio/video cache misses. Если все транскрипты уже есть в кэше, Vosk process не стартует.
+
+Поддерживаемые настройки:
+
+```dotenv
+TG_HARVEST_VOSK_GRAMMAR_PATH=
+TG_HARVEST_RETENTION_DAYS=14
+```
+
+Кастомный ASR hook можно задать явно:
+
+```dotenv
+TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
+```
+
+Такой hook запускается per attachment и не использует Vosk session protocol.
+
+## Производительность daily
+
+На текущем диапазоне 2026-05-17 ... 2026-06-04 полный main-прогон с Vosk занял около часа. Практические ориентиры:
+
+| Нагрузка дня | Оценка |
+| --- | ---: |
+| Почти без ASR | 1.5-2 минуты |
+| Обычный день с voice/round-video | 2.5-6 минут |
+| Тяжелый день с десятками media/ASR | 6-8 минут |
+| 19 дней с локальным Vosk CPU | около 1 часа |
+
+Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
+
+## Study sync
+
+Сначала посмотреть доступные чаты:
+
+```bash
+make chats QUERY=вшэ
+```
+
+Если `TG_HARVEST_STUDY_ALLOWED_CHATS` задан, `chats`, `topics`, `dump` и `sync` работают только в этом scope.
+
+Полная выгрузка:
 
 ```bash
 go run ./cmd/telegram-harvest sync \
@@ -192,7 +236,7 @@ go run ./cmd/telegram-harvest sync \
   --merged-out messages.jsonl
 ```
 
-If interrupted, rerun without `--reset`:
+Resume после interruption:
 
 ```bash
 go run ./cmd/telegram-harvest sync \
@@ -203,7 +247,7 @@ go run ./cmd/telegram-harvest sync \
   --merged-out messages.jsonl
 ```
 
-Weekly incremental sync omits `--all` and uses `last_id`:
+Обычный incremental sync:
 
 ```bash
 go run ./cmd/telegram-harvest sync \
@@ -212,127 +256,65 @@ go run ./cmd/telegram-harvest sync \
   --merged-out messages.jsonl
 ```
 
-Study dump locations are controlled by `TG_HARVEST_STUDY_STATE_DIR`, which defaults to `.state`.
-Typical files are:
+Типичные private outputs:
 
 ```text
-.state/<name>.jsonl
-.state/<name>.state.json
+.state/study-main.jsonl
+.state/study-main.state.json
 .state/messages.jsonl
-.state/agent-view/
-.state/messages.toon
-.state/media/
+messages.jsonl
+messages.toon
+agent-view/
 ```
 
-When `--download-media` is enabled, study `dump` and `sync` use the same caps as daily for photos,
-image documents, and generic documents. Study mode does not transcribe audio/video; transcription is
-reserved for daily outgoing harvest. If a skipped file is needed later, use the study-account manual
-download command:
+Study `dump`/`sync` не транскрибируют audio/video. Они сохраняют inspectable материалы вроде photos/images/documents при включенном `--download-media`.
 
-```bash
-go run ./cmd/telegram-harvest download-media \
-  --chat 1234567890 \
-  --message-id 777 \
-  --index 1 \
-  --out-dir media-manual
-```
+## Agent views
 
-## Agent Views
-
-JSONL is the canonical lossless dump. Compact files are derived and can be regenerated:
+JSONL - canonical lossless source. Markdown/TOON - производные представления, их можно пересобрать:
 
 ```bash
 go run ./cmd/telegram-harvest agent-view --in messages.jsonl --out-dir agent-view
 go run ./cmd/telegram-harvest compact --in messages.jsonl --out messages.toon
-```
-
-`agent-view/README.md` is the default agent entrypoint. Generated `agent-view/AGENTS.md` contains
-the local reading rules for agents. The generated view points to `all-recent.md`, chat indexes,
-topic indexes, and day files:
-
-```text
-agent-view/
-  README.md
-  all-recent.md
-  chats/chat-1234567890/README.md
-  chats/chat-1234567890/topics/topic-3/2026-05-12.md
-```
-
-Normal agent read path:
-
-1. Open `agent-view/README.md`.
-2. Use `all-recent.md` only for vague or latest-message questions.
-3. If the chat or subject is known, search inside one chat/topic directory before opening files.
-4. Open one topic README, then one `YYYY-MM-DD.md` day file.
-5. Use raw JSONL only when Markdown lacks a field needed for audit/debug.
-
-After sync, refresh generated study-agent files:
-
-```bash
 make refresh-agent-view
 ```
 
-## Safety
+Обычный путь чтения для агента:
 
-- `.env`, `.sessions/`, `.state/`, generated chat dumps, and local binaries are ignored by git.
-- `sync`, `dump`, and `daily` cap automatic media downloads by kind. Downloaded files stay in private local state and are referenced from JSONL/agent views through `local_path`; skipped files include a manual download hint.
-- Study reads are constrained by `TG_HARVEST_STUDY_ALLOWED_CHATS` when set.
-- Daily full-account scans are limited to outgoing/self messages and should use `.state/daily` or another private state directory.
-- Full-account broad dumps of other people's messages do not belong in this repository.
-- Live Telegram access is validated manually; automated tests use local fixtures.
+1. Открыть `agent-view/README.md`.
+2. Для общего/latest-вопроса открыть `all-recent.md`.
+3. Если известен чат или тема, идти в конкретный chat/topic каталог.
+4. Открывать дневные Markdown-файлы, а raw JSONL использовать только для audit/debug.
 
-## Testing
+## Команды разработки
 
 ```bash
-make test
+make help
+make setup
 make fmt
+make test
+make vosk-transcribe
+go run ./cmd/telegram-harvest --help
+go run ./cmd/telegram-harvest daily --help
 ```
 
-## Repository Map
+## Структура
 
-| Path | Purpose |
+| Путь | Назначение |
 | --- | --- |
-| `cmd/telegram-harvest` | CLI entrypoint and command wiring. |
-| `internal/config` | Env loading, main/study profile defaults, and study-chat allowlist. |
-| `internal/mtproto` | Telegram transport, Telegram Desktop import, history, topic, and daily outgoing reads. |
-| `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |
-| `internal/runlock` | Per-session runtime lock. |
+| `cmd/telegram-harvest` | CLI entrypoint и wiring команд. |
+| `cmd/vosk-transcribe` | Go/cgo Vosk helper с one-shot и session режимами. |
+| `internal/config` | `.env`, профили, defaults, allowlist и runtime paths. |
+| `internal/mtproto` | Telegram transport, login, tdesktop import, dialogs/history/topics/daily reads. |
+| `internal/harvest` | JSONL model, sync state, daily Markdown, media retention, compact и agent views. |
+| `internal/transcribe` | ffmpeg conversion, Vosk session runner, custom command hook. |
+| `internal/runlock` | Per-session lock, чтобы не запускать два MTProto процесса на одну session file. |
+| `reports/daily` | Локальные Markdown-отчеты для пользователя, ignored by git. |
 
-## Vosk Runtime
+## Safety model
 
-Daily transcription uses one session-scoped Vosk worker per `telegram-harvest daily` process. Harvest
-owns its Vosk helper in `cmd/vosk-transcribe`; build it with `make vosk-transcribe` to create
-`bin/vosk-transcribe`. Harvest still converts each audio/video attachment with `ffmpeg`, but the Vosk
-command is started only on the first transcript cache miss and then receives JSONL requests on stdin.
-`TG_HARVEST_VOSK_COMMAND` must point to a helper that supports this protocol:
-
-```text
-vosk-transcribe --session <model-dir> [grammar-json-path]
-{"id":1,"wav_path":"/tmp/.vosk-123.wav"}
-{"id":1,"text":"recognized text"}
-```
-
-This avoids loading the Vosk model for every short Telegram voice message while also avoiding a
-permanent local daemon. When all transcripts are already cached, no Vosk process is started.
-
-The current Russian model pool from Vosk is small:
-
-| Model | Published size | Practical use |
-| --- | ---: | --- |
-| `vosk-model-small-ru-0.22` | 45M | Default. Lightweight wideband Russian model for local Harvest runs. |
-| `vosk-model-ru-0.42` | 1.8G | Larger server model to evaluate only if the small model is too inaccurate. |
-| `vosk-model-ru-0.22` | 1.5G | Older large Russian model. |
-| `vosk-model-ru-0.10` | 2.5G | Older narrowband Russian model. |
-| `vosk-recasepunc-ru-0.22` | 1.6G | Optional punctuation/case post-processing model, not part of the ASR default. |
-
-The small Russian model is larger after extraction than its download size; a local extracted copy is
-roughly a few hundred MiB and Vosk metadata reports about `0.51-0.56 GiB` runtime memory. That is small
-enough for a local Mac session worker, but still large enough that per-file model startup should be
-avoided.
-
-`cmd/vosk-transcribe` loads `libvosk` at runtime. Set `TG_HARVEST_VOSK_LIBRARY_PATH` or
-`VOSK_LIBRARY_PATH` if the library is not in a standard location such as `/opt/homebrew/lib` or
-`/usr/local/lib`.
-
-`TG_HARVEST_TRANSCRIBE_CMD` remains an explicit override for non-Vosk ASR commands. Override commands
-run per attachment because they do not share the Vosk session protocol.
+- Telegram operations read-only: никаких send/click/delete/join/pin/mark-read.
+- Broad full-account daily scan пишет только outgoing/self messages.
+- Study scope ограничивается `TG_HARVEST_STUDY_ALLOWED_CHATS`, когда allowlist задан.
+- `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, dumps и generated views приватные и не коммитятся.
+- Live Telegram поведение проверяется вручную после логина; автоматические тесты покрывают локальную логику, config, state, rendering и helpers.
