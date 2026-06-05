@@ -180,8 +180,8 @@ func compactTranscript(value string) string {
 
 func DailyDefaultOutputPaths(stateDir string, date string) (string, string) {
 	reportRoot := DailyDefaultReportRoot(stateDir)
-	return filepath.Join(reportRoot, "jsonl", date+".jsonl"),
-		filepath.Join(reportRoot, "md", date+".md")
+	return filepath.Join(stateDir, "jsonl", date+".jsonl"),
+		filepath.Join(reportRoot, date+".md")
 }
 
 func DailyDefaultReportRoot(stateDir string) string {

@@ -18,20 +18,31 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"compact",
 		"download-media --chat",
 		"daily-download-media --chat",
+		"--profile main|study",
 		"Telegram operations are read-only",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("help missing %q:\n%s", want, stdout)
 		}
 	}
+	if strings.Contains(stdout, "daily-login") {
+		t.Fatalf("help should not advertise legacy daily-login:\n%s", stdout)
+	}
 }
 
-func TestDailyCommandRouting(t *testing.T) {
-	if !isDailyCommand("daily-download-media") {
-		t.Fatalf("daily-download-media should use daily config")
+func TestDefaultProfileRouting(t *testing.T) {
+	if got := defaultProfileForCommand("daily"); got != "main" {
+		t.Fatalf("daily default profile = %s", got)
 	}
-	if isDailyCommand("download-media") {
-		t.Fatalf("download-media should use study config")
+	if got := defaultProfileForCommand("daily-download-media"); got != "main" {
+		t.Fatalf("daily-download-media default profile = %s", got)
+	}
+	if got := defaultProfileForCommand("sync"); got != "study" {
+		t.Fatalf("sync default profile = %s", got)
+	}
+	command, profile, includeRuntime := normalizeCommandAlias("daily-login")
+	if command != "login" || profile != "main" || includeRuntime {
+		t.Fatalf("daily-login alias = command:%s profile:%s runtime:%t", command, profile, includeRuntime)
 	}
 }
 
@@ -48,6 +59,7 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	for _, want := range []string{
+		"profile=study",
 		"state_dir=" + filepath.Join(dir, "state"),
 		"session=" + filepath.Join(dir, "sessions", "user.json"),
 		"allowed_chats=2",
@@ -59,7 +71,34 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 	}
 }
 
-func TestRunDailyConfigUsesHarvestMode(t *testing.T) {
+func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"TG_HARVEST_APP_ID":          "77",
+		"TG_HARVEST_APP_HASH":        "daily-hash",
+		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "daily-state"),
+		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "daily-session.json"),
+		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
+		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
+		"TG_HARVEST_RETENTION_DAYS":  "10",
+	}
+	code, stdout, stderr := runCommand(t, []string{"print-config", "--profile", "main"}, env)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"profile=main",
+		"app_id_set=true",
+		"state_dir=" + filepath.Join(dir, "daily-state"),
+		"session=" + filepath.Join(dir, "daily-session.json"),
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("main print-config missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestLegacyDailyConfigAliasUsesMainProfileAndRuntime(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
 		"TG_HARVEST_APP_ID":          "77",
@@ -75,10 +114,7 @@ func TestRunDailyConfigUsesHarvestMode(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	for _, want := range []string{
-		"mode=daily",
-		"app_id_set=true",
-		"state_dir=" + filepath.Join(dir, "daily-state"),
-		"session=" + filepath.Join(dir, "daily-session.json"),
+		"profile=main",
 		"daily_transcribe_default=true",
 		"daily_vosk_command=/tmp/vosk-transcribe",
 		"daily_vosk_model_path=" + filepath.Join(dir, "vosk-model-small-ru-0.22"),

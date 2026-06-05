@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
   <img alt="Telegram" src="https://img.shields.io/badge/Telegram-MTProto-26A5E4?logo=telegram&logoColor=white">
-  <img alt="JSONL" src="https://img.shields.io/badge/output-JSONL-111111">
+  <img alt="Markdown reports" src="https://img.shields.io/badge/reports-Markdown-111111">
   <img alt="Read only" src="https://img.shields.io/badge/default-read--only-0E7C7B">
 </p>
 
@@ -25,14 +25,16 @@
 `telegram-harvest` is the current CLI path for Telegram Harvest. It reads
 Telegram through MTProto user authorization and writes local data for downstream agents.
 
-Study commands stay scoped by an explicit allowlist. Daily commands use the main harvest account
-configuration and export only messages sent by the authorized user. The tool does not send messages, click
-buttons, delete content, join chats, pin/unpin messages, or mark chats read.
+Study commands stay scoped by an explicit allowlist. Account selection is profile-based:
+`--profile study` uses `TG_HARVEST_STUDY_*`, while `--profile main` uses `TG_HARVEST_*`.
+Daily export is a scenario, not an account type, and exports only messages sent by the authorized user.
+The tool does not send messages, click buttons, delete content, join chats, pin/unpin messages, or mark
+chats read.
 
 | Capability | What it gives |
 | --- | --- |
-| Study mode | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows use `TG_HARVEST_STUDY_*`. |
-| Daily mode | `daily` scans dialogs sequentially with `TG_HARVEST_*` and exports only outgoing/self messages for one day. |
+| Study profile | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows default to `TG_HARVEST_STUDY_*`. |
+| Main profile | `daily` defaults to `TG_HARVEST_*` and exports only outgoing/self messages for one day. |
 | Allowlisted reads | Study commands refuse chats outside the study allowlist when it is set. |
 | Resumable sync | Full backfills can resume from `backfill.next_offset_id` after interruption. |
 | JSONL source layer | Every message record keeps chat, message id, date, sender, text, links, attachments, and optional local attachment paths. |
@@ -47,14 +49,14 @@ buttons, delete content, join chats, pin/unpin messages, or mark chats read.
 cd telegram-harvest
 cp .env.example .env
 make setup
-make daily-doctor
-make daily-login
+go run ./cmd/telegram-harvest --profile main doctor
+go run ./cmd/telegram-harvest --profile main login
 ```
 
-For fresh daily login, create Telegram app credentials at <https://my.telegram.org>. For study mode,
-configure `TG_HARVEST_STUDY_*`, then run `make doctor` and `make login`.
-If Telegram Desktop is already logged in locally, you can import its `tdata` session for study mode
-instead. Do not use this import path for daily reports:
+For fresh main-profile login, create Telegram app credentials at <https://my.telegram.org>. For study
+mode, configure `TG_HARVEST_STUDY_*`, then run `make doctor` and `make login`.
+If Telegram Desktop is already logged in locally, you can import its `tdata` session. The command
+defaults to the study profile; pass `--profile main` only when you explicitly want that profile:
 
 ```bash
 go run ./cmd/telegram-harvest import-tdesktop --account-index 1
@@ -80,9 +82,8 @@ make topics CHAT=1234567890
 
 ## Daily Harvest
 
-Daily harvest is intended for the main-account session. It does not use the Telegram Desktop
-test-app fallback or the study `tdata` import session; configure app credentials from
-<https://my.telegram.org> with `TG_HARVEST_*`:
+Daily harvest defaults to the main-account profile. It uses the same universal profile selector as the
+other commands; configure main app credentials from <https://my.telegram.org> with `TG_HARVEST_*`:
 
 ```dotenv
 TG_HARVEST_APP_ID=12345678
@@ -92,15 +93,15 @@ TG_HARVEST_SESSION_PATH=.sessions/daily.json
 TG_HARVEST_STATE_DIR=.state/daily
 ```
 
-`TG_HARVEST_SESSION_PATH` must point to a dedicated daily/main-account session, not
-`.sessions/user.json`. That file is reserved for study-mode Telegram Desktop imports.
+`TG_HARVEST_SESSION_PATH` defaults to a dedicated main-account session. Study-mode Telegram Desktop
+imports default to `TG_HARVEST_STUDY_SESSION_PATH=.sessions/user.json`.
 
 Login and verify:
 
 ```bash
-go run ./cmd/telegram-harvest daily-login
-go run ./cmd/telegram-harvest daily-doctor
-go run ./cmd/telegram-harvest daily-me
+go run ./cmd/telegram-harvest --profile main login
+go run ./cmd/telegram-harvest --profile main doctor
+go run ./cmd/telegram-harvest --profile main me
 ```
 
 Export a day. User-facing reports are written to the visible `reports/daily` directory in the project
@@ -113,8 +114,8 @@ go run ./cmd/telegram-harvest daily --date yesterday
 Default outputs:
 
 ```text
-reports/daily/jsonl/YYYY-MM-DD.jsonl
-reports/daily/md/YYYY-MM-DD.md
+reports/daily/YYYY-MM-DD.md
+.state/daily/jsonl/YYYY-MM-DD.jsonl
 .state/daily/media/...
 .state/daily/transcripts/cache/...
 ```
@@ -124,6 +125,7 @@ message text or media kind, Telegram message links when Telegram can produce the
 and transcripts when available. Photos and image documents are kept under `.state/daily/media/`.
 Voice, audio, round video, and regular video are downloaded to a temporary file, converted with
 `ffmpeg`, transcribed, then deleted; the report keeps only transcript text and `transcript_path`.
+Raw JSONL stays under `.state/daily/jsonl/` for audit/debug and is not the user-facing report output.
 
 Vosk is the default transcription path. Build the local helper with `make vosk-transcribe`, place a
 Russian model under `models/vosk-model-small-ru-0.22`, and Harvest will auto-detect both local paths
@@ -138,8 +140,8 @@ TG_HARVEST_FFMPEG_COMMAND=ffmpeg
 TG_HARVEST_RETENTION_DAYS=14
 ```
 
-`daily-doctor` reports `daily_ffmpeg_status`, `daily_vosk_command_status`, and
-`daily_vosk_model_status`. Vosk itself is CPU-based; `ffmpeg` handles audio extraction/conversion.
+`telegram-harvest daily --help` shows Vosk and media defaults. Vosk itself is CPU-based; `ffmpeg`
+handles audio extraction/conversion.
 Transcript cache is keyed by Telegram media id when available, so reruns skip already-transcribed
 audio/video without downloading it again and do not start the Vosk worker for cache hits.
 
@@ -291,7 +293,7 @@ make fmt
 | Path | Purpose |
 | --- | --- |
 | `cmd/telegram-harvest` | CLI entrypoint and command wiring. |
-| `internal/config` | Env loading, study and daily mode defaults, and study-chat allowlist. |
+| `internal/config` | Env loading, main/study profile defaults, and study-chat allowlist. |
 | `internal/mtproto` | Telegram transport, Telegram Desktop import, history, topic, and daily outgoing reads. |
 | `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |
 | `internal/runlock` | Per-session runtime lock. |

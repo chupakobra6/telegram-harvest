@@ -33,53 +33,54 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		printUsage(stderr)
 		return 2
 	}
+	profile, args, err := extractProfileArg(args)
+	if err != nil {
+		return printError(stderr, 2, err)
+	}
+	if len(args) == 0 {
+		printUsage(stderr)
+		return 2
+	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		printUsage(stdout)
 		return 0
+	}
+	command, aliasProfile, includeDailyRuntime := normalizeCommandAlias(args[0])
+	args[0] = command
+	if profile == "" {
+		profile = aliasProfile
 	}
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
 		return printError(stderr, 1, err)
 	}
-	cfg, err := loadCommandConfig(args[0])
+	if profile == "" {
+		profile = firstEnvValue("TG_HARVEST_PROFILE")
+	}
+	if profile == "" {
+		profile = defaultProfileForCommand(command)
+	}
+	cfg, err := loadProfileConfig(profile)
 	if err != nil {
 		return printError(stderr, 1, err)
 	}
 	cfg = cfg.WithRoot(projectRoot)
-	if shouldUseTelegramDesktopDefaults(args[0]) {
+	if shouldUseTelegramDesktopDefaults(command, cfg.Mode) {
 		cfg = cfg.WithTelegramDesktopDefaults()
 	}
 	client := mtproto.New(cfg)
 
-	switch args[0] {
+	switch command {
 	case "print-config":
-		printConfig(cfg, stdout)
+		printConfig(cfg, stdout, includeDailyRuntime)
 		return 0
 	case "doctor":
-		printDoctor(cfg, stdout, client)
+		printDoctor(cfg, stdout, client, includeDailyRuntime)
 		return 0
 	case "login":
 		if err := withRuntimeLock(cfg, func() error {
 			return client.Login(context.Background(), stdin, stdout)
 		}); err != nil {
-			return printError(stderr, 1, err)
-		}
-		return 0
-	case "daily-config":
-		printConfig(cfg, stdout)
-		return 0
-	case "daily-doctor":
-		printDoctor(cfg, stdout, client)
-		return 0
-	case "daily-login":
-		if err := withRuntimeLock(cfg, func() error {
-			return client.Login(context.Background(), stdin, stdout)
-		}); err != nil {
-			return printError(stderr, 1, err)
-		}
-		return 0
-	case "daily-me":
-		if err := runMe(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
 		return 0
@@ -145,25 +146,77 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	}
 }
 
-func loadCommandConfig(command string) (config.Config, error) {
-	if isDailyCommand(command) {
-		return config.LoadDaily()
+func extractProfileArg(args []string) (string, []string, error) {
+	result := make([]string, 0, len(args))
+	profile := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--profile" || arg == "-profile":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("%s requires a value", arg)
+			}
+			if profile != "" {
+				return "", nil, fmt.Errorf("--profile specified more than once")
+			}
+			profile = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--profile="):
+			if profile != "" {
+				return "", nil, fmt.Errorf("--profile specified more than once")
+			}
+			profile = strings.TrimPrefix(arg, "--profile=")
+		case strings.HasPrefix(arg, "-profile="):
+			if profile != "" {
+				return "", nil, fmt.Errorf("--profile specified more than once")
+			}
+			profile = strings.TrimPrefix(arg, "-profile=")
+		default:
+			result = append(result, arg)
+		}
 	}
-	return config.LoadStudy()
+	return profile, result, nil
+}
+
+func normalizeCommandAlias(command string) (string, string, bool) {
+	switch command {
+	case "daily-config":
+		return "print-config", "main", true
+	case "daily-doctor":
+		return "doctor", "main", true
+	case "daily-login":
+		return "login", "main", false
+	case "daily-me":
+		return "me", "main", false
+	default:
+		return command, "", command == "daily"
+	}
+}
+
+func loadProfileConfig(profile string) (config.Config, error) {
+	return config.LoadProfile(profile)
 }
 
 func isDailyCommand(command string) bool {
 	return command == "daily" || strings.HasPrefix(command, "daily-")
 }
 
-func shouldUseTelegramDesktopDefaults(command string) bool {
-	return command != "login" && !isDailyCommand(command)
+func defaultProfileForCommand(command string) string {
+	if isDailyCommand(command) {
+		return "main"
+	}
+	return "study"
+}
+
+func shouldUseTelegramDesktopDefaults(command string, profile config.Mode) bool {
+	return command != "login" && profile == config.ModeStudy
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest [--profile main|study] <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
+	fmt.Fprintln(out, "  --profile main|study  # account profile; defaults to main for daily*, study for study commands")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
@@ -173,9 +226,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
-	fmt.Fprintln(out, "  daily --date today [--out reports/daily/jsonl/YYYY-MM-DD.jsonl] [--markdown-out reports/daily/md/YYYY-MM-DD.md] [--download-media=false]")
+	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
-	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_HARVEST_* account settings")
 }
 
 func printError(stderr io.Writer, code int, err error) int {
@@ -183,8 +235,8 @@ func printError(stderr io.Writer, code int, err error) int {
 	return code
 }
 
-func printConfig(cfg config.Config, out io.Writer) {
-	fmt.Fprintf(out, "mode=%s\n", defaultModeName(cfg.Mode))
+func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
+	fmt.Fprintf(out, "profile=%s\n", config.ProfileName(cfg.Mode))
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -196,13 +248,13 @@ func printConfig(cfg config.Config, out io.Writer) {
 	fmt.Fprintf(out, "history_batch_size=%d\n", cfg.BatchSize)
 	fmt.Fprintf(out, "history_limit=%d\n", cfg.HistoryLimit)
 	fmt.Fprintf(out, "max_batches=%d\n", cfg.MaxBatches)
-	if cfg.Mode == config.ModeDaily {
+	if includeDailyRuntime {
 		printDailyRuntimeConfig(out, false)
 	}
 }
 
-func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
-	fmt.Fprintf(out, "mode=%s\n", defaultModeName(cfg.Mode))
+func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client, includeDailyRuntime bool) {
+	fmt.Fprintf(out, "profile=%s\n", config.ProfileName(cfg.Mode))
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -213,7 +265,7 @@ func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
 	fmt.Fprintf(out, "state_dir_exists=%t\n", fileExists(cfg.StateDir))
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
 	fmt.Fprintf(out, "read_only=true\n")
-	if cfg.Mode == config.ModeDaily {
+	if includeDailyRuntime {
 		printDailyRuntimeConfig(out, true)
 	}
 	authStatus, authDetail := doctorAuthStatus(cfg, client)
@@ -649,7 +701,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	fs.SetOutput(out)
 	dateRaw := fs.String("date", dateDefault, "day to harvest: today, yesterday, or YYYY-MM-DD in Europe/Moscow")
 	output := fs.String("out", defaultJSONL, "JSONL output path; relative paths are resolved under state dir")
-	markdownOut := fs.String("markdown-out", defaultMarkdown, "Markdown output path; relative paths are resolved under state dir")
+	markdownOut := fs.String("markdown-out", defaultMarkdown, "Markdown report output path; default writes to visible reports/daily")
 	dialogLimit := fs.Int("dialog-limit", dailyDialogLimitDefault(), "maximum dialogs to scan")
 	limit := fs.Int("limit", 0, "maximum newest records to write after filtering; 0 means all")
 	batchSize := fs.Int("batch-size", cfg.BatchSize, "Telegram history/search batch size, max 100")
@@ -1217,13 +1269,6 @@ func resolveCommand(command string) (string, bool) {
 		return command, true
 	}
 	return "", false
-}
-
-func defaultModeName(mode config.Mode) string {
-	if strings.TrimSpace(string(mode)) == "" {
-		return string(config.ModeStudy)
-	}
-	return string(mode)
 }
 
 func defaultTDataPath() string {

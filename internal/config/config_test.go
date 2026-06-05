@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -56,6 +55,39 @@ func TestLoadDailyUsesHarvestEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.StateDir != DefaultDailyStateDir {
 		t.Fatalf("daily state dir = %s", cfg.StateDir)
+	}
+}
+
+func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
+	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
+	t.Setenv("TG_HARVEST_APP_ID", "77")
+	t.Setenv("TG_HARVEST_APP_HASH", "main-hash")
+
+	study, err := LoadProfile("study")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if study.Mode != ModeStudy || study.AppID != 42 || study.AppHash != "study-hash" {
+		t.Fatalf("study profile = %+v", study)
+	}
+	main, err := LoadProfile("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if main.Mode != ModeDaily || main.AppID != 77 || main.AppHash != "main-hash" {
+		t.Fatalf("main profile = %+v", main)
+	}
+	legacy, err := LoadProfile("daily")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Mode != ModeDaily {
+		t.Fatalf("legacy daily profile mode = %q", legacy.Mode)
+	}
+	if _, err := LoadProfile("unknown"); err == nil {
+		t.Fatalf("expected unknown profile error")
 	}
 }
 
@@ -147,37 +179,6 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 	}
 }
 
-func TestValidateRuntimeRejectsDailyStudyImportSessionPath(t *testing.T) {
-	valid := Config{
-		Mode:         ModeDaily,
-		AppID:        1,
-		AppHash:      "hash",
-		SessionPath:  DefaultDailySessionPath,
-		StateDir:     DefaultDailyStateDir,
-		RPCSpacing:   time.Second,
-		BatchSize:    80,
-		HistoryLimit: 500,
-		MaxBatches:   20,
-	}
-	if err := valid.ValidateRuntime(); err != nil {
-		t.Fatalf("daily session rejected: %v", err)
-	}
-	for _, sessionPath := range []string{
-		DefaultSessionPath,
-		filepath.Join("/repo", DefaultSessionPath),
-	} {
-		cfg := valid
-		cfg.SessionPath = sessionPath
-		err := cfg.ValidateRuntime()
-		if err == nil {
-			t.Fatalf("expected %s to be rejected", sessionPath)
-		}
-		if !strings.Contains(err.Error(), "must not point to the study Telegram Desktop import session") {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	}
-}
-
 func TestWithRootAndRuntimeLockPath(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
@@ -224,6 +225,7 @@ func clearTelegramConfigEnv(t *testing.T) {
 		"HISTORY_BATCH_SIZE",
 		"HISTORY_LIMIT",
 		"MAX_BATCHES",
+		"PROFILE",
 	}
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {

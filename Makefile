@@ -1,4 +1,6 @@
 CLI := go run ./cmd/telegram-harvest
+PROFILE ?= study
+DAILY_PROFILE ?= main
 MEDIA_LIMIT_FLAGS = \
 	$(if $(strip $(MAX_PHOTO_BYTES)),--max-photo-bytes "$(MAX_PHOTO_BYTES)",) \
 	$(if $(strip $(MAX_DOCUMENT_BYTES)),--max-document-bytes "$(MAX_DOCUMENT_BYTES)",) \
@@ -7,7 +9,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt test vosk-transcribe doctor login daily-doctor daily-login daily-me daily daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup fmt test vosk-transcribe doctor login main-doctor main-login main-me daily daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -15,10 +17,10 @@ help:
 	@printf "  make fmt     # gofmt project files\\n"
 	@printf "  make test    # go test ./...\\n"
 	@printf "  make vosk-transcribe # build local Vosk helper into bin/\\n"
-	@printf "  make doctor  # show config/session status\\n"
-	@printf "  make login   # create MTProto user session\\n"
-	@printf "  make daily-doctor # show daily mode config/session status\\n"
-	@printf "  make daily-login  # create daily mode MTProto user session\\n"
+	@printf "  make doctor  # show PROFILE=study config/session status\\n"
+	@printf "  make login   # create PROFILE=study MTProto user session\\n"
+	@printf "  make main-doctor # show main profile config/session status\\n"
+	@printf "  make main-login  # create main profile MTProto user session\\n"
 	@printf "  make daily   # export outgoing/self messages for DATE=today|yesterday|YYYY-MM-DD\\n"
 	@printf "  make daily-download-media # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make chats   # list allowed study dialogs; pass QUERY='вшэ' to filter\\n"
@@ -44,46 +46,46 @@ vosk-transcribe:
 	go build -o bin/vosk-transcribe ./cmd/vosk-transcribe
 
 doctor:
-	$(CLI) doctor
+	$(CLI) --profile "$(PROFILE)" doctor
 
 login:
-	$(CLI) login
+	$(CLI) --profile "$(PROFILE)" login
 
-daily-doctor:
-	$(CLI) daily-doctor
+main-doctor:
+	$(CLI) --profile main doctor
 
-daily-login:
-	$(CLI) daily-login
+main-login:
+	$(CLI) --profile main login
 
-daily-me:
-	$(CLI) daily-me
+main-me:
+	$(CLI) --profile main me
 
 daily:
-	$(CLI) daily --date "$(or $(DATE),today)" $(if $(strip $(OUT)),--out "$(OUT)",) $(if $(strip $(MARKDOWN_OUT)),--markdown-out "$(MARKDOWN_OUT)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(RETAIN_DAYS)),--retain-days "$(RETAIN_DAYS)",) $(if $(strip $(PROGRESS)),--progress,)
+	$(CLI) --profile "$(DAILY_PROFILE)" daily --date "$(or $(DATE),today)" $(if $(strip $(OUT)),--out "$(OUT)",) $(if $(strip $(MARKDOWN_OUT)),--markdown-out "$(MARKDOWN_OUT)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(RETAIN_DAYS)),--retain-days "$(RETAIN_DAYS)",) $(if $(strip $(PROGRESS)),--progress,)
 
 daily-download-media:
-	$(CLI) daily-download-media --chat "$(CHAT)" --message-id "$(MESSAGE_ID)" $(if $(strip $(INDEX)),--index "$(INDEX)",) $(if $(strip $(OUT_DIR)),--out-dir "$(OUT_DIR)",) $(if $(strip $(OVERWRITE)),--overwrite,) $(if $(strip $(JSON)),--json,)
+	$(CLI) --profile "$(DAILY_PROFILE)" daily-download-media --chat "$(CHAT)" --message-id "$(MESSAGE_ID)" $(if $(strip $(INDEX)),--index "$(INDEX)",) $(if $(strip $(OUT_DIR)),--out-dir "$(OUT_DIR)",) $(if $(strip $(OVERWRITE)),--overwrite,) $(if $(strip $(JSON)),--json,)
 
 chats:
-	$(CLI) chats $(if $(strip $(QUERY)),--query "$(QUERY)",)
+	$(CLI) --profile "$(PROFILE)" chats $(if $(strip $(QUERY)),--query "$(QUERY)",)
 
 topics:
-	$(CLI) topics --chat "$(CHAT)"
+	$(CLI) --profile "$(PROFILE)" topics --chat "$(CHAT)"
 
 dump:
-	$(CLI) dump --chat "$(CHAT)" --out "$(or $(OUT),chat.jsonl)" $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
+	$(CLI) --profile "$(PROFILE)" dump --chat "$(CHAT)" --out "$(or $(OUT),chat.jsonl)" $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
 
 sync:
-	$(CLI) sync --chat "$(CHAT)" --name "$(NAME)" $(if $(strip $(ALL)),--all,) $(if $(strip $(RESET)),--reset,) $(if $(strip $(RESET_MERGED)),--reset-merged,) $(if $(strip $(BATCH_SIZE)),--batch-size "$(BATCH_SIZE)",) $(if $(strip $(MERGED_OUT)),--merged-out "$(MERGED_OUT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
+	$(CLI) --profile "$(PROFILE)" sync --chat "$(CHAT)" --name "$(NAME)" $(if $(strip $(ALL)),--all,) $(if $(strip $(RESET)),--reset,) $(if $(strip $(RESET_MERGED)),--reset-merged,) $(if $(strip $(BATCH_SIZE)),--batch-size "$(BATCH_SIZE)",) $(if $(strip $(MERGED_OUT)),--merged-out "$(MERGED_OUT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
 
 download-media:
-	$(CLI) download-media --chat "$(CHAT)" --message-id "$(MESSAGE_ID)" $(if $(strip $(INDEX)),--index "$(INDEX)",) $(if $(strip $(OUT_DIR)),--out-dir "$(OUT_DIR)",) $(if $(strip $(OVERWRITE)),--overwrite,) $(if $(strip $(JSON)),--json,)
+	$(CLI) --profile "$(PROFILE)" download-media --chat "$(CHAT)" --message-id "$(MESSAGE_ID)" $(if $(strip $(INDEX)),--index "$(INDEX)",) $(if $(strip $(OUT_DIR)),--out-dir "$(OUT_DIR)",) $(if $(strip $(OVERWRITE)),--overwrite,) $(if $(strip $(JSON)),--json,)
 
 compact:
-	$(CLI) compact --in "$(or $(IN),messages.jsonl)" --out "$(or $(OUT),messages.toon)" $(if $(strip $(SINCE)),--since "$(SINCE)",) $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(INCLUDE_SERVICE)),--include-service,)
+	$(CLI) --profile "$(PROFILE)" compact --in "$(or $(IN),messages.jsonl)" --out "$(or $(OUT),messages.toon)" $(if $(strip $(SINCE)),--since "$(SINCE)",) $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(INCLUDE_SERVICE)),--include-service,)
 
 agent-view:
-	$(CLI) agent-view --in "$(or $(IN),messages.jsonl)" --out-dir "$(or $(OUT_DIR),agent-view)" $(if $(strip $(SINCE)),--since "$(SINCE)",) $(if $(strip $(RECENT)),--recent "$(RECENT)",) $(if $(strip $(INCLUDE_SERVICE)),--include-service,) $(if $(strip $(REBUILD)),--rebuild,)
+	$(CLI) --profile "$(PROFILE)" agent-view --in "$(or $(IN),messages.jsonl)" --out-dir "$(or $(OUT_DIR),agent-view)" $(if $(strip $(SINCE)),--since "$(SINCE)",) $(if $(strip $(RECENT)),--recent "$(RECENT)",) $(if $(strip $(INCLUDE_SERVICE)),--include-service,) $(if $(strip $(REBUILD)),--rebuild,)
 
 refresh-agent-view: agent-view compact
 

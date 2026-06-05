@@ -56,6 +56,39 @@ func LoadDaily() (Config, error) {
 	return loadMode(ModeDaily, DefaultDailySessionPath, DefaultDailyStateDir)
 }
 
+func LoadProfile(profile string) (Config, error) {
+	mode, err := ProfileMode(profile)
+	if err != nil {
+		return Config{}, err
+	}
+	switch mode {
+	case ModeDaily:
+		return LoadDaily()
+	default:
+		return LoadStudy()
+	}
+}
+
+func ProfileMode(profile string) (Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "", "study":
+		return ModeStudy, nil
+	case "main", "daily":
+		return ModeDaily, nil
+	default:
+		return "", fmt.Errorf("unknown profile %q; use main or study", profile)
+	}
+}
+
+func ProfileName(mode Mode) string {
+	switch mode {
+	case ModeDaily:
+		return "main"
+	default:
+		return "study"
+	}
+}
+
 func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Config, error) {
 	appID, err := intFromEnvAny(envKeys(mode, "APP_ID"), 0)
 	if err != nil {
@@ -168,14 +201,6 @@ func (c Config) ValidateRuntime() error {
 	if strings.TrimSpace(c.SessionPath) == "" {
 		return fmt.Errorf("%s is required", c.EnvName("SESSION_PATH"))
 	}
-	if c.Mode == ModeDaily && isDefaultStudySessionPath(c.SessionPath) {
-		return fmt.Errorf("%s must not point to the study Telegram Desktop import session %s; use a dedicated main-account session such as %s and run %s",
-			c.EnvName("SESSION_PATH"),
-			DefaultSessionPath,
-			DefaultDailySessionPath,
-			c.LoginCommand(),
-		)
-	}
 	if strings.TrimSpace(c.StateDir) == "" {
 		return fmt.Errorf("%s is required", c.EnvName("STATE_DIR"))
 	}
@@ -192,12 +217,6 @@ func (c Config) ValidateRuntime() error {
 		return fmt.Errorf("max batches must be > 0")
 	}
 	return nil
-}
-
-func isDefaultStudySessionPath(path string) bool {
-	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
-	study := filepath.ToSlash(filepath.Clean(DefaultSessionPath))
-	return clean == study || strings.HasSuffix(clean, "/"+study)
 }
 
 func (c Config) WithRoot(root string) Config {
@@ -219,10 +238,7 @@ func (c Config) EnvNames(suffix string) string {
 }
 
 func (c Config) LoginCommand() string {
-	if c.Mode == ModeDaily {
-		return "telegram-harvest daily-login"
-	}
-	return "telegram-harvest login"
+	return "telegram-harvest --profile " + ProfileName(c.Mode) + " login"
 }
 
 func (c Config) RuntimeLockPath() string {
