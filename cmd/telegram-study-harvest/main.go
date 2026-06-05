@@ -645,7 +645,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
 	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
 	transcribeMedia := fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download")
-	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand, "legacy shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
+	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand, "custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
 	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk helper command, called as: command <model> <wav> [grammar]")
 	voskModelPath := fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory")
 	voskGrammarPath := fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path")
@@ -988,7 +988,7 @@ func parseDailyDate(value string, now time.Time) (string, time.Time, time.Time, 
 }
 
 func dailyDialogLimitDefault() int {
-	if value, ok := intEnvValue("TG_HARVEST_DAILY_DIALOG_LIMIT", "TG_DAILY_DIALOG_LIMIT", "TG_HARVEST_DIALOG_LIMIT"); ok && value > 0 {
+	if value, ok := intEnvValue("TG_HARVEST_DIALOG_LIMIT"); ok && value > 0 {
 		return value
 	}
 	return 500
@@ -1005,25 +1005,25 @@ type dailyRuntimeConfig struct {
 }
 
 func dailyRuntimeDefaults() dailyRuntimeConfig {
-	transcribeCommand := firstEnvValue("TG_HARVEST_DAILY_TRANSCRIBE_CMD", "TG_DAILY_TRANSCRIBE_CMD", "TG_HARVEST_TRANSCRIBE_CMD")
-	voskCommand := firstEnvValue("TG_HARVEST_DAILY_VOSK_COMMAND", "TG_DAILY_VOSK_COMMAND", "TG_HARVEST_VOSK_COMMAND", "SHELFY_VOSK_COMMAND")
+	transcribeCommand := firstEnvValue("TG_HARVEST_TRANSCRIBE_CMD")
+	voskCommand := firstEnvValue("TG_HARVEST_VOSK_COMMAND")
 	if voskCommand == "" {
 		if resolved, err := exec.LookPath("vosk-transcribe"); err == nil {
 			voskCommand = resolved
 		}
 	}
-	voskModelPath := firstEnvValue("TG_HARVEST_DAILY_VOSK_MODEL_PATH", "TG_DAILY_VOSK_MODEL_PATH", "TG_HARVEST_VOSK_MODEL_PATH", "SHELFY_VOSK_MODEL_PATH")
+	voskModelPath := firstEnvValue("TG_HARVEST_VOSK_MODEL_PATH")
 	if voskModelPath == "" {
 		if candidate := defaultShelfyVoskModelPath(); candidate != "" {
 			voskModelPath = candidate
 		}
 	}
-	ffmpegCommand := firstEnvValue("TG_HARVEST_DAILY_FFMPEG_COMMAND", "TG_DAILY_FFMPEG_COMMAND", "TG_HARVEST_FFMPEG_COMMAND")
+	ffmpegCommand := firstEnvValue("TG_HARVEST_FFMPEG_COMMAND")
 	if ffmpegCommand == "" {
 		ffmpegCommand = transcribe.DefaultFFmpegCommand
 	}
 	retainDays := harvest.DefaultDailyRetentionDays
-	if value, ok := intEnvValue("TG_HARVEST_DAILY_RETENTION_DAYS", "TG_DAILY_RETENTION_DAYS", "TG_HARVEST_RETENTION_DAYS"); ok {
+	if value, ok := intEnvValue("TG_HARVEST_RETENTION_DAYS"); ok {
 		retainDays = value
 	}
 	return dailyRuntimeConfig{
@@ -1031,7 +1031,7 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 		TranscribeCommand: transcribeCommand,
 		VoskCommand:       voskCommand,
 		VoskModelPath:     voskModelPath,
-		VoskGrammarPath:   firstEnvValue("TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH", "TG_DAILY_VOSK_GRAMMAR_PATH", "TG_HARVEST_VOSK_GRAMMAR_PATH", "SHELFY_VOSK_GRAMMAR_PATH"),
+		VoskGrammarPath:   firstEnvValue("TG_HARVEST_VOSK_GRAMMAR_PATH"),
 		FFmpegCommand:     ffmpegCommand,
 		RetainDays:        retainDays,
 	}

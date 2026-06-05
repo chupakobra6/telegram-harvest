@@ -98,19 +98,12 @@ func envKeys(mode Mode, suffix string) []string {
 	switch mode {
 	case ModeDaily:
 		return []string{
-			"TG_HARVEST_DAILY_" + suffix,
-			"TG_DAILY_" + suffix,
 			"TG_HARVEST_" + suffix,
 		}
 	default:
-		keys := []string{
+		return []string{
 			"TG_HARVEST_STUDY_" + suffix,
-			"TG_STUDY_" + suffix,
 		}
-		if suffix == "APP_ID" || suffix == "APP_HASH" || suffix == "PHONE" || suffix == "PASSWORD" {
-			keys = append(keys, "TG_E2E_"+suffix)
-		}
-		return keys
 	}
 }
 
@@ -119,8 +112,6 @@ func displayEnvKeys(mode Mode, suffix string) []string {
 	case ModeDaily:
 		return []string{
 			"TG_HARVEST_" + suffix,
-			"TG_HARVEST_DAILY_" + suffix,
-			"TG_DAILY_" + suffix,
 		}
 	default:
 		return envKeys(mode, suffix)

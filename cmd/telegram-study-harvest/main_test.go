@@ -21,10 +21,10 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
-		"TG_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
-		"TG_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "user.json"),
-		"TG_STUDY_ALLOWED_CHATS": "12345,@study",
-		"TG_STUDY_HISTORY_LIMIT": "25",
+		"TG_HARVEST_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
+		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "user.json"),
+		"TG_HARVEST_STUDY_ALLOWED_CHATS": "12345,@study",
+		"TG_HARVEST_STUDY_HISTORY_LIMIT": "25",
 	}
 	code, stdout, stderr := runCommand(t, []string{"print-config"}, env)
 	if code != 0 {
@@ -91,8 +91,8 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 		`{"source":"telegram","chat":{"id":123,"display":"Study"},"message_id":2,"date":"2026-05-10T11:00:00Z","sender":{"display":"Teacher"},"kind":"text","text":"second"}`,
 	}, "\n")+"\n")
 	env := map[string]string{
-		"TG_STUDY_STATE_DIR":    stateDir,
-		"TG_STUDY_SESSION_PATH": filepath.Join(dir, "sessions", "user.json"),
+		"TG_HARVEST_STUDY_STATE_DIR":    stateDir,
+		"TG_HARVEST_STUDY_SESSION_PATH": filepath.Join(dir, "sessions", "user.json"),
 	}
 
 	code, stdout, stderr := runCommand(t, []string{"compact", "--in", "messages.jsonl", "--out", "messages.toon"}, env)
@@ -131,9 +131,9 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 func TestRunReadCommandsRefuseChatsOutsideAllowlistBeforeRuntimeAccess(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
-		"TG_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
-		"TG_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "user.json"),
-		"TG_STUDY_ALLOWED_CHATS": "12345",
+		"TG_HARVEST_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
+		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "user.json"),
+		"TG_HARVEST_STUDY_ALLOWED_CHATS": "12345",
 	}
 	for _, args := range [][]string{
 		{"topics", "--chat", "999"},
@@ -190,10 +190,10 @@ func runCommand(t *testing.T, args []string, env map[string]string) (int, string
 	t.Helper()
 	baseDir := t.TempDir()
 	clearCommandEnv(t)
-	t.Setenv("TG_STUDY_APP_ID", "0")
-	t.Setenv("TG_STUDY_APP_HASH", "test-hash")
-	t.Setenv("TG_STUDY_STATE_DIR", filepath.Join(baseDir, "state"))
-	t.Setenv("TG_STUDY_SESSION_PATH", filepath.Join(baseDir, "sessions", "user.json"))
+	t.Setenv("TG_HARVEST_STUDY_APP_ID", "0")
+	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "test-hash")
+	t.Setenv("TG_HARVEST_STUDY_STATE_DIR", filepath.Join(baseDir, "state"))
+	t.Setenv("TG_HARVEST_STUDY_SESSION_PATH", filepath.Join(baseDir, "sessions", "user.json"))
 	for key, value := range env {
 		t.Setenv(key, value)
 	}
@@ -213,11 +213,7 @@ func clearCommandEnv(t *testing.T) {
 	t.Helper()
 	prefixes := []string{
 		"TG_HARVEST_",
-		"TG_HARVEST_DAILY_",
-		"TG_DAILY_",
 		"TG_HARVEST_STUDY_",
-		"TG_STUDY_",
-		"TG_E2E_",
 	}
 	suffixes := []string{
 		"APP_ID",

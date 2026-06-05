@@ -9,10 +9,10 @@ import (
 
 func TestLoadUsesStudyEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("TG_STUDY_APP_ID", "42")
-	t.Setenv("TG_STUDY_APP_HASH", "hash")
-	t.Setenv("TG_STUDY_PHONE", "+100")
-	t.Setenv("TG_STUDY_RPC_SPACING_MS", "2500")
+	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
+	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "hash")
+	t.Setenv("TG_HARVEST_STUDY_PHONE", "+100")
+	t.Setenv("TG_HARVEST_STUDY_RPC_SPACING_MS", "2500")
 
 	cfg, err := Load()
 	if err != nil {
@@ -32,27 +32,10 @@ func TestLoadUsesStudyEnv(t *testing.T) {
 	}
 }
 
-func TestLoadFallsBackToE2EEnv(t *testing.T) {
-	clearTelegramConfigEnv(t)
-	t.Setenv("TG_E2E_APP_ID", "99")
-	t.Setenv("TG_E2E_APP_HASH", "fallback")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.AppID != 99 {
-		t.Fatalf("AppID = %d", cfg.AppID)
-	}
-	if cfg.AppHash != "fallback" {
-		t.Fatalf("AppHash = %q", cfg.AppHash)
-	}
-}
-
 func TestLoadDailyUsesHarvestEnvAndDefaults(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("TG_STUDY_APP_ID", "42")
-	t.Setenv("TG_STUDY_APP_HASH", "study-hash")
+	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
+	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
 	t.Setenv("TG_HARVEST_APP_ID", "77")
 	t.Setenv("TG_HARVEST_APP_HASH", "daily-hash")
 	t.Setenv("TG_HARVEST_PHONE", "+200")
@@ -72,45 +55,6 @@ func TestLoadDailyUsesHarvestEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.StateDir != DefaultDailyStateDir {
 		t.Fatalf("daily state dir = %s", cfg.StateDir)
-	}
-}
-
-func TestLoadDailySpecificEnvOverridesHarvestEnv(t *testing.T) {
-	clearTelegramConfigEnv(t)
-	t.Setenv("TG_HARVEST_APP_ID", "88")
-	t.Setenv("TG_HARVEST_APP_HASH", "harvest-hash")
-	t.Setenv("TG_HARVEST_SESSION_PATH", ".sessions/main.json")
-	t.Setenv("TG_HARVEST_DAILY_APP_ID", "99")
-	t.Setenv("TG_HARVEST_DAILY_SESSION_PATH", ".sessions/daily-main.json")
-
-	cfg, err := LoadDaily()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.AppID != 99 || cfg.AppHash != "harvest-hash" {
-		t.Fatalf("daily override not loaded: %+v", cfg)
-	}
-	if cfg.SessionPath != ".sessions/daily-main.json" {
-		t.Fatalf("session path = %s", cfg.SessionPath)
-	}
-}
-
-func TestLoadStudyUsesHarvestStudyBeforeLegacyStudyEnv(t *testing.T) {
-	clearTelegramConfigEnv(t)
-	t.Setenv("TG_STUDY_APP_ID", "42")
-	t.Setenv("TG_STUDY_APP_HASH", "study-hash")
-	t.Setenv("TG_HARVEST_STUDY_APP_ID", "84")
-	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "harvest-study-hash")
-
-	cfg, err := LoadStudy()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Mode != ModeStudy {
-		t.Fatalf("mode = %q", cfg.Mode)
-	}
-	if cfg.AppID != 84 || cfg.AppHash != "harvest-study-hash" {
-		t.Fatalf("harvest study env not preferred: %+v", cfg)
 	}
 }
 
@@ -134,7 +78,7 @@ func TestLoadDotEnvDoesNotOverrideExistingEnv(t *testing.T) {
 
 func TestLoadAllowedChats(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("TG_STUDY_ALLOWED_CHATS", "1234567890, @study_chat 1234567890")
+	t.Setenv("TG_HARVEST_STUDY_ALLOWED_CHATS", "1234567890, @study_chat 1234567890")
 
 	cfg, err := Load()
 	if err != nil {
@@ -156,7 +100,7 @@ func TestLoadAllowedChats(t *testing.T) {
 
 func TestLoadRejectsInvalidIntegerEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("TG_STUDY_HISTORY_BATCH_SIZE", "many")
+	t.Setenv("TG_HARVEST_STUDY_HISTORY_BATCH_SIZE", "many")
 	_, err := Load()
 	if err == nil {
 		t.Fatalf("expected invalid integer error")
@@ -234,11 +178,7 @@ func clearTelegramConfigEnv(t *testing.T) {
 	t.Helper()
 	prefixes := []string{
 		"TG_HARVEST_",
-		"TG_HARVEST_DAILY_",
-		"TG_DAILY_",
 		"TG_HARVEST_STUDY_",
-		"TG_STUDY_",
-		"TG_E2E_",
 	}
 	suffixes := []string{
 		"APP_ID",

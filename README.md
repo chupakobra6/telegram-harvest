@@ -22,7 +22,7 @@
 
 ## Why
 
-`telegram-study-harvest` is the legacy CLI path for a broader Telegram Harvest tool. It reads
+`telegram-study-harvest` is the current CLI path for Telegram Harvest. It reads
 Telegram through MTProto user authorization and writes local data for downstream agents.
 
 Study commands stay scoped by an explicit allowlist. Daily commands use the main harvest account
@@ -31,7 +31,7 @@ buttons, delete content, join chats, pin/unpin messages, or mark chats read.
 
 | Capability | What it gives |
 | --- | --- |
-| Study mode | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows use `TG_HARVEST_STUDY_*` or legacy `TG_STUDY_*`. |
+| Study mode | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows use `TG_HARVEST_STUDY_*`. |
 | Daily mode | `daily` scans dialogs sequentially with `TG_HARVEST_*` and exports only outgoing/self messages for one day. |
 | Allowlisted reads | Study commands refuse chats outside the study allowlist when it is set. |
 | Resumable sync | Full backfills can resume from `backfill.next_offset_id` after interruption. |
@@ -52,7 +52,7 @@ make daily-login
 ```
 
 For fresh daily login, create Telegram app credentials at <https://my.telegram.org>. For study mode,
-configure `TG_HARVEST_STUDY_*` or legacy `TG_STUDY_*`, then run `make doctor` and `make login`.
+configure `TG_HARVEST_STUDY_*`, then run `make doctor` and `make login`.
 If Telegram Desktop is already logged in locally, you can import its `tdata` session for study mode
 instead:
 
@@ -136,7 +136,7 @@ TG_HARVEST_RETENTION_DAYS=14
 Transcript cache is keyed by Telegram media id when available, so reruns skip already-transcribed
 audio/video without downloading it again.
 
-The legacy command-template hook still exists as an override; placeholders are shell-quoted by the CLI:
+A custom command-template hook can override Vosk; placeholders are shell-quoted by the CLI:
 
 ```dotenv
 TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
@@ -208,7 +208,7 @@ For the full read protocol, see [docs/agent-navigation.md](docs/agent-navigation
 
 - `.env`, `.sessions/`, `.state/`, generated chat dumps, and local binaries are ignored by git.
 - `sync` and `dump` can download supported photo/document attachments with `--download-media --media-dir <dir>`. Downloaded files stay in private local state and are referenced from JSONL/agent views through `local_path`.
-- Study reads are constrained by `TG_HARVEST_STUDY_ALLOWED_CHATS` or legacy `TG_STUDY_ALLOWED_CHATS` when set.
+- Study reads are constrained by `TG_HARVEST_STUDY_ALLOWED_CHATS` when set.
 - Daily full-account scans are limited to outgoing/self messages and should use `.state/daily` or another private state directory.
 - Full-account broad dumps of other people's messages do not belong in this repository.
 - Live Telegram access is validated manually; automated tests use local fixtures.
