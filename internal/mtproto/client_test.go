@@ -92,6 +92,17 @@ func TestRunTranscriberUsesExplicitRunnerWithoutCommandConfig(t *testing.T) {
 	}
 }
 
+func TestTranscriptErrorMessageClassifiesNoAudioStream(t *testing.T) {
+	err := transcriptErrorMessage(errString("ffmpeg: exit status 234: [out#0/wav @ 0x123] Output file does not contain any stream Error opening output file /tmp/.vosk-123.wav"))
+	if err != "skipped: media has no audio stream" {
+		t.Fatalf("error = %q", err)
+	}
+	other := transcriptErrorMessage(errString("vosk session: model load failed"))
+	if other != "vosk session: model load failed" {
+		t.Fatalf("other error = %q", other)
+	}
+}
+
 func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing.T) {
 	got := extractLinks(
 		"open https://example.com/task, then t.me/group/10 and https://example.com/task",
@@ -113,6 +124,12 @@ func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing
 			t.Fatalf("links[%d]=%q want %q; all=%#v", i, got[i], want[i], got)
 		}
 	}
+}
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
 }
 
 type fakeTranscriber struct {

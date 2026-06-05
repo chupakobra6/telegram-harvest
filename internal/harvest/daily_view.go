@@ -86,9 +86,6 @@ func writeDailyMessage(b *strings.Builder, record MessageRecord) {
 	for _, attachment := range record.Attachments {
 		b.WriteString("\n")
 		b.WriteString("  **Вложение:** " + dailyAttachmentSummary(attachment) + "\n")
-		for _, issue := range dailyAttachmentIssues(attachment) {
-			b.WriteString("  **Проблема:** " + issue + "\n")
-		}
 		if transcript := compactTranscript(attachment.Transcript); transcript != "" {
 			b.WriteString("\n")
 			b.WriteString("  **Транскрипт:**\n")
@@ -146,17 +143,6 @@ func dailyAttachmentKindLabel(kind string) string {
 	}
 }
 
-func dailyAttachmentIssues(attachment Attachment) []string {
-	var issues []string
-	if issue := dailyMarkdownInlineText(attachment.DownloadError); issue != "" {
-		issues = append(issues, "не скачано: "+issue)
-	}
-	if issue := dailyMarkdownInlineText(attachment.TranscriptError); issue != "" {
-		issues = append(issues, "транскрипция не получилась: "+issue)
-	}
-	return issues
-}
-
 func dailyChatCount(records []MessageRecord) int {
 	seen := map[int64]struct{}{}
 	for _, record := range records {
@@ -182,10 +168,6 @@ func dailyMarkdownText(value string) string {
 	value = strings.ReplaceAll(value, "<br/>", "\n")
 	value = strings.ReplaceAll(value, "<br>", "\n")
 	return strings.ReplaceAll(compactText(value), "\\n", "\n")
-}
-
-func dailyMarkdownInlineText(value string) string {
-	return strings.Join(strings.Fields(dailyMarkdownText(value)), " ")
 }
 
 func writeDailyQuote(b *strings.Builder, value string, prefix string) {

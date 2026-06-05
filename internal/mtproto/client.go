@@ -1903,7 +1903,7 @@ func (s *Session) transcribeAttachmentMedia(
 	defer cancel()
 	transcript, err := runTranscriber(transcribeCtx, opts.Transcriber, transcribeOpts, tempPath, transcriptPath)
 	if err != nil {
-		attachment.TranscriptError = oneLine(err.Error())
+		attachment.TranscriptError = transcriptErrorMessage(err)
 		return
 	}
 	if strings.TrimSpace(transcript) == "" {
@@ -1919,6 +1919,20 @@ func runTranscriber(ctx context.Context, runner harvest.Transcriber, opts transc
 		return runner.Run(ctx, inputPath, outputPath)
 	}
 	return transcribe.Run(ctx, opts, inputPath, outputPath)
+}
+
+func transcriptErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := oneLine(err.Error())
+	lower := strings.ToLower(detail)
+	if strings.Contains(lower, "output file does not contain any stream") ||
+		strings.Contains(lower, "does not contain any stream") ||
+		strings.Contains(lower, "stream map") && strings.Contains(lower, "matches no streams") {
+		return "skipped: media has no audio stream"
+	}
+	return detail
 }
 
 func transcriptMediaKind(kind string) bool {

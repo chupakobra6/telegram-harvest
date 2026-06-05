@@ -27,8 +27,10 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 					MIMEType:         "audio/ogg",
 					Size:             12000,
 					LocalPath:        filepath.Join(dir, "voice.ogg"),
+					DownloadError:    "skipped: document size 215.0 MiB exceeds document cap 10.0 MiB",
 					TranscriptPath:   filepath.Join(dir, "voice.txt"),
 					TranscriptCached: true,
+					TranscriptError:  "ffmpeg: exit status 234: Output file does not contain any stream Error opening output file /tmp/.vosk.wav",
 					Transcript:       "Поговорил про итоги дня",
 				},
 			},
@@ -92,6 +94,12 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		"local_path=",
 		"transcript_path=",
 		"transcript_cached=true",
+		"download_error",
+		"document cap",
+		"transcript_error",
+		"ffmpeg:",
+		"Output file does not contain any stream",
+		".vosk.wav",
 	} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("markdown includes %q:\n%s", unwanted, content)
