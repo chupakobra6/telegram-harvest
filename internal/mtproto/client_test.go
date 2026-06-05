@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
@@ -118,8 +119,51 @@ func TestMediaLinksAndAttachmentsKeepAcademicMaterialsOnly(t *testing.T) {
 		t.Fatalf("document attachments=%#v", documentAttachments)
 	}
 
+	imageDocument := &tg.MessageMediaDocument{}
+	imageDocument.SetDocument(&tg.Document{
+		MimeType: "image/png",
+		Size:     456,
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: "screenshot.png"},
+		},
+	})
+	imageAttachments := extractAttachments(imageDocument)
+	if len(imageAttachments) != 1 ||
+		imageAttachments[0].Kind != "image" ||
+		imageAttachments[0].FileName != "screenshot.png" ||
+		imageAttachments[0].MIMEType != "image/png" ||
+		imageAttachments[0].Size != 456 {
+		t.Fatalf("image document attachments=%#v", imageAttachments)
+	}
+
 	if photoAttachments := extractAttachments(&tg.MessageMediaPhoto{}); len(photoAttachments) != 1 || photoAttachments[0].Kind != "photo" {
 		t.Fatalf("photo attachments=%#v", photoAttachments)
+	}
+}
+
+func TestMediaSizeLimitExceededWritesActionableHint(t *testing.T) {
+	record := harvest.MessageRecord{
+		Chat:      harvest.Chat{ID: 123, Display: "Study"},
+		MessageID: 77,
+		Attachments: []harvest.Attachment{
+			{Kind: "document", FileName: "big.pdf", Size: 11 * 1024 * 1024},
+		},
+	}
+	if !mediaSizeLimitExceeded(&record, 0, harvest.HistoryOptions{
+		MaxDocumentBytes:      10 * 1024 * 1024,
+		ManualDownloadCommand: "telegram-study-harvest download-media",
+	}) {
+		t.Fatalf("expected size limit to be exceeded")
+	}
+	attachment := record.Attachments[0]
+	if attachment.DownloadError == "" || !strings.Contains(attachment.DownloadError, "document cap") {
+		t.Fatalf("download error = %q", attachment.DownloadError)
+	}
+	if attachment.DownloadHint == "" ||
+		!strings.Contains(attachment.DownloadHint, "--chat 123") ||
+		!strings.Contains(attachment.DownloadHint, "--message-id 77") ||
+		!strings.Contains(attachment.DownloadHint, "--index 1") {
+		t.Fatalf("download hint = %q", attachment.DownloadHint)
 	}
 }
 

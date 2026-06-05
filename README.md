@@ -146,6 +146,27 @@ The command may either write `{output}` or print transcript text to stdout. Use
 `--download-media=false` to skip media downloads/transcription, `--transcribe=false` to skip
 audio/video transcription, or `--retain-days` to change the default two-week daily buffer.
 
+Daily media caps are intentionally conservative:
+
+| Kind | Default cap | Behavior |
+| --- | ---: | --- |
+| Photo or image document | 10 MiB | Saved under `media/` when inside cap. |
+| Generic document | 10 MiB | Saved under `media/` when inside cap. |
+| Voice/audio | 50 MiB | Temporarily downloaded for transcription when inside cap. |
+| Video/round video | 200 MiB | Temporarily downloaded for transcription when inside cap. |
+
+If a file exceeds its cap, the JSONL/Markdown record keeps `download_error` and a `download_hint`
+with the exact manual command. Manual downloads are explicit one-off reads and do not apply these
+caps:
+
+```bash
+go run ./cmd/telegram-study-harvest daily-download-media \
+  --chat 1234567890 \
+  --message-id 777 \
+  --index 1 \
+  --out-dir media-manual
+```
+
 ## Sync
 
 Start a full history rebuild with `--all --reset`. Use `--reset-merged` only on the first stream
@@ -180,6 +201,29 @@ go run ./cmd/telegram-study-harvest sync \
   --chat 1234567890 \
   --name study-main \
   --merged-out messages.jsonl
+```
+
+Study dump locations are controlled by `TG_HARVEST_STUDY_STATE_DIR`, which defaults to `.state`.
+Typical files are:
+
+```text
+.state/<name>.jsonl
+.state/<name>.state.json
+.state/messages.jsonl
+.state/agent-view/
+.state/messages.toon
+.state/media/
+```
+
+When `--download-media` is enabled, study `dump` and `sync` use the same caps as daily. If a skipped
+file is needed later, use the study-account manual download command:
+
+```bash
+go run ./cmd/telegram-study-harvest download-media \
+  --chat 1234567890 \
+  --message-id 777 \
+  --index 1 \
+  --out-dir media-manual
 ```
 
 ## Agent Views
@@ -220,7 +264,7 @@ make refresh-agent-view
 ## Safety
 
 - `.env`, `.sessions/`, `.state/`, generated chat dumps, and local binaries are ignored by git.
-- `sync` and `dump` can download supported photo/document attachments with `--download-media --media-dir <dir>`. Downloaded files stay in private local state and are referenced from JSONL/agent views through `local_path`.
+- `sync`, `dump`, and `daily` cap automatic media downloads by kind. Downloaded files stay in private local state and are referenced from JSONL/agent views through `local_path`; skipped files include a manual download hint.
 - Study reads are constrained by `TG_HARVEST_STUDY_ALLOWED_CHATS` when set.
 - Daily full-account scans are limited to outgoing/self messages and should use `.state/daily` or another private state directory.
 - Full-account broad dumps of other people's messages do not belong in this repository.
@@ -242,3 +286,18 @@ make fmt
 | `internal/mtproto` | Telegram transport, Telegram Desktop import, history, topic, and daily outgoing reads. |
 | `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |
 | `internal/runlock` | Per-session runtime lock. |
+
+## Vosk Runtime Options
+
+The harvester calls an external `vosk-transcribe` command after `ffmpeg` has produced mono 16 kHz
+PCM WAV. Practical options:
+
+| Runtime | Tradeoff |
+| --- | --- |
+| Native macOS helper | Best per-file latency after setup. Requires a macOS-compatible Vosk library and helper binary, or an official Python Vosk wrapper exposed through `TG_HARVEST_TRANSCRIBE_CMD`. |
+| Shelfy Docker runtime | Reuses Shelfy's Linux/cgo `vosk-transcribe` stack, but each short transcription pays Docker/container overhead unless a long-lived service is added. |
+| Custom command hook | Useful for `vosk-transcriber`, Whisper, or another local ASR; set `TG_HARVEST_TRANSCRIBE_CMD` and keep the same cache/delete behavior. |
+
+For frequent daily runs, native macOS helper or a long-lived local ASR service is better than spawning
+Docker for every voice/video. Docker is acceptable for occasional checks, but startup and volume mounts
+will dominate short voice messages.

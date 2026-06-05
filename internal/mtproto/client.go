@@ -39,7 +39,10 @@ const (
 	maxFloodWaitRetries      = 3
 	defaultDialogBatchSize   = 100
 	defaultDailyDialogLimit  = 500
-	defaultMaxMediaBytes     = 50 * 1024 * 1024
+	defaultMaxPhotoBytes     = harvest.DefaultMaxPhotoBytes
+	defaultMaxDocumentBytes  = harvest.DefaultMaxDocumentBytes
+	defaultMaxAudioBytes     = harvest.DefaultMaxAudioBytes
+	defaultMaxVideoBytes     = harvest.DefaultMaxVideoBytes
 )
 
 var linkPattern = regexp.MustCompile(`(?i)\b(?:https?://|t\.me/|telegram\.me/)[^\s<>()"'` + "`" + `]+`)
@@ -61,6 +64,17 @@ type Session struct {
 	nextRPCAt   time.Time
 	floodWaits  int
 	dialogCache map[string]resolvedTarget
+}
+
+type DownloadMediaOptions struct {
+	MediaDir  string
+	Index     int
+	Overwrite bool
+}
+
+type DownloadMediaResult struct {
+	Record     harvest.MessageRecord `json:"record"`
+	Attachment harvest.Attachment    `json:"attachment"`
 }
 
 type resolvedTarget struct {
@@ -421,6 +435,83 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 	}
 	stats.Complete = true
 	return target.Chat, stats, nil
+}
+
+func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, messageID int, opts DownloadMediaOptions) (DownloadMediaResult, error) {
+	if messageID <= 0 {
+		return DownloadMediaResult{}, fmt.Errorf("message id must be > 0")
+	}
+	target, err := s.resolveTarget(ctx, chat)
+	if err != nil {
+		return DownloadMediaResult{}, err
+	}
+	msgClass, entities, err := s.fetchMessageByID(ctx, target, messageID)
+	if err != nil {
+		return DownloadMediaResult{}, err
+	}
+	msg, ok := msgClass.(*tg.Message)
+	if !ok {
+		return DownloadMediaResult{}, fmt.Errorf("message %d is not downloadable", messageID)
+	}
+	record, ok := normalizeRecord(msg, target.Chat, entities)
+	if !ok {
+		record = harvest.MessageRecord{
+			Source:    "telegram",
+			SourceURL: messageURL(target.Chat, msg.ID),
+			Chat:      target.Chat,
+			MessageID: msg.ID,
+			Date:      time.Unix(int64(msg.Date), 0).UTC(),
+			Outgoing:  msg.Out,
+			Kind:      messageKind(msg.Media),
+		}
+	}
+	attachment, location, fileName, ok := downloadableMedia(msg.Media, record.MessageID)
+	if !ok {
+		return DownloadMediaResult{}, fmt.Errorf("message %d has no downloadable media", messageID)
+	}
+	record.Attachments = []harvest.Attachment{attachment}
+	index := opts.Index
+	if index <= 0 {
+		index = 1
+	}
+	if index != 1 {
+		return DownloadMediaResult{}, fmt.Errorf("attachment index %d is unavailable; message has 1 downloadable attachment", index)
+	}
+	mediaDir := opts.MediaDir
+	if strings.TrimSpace(mediaDir) == "" {
+		mediaDir = "media-manual"
+	}
+	s.saveAttachmentFile(ctx, &record, 0, location, fileName, mediaDir, opts.Overwrite)
+	result := DownloadMediaResult{Record: record, Attachment: record.Attachments[0]}
+	if result.Attachment.DownloadError != "" {
+		return result, errors.New(result.Attachment.DownloadError)
+	}
+	return result, nil
+}
+
+func (s *Session) fetchMessageByID(ctx context.Context, target resolvedTarget, messageID int) (tg.MessageClass, peer.Entities, error) {
+	var result tg.MessagesMessagesClass
+	err := s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
+		var callErr error
+		result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
+			Peer:  target.InputPeer,
+			Limit: 1,
+			MinID: messageID - 1,
+			MaxID: messageID + 1,
+			Hash:  0,
+		})
+		return callErr
+	})
+	if err != nil {
+		return nil, peer.Entities{}, err
+	}
+	entities := historyEntities(result)
+	for _, msg := range historyMessages(result) {
+		if typed, ok := msg.(*tg.Message); ok && typed.ID == messageID {
+			return msg, entities, nil
+		}
+	}
+	return nil, entities, fmt.Errorf("message %d not found", messageID)
 }
 
 func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingDayStats, error) {
@@ -1503,7 +1594,7 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 		return []harvest.Attachment{{Kind: "photo"}}
 	case *tg.MessageMediaDocument:
 		kind := documentKind(typed)
-		if kind != "document" {
+		if kind != "document" && kind != "image" {
 			return nil
 		}
 		attachment := harvest.Attachment{Kind: kind}
@@ -1580,6 +1671,50 @@ func dailyDocumentAttachment(media *tg.MessageMediaDocument, messageID int) (har
 	return attachment, true
 }
 
+func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attachment, tg.InputFileLocationClass, string, bool) {
+	switch typed := media.(type) {
+	case *tg.MessageMediaPhoto:
+		location, fileName, size, ok := photoDownload(typed)
+		if !ok {
+			return harvest.Attachment{}, nil, "", false
+		}
+		return harvest.Attachment{
+			Kind:     "photo",
+			MIMEType: "image/jpeg",
+			FileName: fileName,
+			Size:     size,
+		}, location, fileName, true
+	case *tg.MessageMediaDocument:
+		document, ok := typed.GetDocument()
+		if !ok {
+			return harvest.Attachment{}, nil, "", false
+		}
+		doc, ok := document.(*tg.Document)
+		if !ok {
+			return harvest.Attachment{}, nil, "", false
+		}
+		kind := documentKind(typed)
+		fileName := documentFileName(doc)
+		if strings.TrimSpace(fileName) == "" {
+			fileName = fallbackFileName(kind, messageID, doc.MimeType)
+		}
+		return harvest.Attachment{
+			Kind:     kind,
+			MediaID:  documentMediaID(doc),
+			MIMEType: doc.MimeType,
+			Size:     doc.Size,
+			FileName: fileName,
+		}, doc.AsInputDocumentFileLocation(), fileName, true
+	case *tg.MessageMediaPoll:
+		if attached, ok := typed.GetAttachedMedia(); ok {
+			return downloadableMedia(attached, messageID)
+		}
+		return harvest.Attachment{}, nil, "", false
+	default:
+		return harvest.Attachment{}, nil, "", false
+	}
+}
+
 func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
 	if !opts.DownloadMedia || record == nil || len(record.Attachments) == 0 {
 		return
@@ -1593,13 +1728,14 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 		if len(record.Attachments) == 0 {
 			return
 		}
-		location, fileName, ok := photoDownload(typed)
+		location, fileName, size, ok := photoDownload(typed)
 		if !ok {
 			record.Attachments[0].DownloadError = "photo location is unavailable"
 			return
 		}
 		record.Attachments[0].MIMEType = "image/jpeg"
 		record.Attachments[0].FileName = fileName
+		record.Attachments[0].Size = size
 		s.downloadAttachment(ctx, record, 0, location, fileName, opts)
 	case *tg.MessageMediaDocument:
 		if len(record.Attachments) == 0 {
@@ -1620,13 +1756,10 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 			fileName = fallbackFileName(record.Kind, record.MessageID, doc.MimeType)
 		}
 		record.Attachments[0].MediaID = documentMediaID(doc)
+		record.Attachments[0].Kind = documentKind(typed)
 		record.Attachments[0].MIMEType = doc.MimeType
 		record.Attachments[0].Size = doc.Size
 		record.Attachments[0].FileName = fileName
-		if maxBytes := maxMediaBytes(opts); maxBytes > 0 && doc.Size > maxBytes {
-			record.Attachments[0].DownloadError = fmt.Sprintf("skipped: file size %d exceeds limit %d", doc.Size, maxBytes)
-			return
-		}
 		s.downloadAttachment(ctx, record, 0, doc.AsInputDocumentFileLocation(), fileName, opts)
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
@@ -1652,14 +1785,42 @@ func (s *Session) downloadAttachment(
 		s.transcribeAttachmentMedia(ctx, record, index, location, fileName, opts)
 		return
 	}
+	if mediaSizeLimitExceeded(record, index, opts) {
+		return
+	}
 	if strings.TrimSpace(opts.MediaDir) == "" {
 		record.Attachments[index].DownloadError = "media dir is empty"
 		return
 	}
-	target := mediaTargetPath(opts.MediaDir, *record, index, fileName)
+	s.saveAttachmentFile(ctx, record, index, location, fileName, opts.MediaDir, false)
+}
+
+func (s *Session) saveAttachmentFile(
+	ctx context.Context,
+	record *harvest.MessageRecord,
+	index int,
+	location tg.InputFileLocationClass,
+	fileName string,
+	mediaDir string,
+	overwrite bool,
+) {
+	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
+		return
+	}
+	if strings.TrimSpace(mediaDir) == "" {
+		record.Attachments[index].DownloadError = "media dir is empty"
+		return
+	}
+	target := mediaTargetPath(mediaDir, *record, index, fileName)
 	record.Attachments[index].LocalPath = target
 	if existing, err := os.Stat(target); err == nil && existing.Size() > 0 {
-		return
+		if !overwrite {
+			return
+		}
+		if err := os.Remove(target); err != nil {
+			record.Attachments[index].DownloadError = fmt.Sprintf("remove existing media: %v", err)
+			return
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		record.Attachments[index].DownloadError = fmt.Sprintf("prepare media dir: %v", err)
@@ -1703,6 +1864,9 @@ func (s *Session) transcribeAttachmentMedia(
 	}
 	if !opts.TranscribeMedia {
 		attachment.TranscriptError = "skipped: transcription disabled for audio/video media"
+		return
+	}
+	if mediaSizeLimitExceeded(record, index, opts) {
 		return
 	}
 	transcribeOpts := transcribeOptions(opts)
@@ -1827,29 +1991,30 @@ func transcribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 	}
 }
 
-func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, bool) {
+func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, int64, bool) {
 	if media == nil {
-		return nil, "", false
+		return nil, "", 0, false
 	}
 	photoClass, ok := media.GetPhoto()
 	if !ok {
-		return nil, "", false
+		return nil, "", 0, false
 	}
 	photo, ok := photoClass.AsNotEmpty()
 	if !ok {
-		return nil, "", false
+		return nil, "", 0, false
 	}
 	thumbSize := bestPhotoThumbSize(photo)
 	if thumbSize == "" {
-		return nil, "", false
+		return nil, "", 0, false
 	}
 	fileName := fmt.Sprintf("photo-%d-%s.jpg", photo.ID, time.Unix(int64(photo.Date), 0).UTC().Format("20060102T150405"))
+	size := photoThumbSizeBytes(photo, thumbSize)
 	return &tg.InputPhotoFileLocation{
 		ID:            photo.ID,
 		AccessHash:    photo.AccessHash,
 		FileReference: photo.FileReference,
 		ThumbSize:     thumbSize,
-	}, fileName, true
+	}, fileName, size, true
 }
 
 func bestPhotoThumbSize(photo *tg.Photo) string {
@@ -1885,11 +2050,113 @@ func photoSizeDimensions(size tg.PhotoSizeClass) (int, int, bool) {
 	}
 }
 
-func maxMediaBytes(opts harvest.HistoryOptions) int64 {
-	if opts.MaxMediaBytes > 0 {
-		return opts.MaxMediaBytes
+func photoThumbSizeBytes(photo *tg.Photo, thumbSize string) int64 {
+	if photo == nil || thumbSize == "" {
+		return 0
 	}
-	return defaultMaxMediaBytes
+	for _, size := range photo.Sizes {
+		if size.GetType() != thumbSize {
+			continue
+		}
+		return photoSizeBytes(size)
+	}
+	return 0
+}
+
+func photoSizeBytes(size tg.PhotoSizeClass) int64 {
+	switch typed := size.(type) {
+	case *tg.PhotoSize:
+		return int64(typed.Size)
+	case *tg.PhotoCachedSize:
+		return int64(len(typed.Bytes))
+	case *tg.PhotoSizeProgressive:
+		if len(typed.Sizes) == 0 {
+			return 0
+		}
+		return int64(typed.Sizes[len(typed.Sizes)-1])
+	default:
+		return 0
+	}
+}
+
+func mediaSizeLimitExceeded(record *harvest.MessageRecord, index int, opts harvest.HistoryOptions) bool {
+	if record == nil || index < 0 || index >= len(record.Attachments) {
+		return false
+	}
+	attachment := &record.Attachments[index]
+	if attachment.Size <= 0 {
+		return false
+	}
+	limit, label := mediaSizeLimit(*attachment, opts)
+	if limit <= 0 || attachment.Size <= limit {
+		return false
+	}
+	attachment.DownloadError = fmt.Sprintf("skipped: %s size %s exceeds %s cap %s", attachment.Kind, formatBytes(attachment.Size), label, formatBytes(limit))
+	attachment.DownloadHint = manualDownloadHint(*record, index, opts.ManualDownloadCommand)
+	return true
+}
+
+func mediaSizeLimit(attachment harvest.Attachment, opts harvest.HistoryOptions) (int64, string) {
+	switch attachment.Kind {
+	case "photo", "image":
+		return mediaLimitOrDefault(opts.MaxPhotoBytes, defaultMaxPhotoBytes), "image"
+	case "video", "round_video":
+		return mediaLimitOrDefault(opts.MaxVideoBytes, defaultMaxVideoBytes), "video"
+	case "voice", "audio":
+		return mediaLimitOrDefault(opts.MaxAudioBytes, defaultMaxAudioBytes), "audio"
+	default:
+		return mediaLimitOrDefault(opts.MaxDocumentBytes, defaultMaxDocumentBytes), "document"
+	}
+}
+
+func mediaLimitOrDefault(value int64, fallback int64) int64 {
+	if value < 0 {
+		return fallback
+	}
+	return value
+}
+
+func manualDownloadHint(record harvest.MessageRecord, index int, command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "telegram-study-harvest download-media"
+	}
+	chat := record.Chat.Username
+	if chat != "" {
+		chat = "@" + chat
+	} else {
+		chat = strconv.FormatInt(record.Chat.ID, 10)
+	}
+	if chat == "" || record.MessageID == 0 {
+		return "manual download available with download-media using chat, message id, and attachment index"
+	}
+	return fmt.Sprintf("to fetch manually without caps: %s --chat %s --message-id %d --index %d", command, shellArg(chat), record.MessageID, index+1)
+}
+
+func formatBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%d B", value)
+	}
+	const unit = 1024
+	units := []string{"KiB", "MiB", "GiB"}
+	amount := float64(value)
+	for _, unitName := range units {
+		amount /= unit
+		if amount < unit || unitName == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", amount, unitName)
+		}
+	}
+	return fmt.Sprintf("%d B", value)
+}
+
+func shellArg(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
 }
 
 func mediaTargetPath(mediaDir string, record harvest.MessageRecord, index int, fileName string) string {
@@ -1988,6 +2255,9 @@ func documentKind(media *tg.MessageMediaDocument) string {
 	}
 	if document, ok := media.GetDocument(); ok {
 		if doc, ok := document.(*tg.Document); ok {
+			if strings.HasPrefix(strings.ToLower(doc.MimeType), "image/") {
+				return "image"
+			}
 			for _, attr := range doc.Attributes {
 				audio, ok := attr.(*tg.DocumentAttributeAudio)
 				if ok {

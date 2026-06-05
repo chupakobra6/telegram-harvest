@@ -124,6 +124,9 @@ func dailyAttachmentLine(attachment Attachment) string {
 	if attachment.DownloadError != "" {
 		parts = append(parts, "download_error="+attachment.DownloadError)
 	}
+	if attachment.DownloadHint != "" {
+		parts = append(parts, "download_hint="+attachment.DownloadHint)
+	}
 	if attachment.TranscriptError != "" {
 		parts = append(parts, "transcript_error="+attachment.TranscriptError)
 	}

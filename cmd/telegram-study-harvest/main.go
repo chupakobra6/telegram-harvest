@@ -88,6 +88,11 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 			return printError(stderr, 1, err)
 		}
 		return 0
+	case "daily-download-media":
+		if err := runDownloadMedia(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
 	case "import-tdesktop":
 		if err := runImportTDesktop(cfg, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
@@ -110,6 +115,11 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 0
 	case "dump":
 		if err := runDump(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "download-media":
+		if err := runDownloadMedia(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
 		return 0
@@ -151,7 +161,7 @@ func shouldUseTelegramDesktopDefaults(command string) bool {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-study-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|compact|agent-view|daily> [options]")
+	fmt.Fprintln(out, "usage: telegram-study-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "commands are read-only except login/session file creation")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
@@ -160,10 +170,11 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --limit 500 --out hse-main.jsonl [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
+	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
 	fmt.Fprintln(out, "  daily --date today [--out days/YYYY-MM-DD.jsonl] [--markdown-out days/YYYY-MM-DD.md] [--download-media=false]")
-	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_HARVEST_* account settings")
+	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me | daily-download-media  # use TG_HARVEST_* account settings")
 }
 
 func printError(stderr io.Writer, code int, err error) int {
@@ -455,7 +466,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in output metadata")
 	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while exporting")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
-	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
+	mediaLimits := addMediaLimitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -481,7 +492,8 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if *downloadMedia {
 		history.DownloadMedia = true
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
-		history.MaxMediaBytes = *maxMediaBytes
+		applyMediaLimits(&history, mediaLimits)
+		history.ManualDownloadCommand = "telegram-study-harvest download-media"
 	}
 	if *all {
 		history.Limit = 0
@@ -531,7 +543,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in state metadata")
 	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while syncing")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
-	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
+	mediaLimits := addMediaLimitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -561,7 +573,8 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if *downloadMedia {
 		history.DownloadMedia = true
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
-		history.MaxMediaBytes = *maxMediaBytes
+		applyMediaLimits(&history, mediaLimits)
+		history.ManualDownloadCommand = "telegram-study-harvest download-media"
 	}
 	if *all {
 		history.Limit = 0
@@ -643,7 +656,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	includeService := fs.Bool("include-service", false, "include Telegram service messages")
 	downloadMedia := fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
-	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
+	mediaLimits := addMediaLimitFlags(fs)
 	transcribeMedia := fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download")
 	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand, "custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
 	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk helper command, called as: command <model> <wav> [grammar]")
@@ -678,7 +691,6 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		BatchSize:         *batchSize,
 		MaxBatches:        *maxBatches,
 		DownloadMedia:     *downloadMedia,
-		MaxMediaBytes:     *maxMediaBytes,
 		TranscribeMedia:   *transcribeMedia,
 		TranscribeCommand: *transcribeCommand,
 		VoskCommand:       *voskCommand,
@@ -686,6 +698,8 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		VoskGrammarPath:   *voskGrammarPath,
 		FFmpegCommand:     *ffmpegCommand,
 	}
+	applyMediaLimits(&history, mediaLimits)
+	history.ManualDownloadCommand = "telegram-study-harvest daily-download-media"
 	if *downloadMedia {
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
 	}
@@ -779,6 +793,89 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		stats.Complete,
 		retentionStats.DeletedFiles,
 		retentionStats.DeletedDirs,
+	)
+	return nil
+}
+
+type mediaLimitFlags struct {
+	photo    *int64
+	document *int64
+	audio    *int64
+	video    *int64
+}
+
+func addMediaLimitFlags(fs *flag.FlagSet) mediaLimitFlags {
+	return mediaLimitFlags{
+		photo:    fs.Int64("max-photo-bytes", harvest.DefaultMaxPhotoBytes, "maximum photo/image bytes to download; 0 disables this cap"),
+		document: fs.Int64("max-document-bytes", harvest.DefaultMaxDocumentBytes, "maximum generic document bytes to download; 0 disables this cap"),
+		audio:    fs.Int64("max-audio-bytes", harvest.DefaultMaxAudioBytes, "maximum voice/audio bytes to download or transcribe; 0 disables this cap"),
+		video:    fs.Int64("max-video-bytes", harvest.DefaultMaxVideoBytes, "maximum video/round-video bytes to download or transcribe; 0 disables this cap"),
+	}
+}
+
+func applyMediaLimits(opts *harvest.HistoryOptions, limits mediaLimitFlags) {
+	if opts == nil {
+		return
+	}
+	opts.MaxPhotoBytes = *limits.photo
+	opts.MaxDocumentBytes = *limits.document
+	opts.MaxAudioBytes = *limits.audio
+	opts.MaxVideoBytes = *limits.video
+}
+
+func runDownloadMedia(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("download-media", flag.ContinueOnError)
+	fs.SetOutput(out)
+	chat := fs.String("chat", "", "chat id or @username")
+	messageID := fs.Int("message-id", 0, "Telegram message id")
+	index := fs.Int("index", 1, "1-based attachment index")
+	outDir := fs.String("out-dir", "media-manual", "download output directory, relative to state dir unless absolute")
+	overwrite := fs.Bool("overwrite", false, "replace an existing downloaded file")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*chat) == "" {
+		return fmt.Errorf("--chat is required")
+	}
+	if cfg.Mode != config.ModeDaily {
+		if err := ensureAllowedChat(cfg, *chat); err != nil {
+			return err
+		}
+	}
+	if *messageID <= 0 {
+		return fmt.Errorf("--message-id must be > 0")
+	}
+	if *index <= 0 {
+		return fmt.Errorf("--index must be > 0")
+	}
+	mediaDir := resolveOutputPath(cfg.StateDir, *outDir)
+	var result mtproto.DownloadMediaResult
+	if err := withRuntimeLock(cfg, func() error {
+		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
+			var err error
+			result, err = session.DownloadMessageMedia(ctx, *chat, *messageID, mtproto.DownloadMediaOptions{
+				MediaDir:  mediaDir,
+				Index:     *index,
+				Overwrite: *overwrite,
+			})
+			return err
+		})
+	}); err != nil {
+		return err
+	}
+	if *jsonOut {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	}
+	fmt.Fprintf(out, "downloaded=true chat=%d message_id=%d index=%d kind=%s path=%s size=%d\n",
+		result.Record.Chat.ID,
+		result.Record.MessageID,
+		*index,
+		result.Attachment.Kind,
+		result.Attachment.LocalPath,
+		result.Attachment.Size,
 	)
 	return nil
 }

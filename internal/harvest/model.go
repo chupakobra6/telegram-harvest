@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+const (
+	DefaultMaxPhotoBytes    int64 = 10 * 1024 * 1024
+	DefaultMaxDocumentBytes int64 = 10 * 1024 * 1024
+	DefaultMaxAudioBytes    int64 = 50 * 1024 * 1024
+	DefaultMaxVideoBytes    int64 = 200 * 1024 * 1024
+)
+
 type Chat struct {
 	ID                   int64     `json:"id"`
 	Type                 string    `json:"type"`
@@ -58,6 +65,7 @@ type Attachment struct {
 	URL              string `json:"url,omitempty"`
 	LocalPath        string `json:"local_path,omitempty"`
 	DownloadError    string `json:"download_error,omitempty"`
+	DownloadHint     string `json:"download_hint,omitempty"`
 	Transcript       string `json:"transcript,omitempty"`
 	TranscriptPath   string `json:"transcript_path,omitempty"`
 	TranscriptCached bool   `json:"transcript_cached,omitempty"`
@@ -107,25 +115,29 @@ type Backfill struct {
 }
 
 type HistoryOptions struct {
-	Limit             int
-	BatchSize         int
-	MaxBatches        int
-	MinID             int
-	StartOffsetID     int
-	All               bool
-	TopicID           int
-	TopicTitle        string
-	DownloadMedia     bool
-	MediaDir          string
-	MaxMediaBytes     int64
-	TranscribeMedia   bool
-	TranscriptDir     string
-	TranscribeCommand string
-	VoskCommand       string
-	VoskModelPath     string
-	VoskGrammarPath   string
-	FFmpegCommand     string
-	Progress          func(HistoryProgress) error
+	Limit                 int
+	BatchSize             int
+	MaxBatches            int
+	MinID                 int
+	StartOffsetID         int
+	All                   bool
+	TopicID               int
+	TopicTitle            string
+	DownloadMedia         bool
+	MediaDir              string
+	MaxPhotoBytes         int64
+	MaxDocumentBytes      int64
+	MaxAudioBytes         int64
+	MaxVideoBytes         int64
+	ManualDownloadCommand string
+	TranscribeMedia       bool
+	TranscriptDir         string
+	TranscribeCommand     string
+	VoskCommand           string
+	VoskModelPath         string
+	VoskGrammarPath       string
+	FFmpegCommand         string
+	Progress              func(HistoryProgress) error
 }
 
 type HistoryStats struct {

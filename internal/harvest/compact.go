@@ -208,6 +208,9 @@ func displayAttachments(attachments []Attachment) string {
 		if attachment.DownloadError != "" {
 			label += " [download_error: " + attachment.DownloadError + "]"
 		}
+		if attachment.DownloadHint != "" {
+			label += " [download_hint: " + attachment.DownloadHint + "]"
+		}
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, "; ")
