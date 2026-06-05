@@ -42,4 +42,5 @@
 - Keep `docs/agent-navigation.md` aligned with generated `agent-view/AGENTS.md` and `agent-view/README.md` whenever changing the agent read path.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
 - Daily mode's canonical namespace is `TG_HARVEST_*`; `TG_HARVEST_DAILY_*`/`TG_DAILY_*` are accepted aliases. Study mode uses `TG_HARVEST_STUDY_*` and keeps `TG_STUDY_*` compatibility.
+- Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
 - Add tests for parsing/config/state behavior; live Telegram behavior is validated manually after login.

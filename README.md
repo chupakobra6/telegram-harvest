@@ -36,7 +36,7 @@ buttons, delete content, join chats, pin/unpin messages, or mark chats read.
 | Allowlisted reads | Study commands refuse chats outside the study allowlist when it is set. |
 | Resumable sync | Full backfills can resume from `backfill.next_offset_id` after interruption. |
 | JSONL source layer | Every message record keeps chat, message id, date, sender, text, links, attachments, and optional local attachment paths. |
-| Daily media | Daily harvest can download photos, image documents, voice/audio, and round video files for later review or transcription. |
+| Daily media | Daily harvest saves photos/image documents, transcribes voice/audio/video through local Vosk, and keeps only transcript cache for audio/video. |
 | Topic awareness | Forum chats preserve `topic` and `thread_top_message_id`. |
 | Compact agent views | Markdown navigation and TOON-style summaries are generated from the same JSONL source. |
 | Conservative pacing | RPC calls are sequential, spaced, and flood-wait aware. |
@@ -111,19 +111,40 @@ Default outputs:
 .state/daily/days/YYYY-MM-DD.jsonl
 .state/daily/days/YYYY-MM-DD.md
 .state/daily/media/...
+.state/daily/transcripts/cache/...
 ```
 
 The Markdown file is the agent-readable daily surface: each line shows local time, destination chat,
-message text or media kind, local media paths, and transcripts when available. To enable
-transcription, provide a local command template; placeholders are shell-quoted by the CLI:
+message text or media kind, Telegram message links when Telegram can produce them, saved image paths,
+and transcripts when available. Photos and image documents are kept under `media/`. Voice, audio,
+round video, and regular video are downloaded to a temporary file, converted with `ffmpeg`, transcribed,
+then deleted; the report keeps only transcript text and `transcript_path`.
+
+Vosk is the default transcription path. On this Mac the project auto-detects the Shelfy small Russian
+model at `../shelfy/models/vosk-model-small-ru-0.22` when it exists, and uses `vosk-transcribe` from
+`PATH` when available:
+
+```dotenv
+TG_HARVEST_VOSK_COMMAND=/usr/local/bin/vosk-transcribe
+TG_HARVEST_VOSK_MODEL_PATH=~/projects/shelfy/models/vosk-model-small-ru-0.22
+TG_HARVEST_FFMPEG_COMMAND=ffmpeg
+TG_HARVEST_RETENTION_DAYS=14
+```
+
+`daily-doctor` reports `daily_ffmpeg_status`, `daily_vosk_command_status`, and
+`daily_vosk_model_status`. Vosk itself is CPU-based; `ffmpeg` handles audio extraction/conversion.
+Transcript cache is keyed by Telegram media id when available, so reruns skip already-transcribed
+audio/video without downloading it again.
+
+The legacy command-template hook still exists as an override; placeholders are shell-quoted by the CLI:
 
 ```dotenv
 TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
 ```
 
 The command may either write `{output}` or print transcript text to stdout. Use
-`--download-media=false` to skip media downloads, or `--transcribe=false` to keep audio files without
-running the transcript hook.
+`--download-media=false` to skip media downloads/transcription, `--transcribe=false` to skip
+audio/video transcription, or `--retain-days` to change the default two-week daily buffer.
 
 ## Sync
 

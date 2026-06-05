@@ -45,10 +45,13 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 func TestRunDailyConfigUsesHarvestMode(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
-		"TG_HARVEST_APP_ID":       "77",
-		"TG_HARVEST_APP_HASH":     "daily-hash",
-		"TG_HARVEST_STATE_DIR":    filepath.Join(dir, "daily-state"),
-		"TG_HARVEST_SESSION_PATH": filepath.Join(dir, "daily-session.json"),
+		"TG_HARVEST_APP_ID":          "77",
+		"TG_HARVEST_APP_HASH":        "daily-hash",
+		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "daily-state"),
+		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "daily-session.json"),
+		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
+		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
+		"TG_HARVEST_RETENTION_DAYS":  "10",
 	}
 	code, stdout, stderr := runCommand(t, []string{"daily-config"}, env)
 	if code != 0 {
@@ -59,6 +62,10 @@ func TestRunDailyConfigUsesHarvestMode(t *testing.T) {
 		"app_id_set=true",
 		"state_dir=" + filepath.Join(dir, "daily-state"),
 		"session=" + filepath.Join(dir, "daily-session.json"),
+		"daily_transcribe_default=true",
+		"daily_vosk_command=/tmp/vosk-transcribe",
+		"daily_vosk_model_path=" + filepath.Join(dir, "vosk-model-small-ru-0.22"),
+		"daily_retention_days=10",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("daily-config missing %q:\n%s", want, stdout)
@@ -224,6 +231,13 @@ func clearCommandEnv(t *testing.T) {
 		"HISTORY_BATCH_SIZE",
 		"HISTORY_LIMIT",
 		"MAX_BATCHES",
+		"DIALOG_LIMIT",
+		"TRANSCRIBE_CMD",
+		"VOSK_COMMAND",
+		"VOSK_MODEL_PATH",
+		"VOSK_GRAMMAR_PATH",
+		"FFMPEG_COMMAND",
+		"RETENTION_DAYS",
 	}
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {

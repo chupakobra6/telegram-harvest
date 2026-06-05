@@ -174,7 +174,7 @@ func TestExtractAttachmentsIgnoresNonAcademicTelegramMedia(t *testing.T) {
 	}
 }
 
-func TestEnsureDailyAttachmentsIncludesVoiceAudioAndRoundVideo(t *testing.T) {
+func TestEnsureDailyAttachmentsIncludesVoiceAudioRoundVideoAndVideo(t *testing.T) {
 	cases := []struct {
 		name  string
 		media *tg.MessageMediaDocument
@@ -204,6 +204,26 @@ func TestEnsureDailyAttachmentsIncludesVoiceAudioAndRoundVideo(t *testing.T) {
 				return media
 			}(),
 			want: "audio",
+		},
+		{
+			name:  "video",
+			media: &tg.MessageMediaDocument{Video: true},
+			want:  "video",
+		},
+		{
+			name: "video document attribute",
+			media: func() *tg.MessageMediaDocument {
+				media := &tg.MessageMediaDocument{}
+				media.SetDocument(&tg.Document{
+					MimeType: "video/mp4",
+					Size:     100,
+					Attributes: []tg.DocumentAttributeClass{
+						&tg.DocumentAttributeVideo{Duration: 5, W: 320, H: 240},
+					},
+				})
+				return media
+			}(),
+			want: "video",
 		},
 	}
 	for _, tc := range cases {

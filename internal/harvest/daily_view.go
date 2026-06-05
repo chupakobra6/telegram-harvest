@@ -92,11 +92,17 @@ func dailyMessageLine(record MessageRecord) string {
 	if text == "" {
 		text = "[" + record.Kind + "]"
 	}
+	if strings.TrimSpace(record.SourceURL) != "" {
+		return fmt.Sprintf("- %s to %s: %s [`#%d`](%s)", timeLabel, destination, text, record.MessageID, record.SourceURL)
+	}
 	return fmt.Sprintf("- %s to %s: %s `#%d`", timeLabel, destination, text, record.MessageID)
 }
 
 func dailyAttachmentLine(attachment Attachment) string {
 	parts := []string{"file: " + attachment.Kind}
+	if attachment.MediaID != "" {
+		parts = append(parts, "media_id="+attachment.MediaID)
+	}
 	if attachment.FileName != "" {
 		parts = append(parts, attachment.FileName)
 	}
@@ -111,6 +117,9 @@ func dailyAttachmentLine(attachment Attachment) string {
 	}
 	if attachment.TranscriptPath != "" {
 		parts = append(parts, "transcript_path="+attachment.TranscriptPath)
+	}
+	if attachment.TranscriptCached {
+		parts = append(parts, "transcript_cached=true")
 	}
 	if attachment.DownloadError != "" {
 		parts = append(parts, "download_error="+attachment.DownloadError)

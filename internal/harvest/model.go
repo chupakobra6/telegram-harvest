@@ -49,17 +49,19 @@ type SelfProfile struct {
 }
 
 type Attachment struct {
-	Kind            string `json:"kind"`
-	FileName        string `json:"file_name,omitempty"`
-	MIMEType        string `json:"mime_type,omitempty"`
-	Size            int64  `json:"size,omitempty"`
-	Title           string `json:"title,omitempty"`
-	URL             string `json:"url,omitempty"`
-	LocalPath       string `json:"local_path,omitempty"`
-	DownloadError   string `json:"download_error,omitempty"`
-	Transcript      string `json:"transcript,omitempty"`
-	TranscriptPath  string `json:"transcript_path,omitempty"`
-	TranscriptError string `json:"transcript_error,omitempty"`
+	Kind             string `json:"kind"`
+	MediaID          string `json:"media_id,omitempty"`
+	FileName         string `json:"file_name,omitempty"`
+	MIMEType         string `json:"mime_type,omitempty"`
+	Size             int64  `json:"size,omitempty"`
+	Title            string `json:"title,omitempty"`
+	URL              string `json:"url,omitempty"`
+	LocalPath        string `json:"local_path,omitempty"`
+	DownloadError    string `json:"download_error,omitempty"`
+	Transcript       string `json:"transcript,omitempty"`
+	TranscriptPath   string `json:"transcript_path,omitempty"`
+	TranscriptCached bool   `json:"transcript_cached,omitempty"`
+	TranscriptError  string `json:"transcript_error,omitempty"`
 }
 
 type MessageRecord struct {
@@ -119,6 +121,10 @@ type HistoryOptions struct {
 	TranscribeMedia   bool
 	TranscriptDir     string
 	TranscribeCommand string
+	VoskCommand       string
+	VoskModelPath     string
+	VoskGrammarPath   string
+	FFmpegCommand     string
 	Progress          func(HistoryProgress) error
 }
 

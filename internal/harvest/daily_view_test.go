@@ -16,15 +16,17 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		{
 			Chat:      Chat{ID: 2, Display: "Work"},
 			MessageID: 20,
+			SourceURL: "https://t.me/c/2/20",
 			Date:      start.Add(10 * time.Hour),
 			Kind:      "voice",
 			Attachments: []Attachment{
 				{
-					Kind:           "voice",
-					FileName:       "voice.ogg",
-					LocalPath:      filepath.Join(dir, "voice.ogg"),
-					TranscriptPath: filepath.Join(dir, "voice.txt"),
-					Transcript:     "Поговорил про итоги дня",
+					Kind:             "voice",
+					MediaID:          "document:123",
+					FileName:         "voice.ogg",
+					TranscriptPath:   filepath.Join(dir, "voice.txt"),
+					TranscriptCached: true,
+					Transcript:       "Поговорил про итоги дня",
 				},
 			},
 		},
@@ -56,8 +58,9 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 	for _, want := range []string{
 		"# Telegram Daily Harvest: 2026-06-05",
 		"09:00 to Notes: Запланировал задачу `#10`",
-		"10:00 to Work: [voice] `#20`",
-		"file: voice; voice.ogg",
+		"10:00 to Work: [voice] [`#20`](https://t.me/c/2/20)",
+		"file: voice; media_id=document:123; voice.ogg",
+		"transcript_cached=true",
 		"transcript: Поговорил про итоги дня",
 	} {
 		if !strings.Contains(content, want) {

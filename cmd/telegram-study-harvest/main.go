@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-study-harvest/internal/mtproto"
 	"github.com/chupakobra6/telegram-study-harvest/internal/runlock"
+	"github.com/chupakobra6/telegram-study-harvest/internal/transcribe"
 )
 
 func main() {
@@ -182,6 +184,9 @@ func printConfig(cfg config.Config, out io.Writer) {
 	fmt.Fprintf(out, "history_batch_size=%d\n", cfg.BatchSize)
 	fmt.Fprintf(out, "history_limit=%d\n", cfg.HistoryLimit)
 	fmt.Fprintf(out, "max_batches=%d\n", cfg.MaxBatches)
+	if cfg.Mode == config.ModeDaily {
+		printDailyRuntimeConfig(out, false)
+	}
 }
 
 func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
@@ -196,10 +201,53 @@ func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
 	fmt.Fprintf(out, "state_dir_exists=%t\n", fileExists(cfg.StateDir))
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
 	fmt.Fprintf(out, "read_only=true\n")
+	if cfg.Mode == config.ModeDaily {
+		printDailyRuntimeConfig(out, true)
+	}
 	authStatus, authDetail := doctorAuthStatus(cfg, client)
 	fmt.Fprintf(out, "auth_status=%s\n", authStatus)
 	if authDetail != "" {
 		fmt.Fprintf(out, "auth_status_detail=%s\n", authDetail)
+	}
+}
+
+func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
+	defaults := dailyRuntimeDefaults()
+	fmt.Fprintf(out, "daily_transcribe_default=%t\n", defaults.TranscribeMedia)
+	fmt.Fprintf(out, "daily_transcribe_command_set=%t\n", strings.TrimSpace(defaults.TranscribeCommand) != "")
+	fmt.Fprintf(out, "daily_vosk_command=%s\n", defaults.VoskCommand)
+	fmt.Fprintf(out, "daily_vosk_model_path=%s\n", defaults.VoskModelPath)
+	fmt.Fprintf(out, "daily_vosk_grammar_path=%s\n", defaults.VoskGrammarPath)
+	fmt.Fprintf(out, "daily_ffmpeg_command=%s\n", defaults.FFmpegCommand)
+	fmt.Fprintf(out, "daily_retention_days=%d\n", defaults.RetainDays)
+	if !includeChecks {
+		return
+	}
+	if resolved, ok := resolveCommand(defaults.FFmpegCommand); ok {
+		fmt.Fprintf(out, "daily_ffmpeg_status=ok:%s\n", resolved)
+	} else {
+		fmt.Fprintf(out, "daily_ffmpeg_status=missing\n")
+	}
+	if strings.TrimSpace(defaults.VoskCommand) == "" {
+		fmt.Fprintf(out, "daily_vosk_command_status=missing\n")
+	} else if resolved, ok := resolveCommand(defaults.VoskCommand); ok {
+		fmt.Fprintf(out, "daily_vosk_command_status=ok:%s\n", resolved)
+	} else {
+		fmt.Fprintf(out, "daily_vosk_command_status=missing\n")
+	}
+	if strings.TrimSpace(defaults.VoskModelPath) == "" {
+		fmt.Fprintf(out, "daily_vosk_model_status=missing\n")
+	} else if fileExists(defaults.VoskModelPath) {
+		fmt.Fprintf(out, "daily_vosk_model_status=ok\n")
+	} else {
+		fmt.Fprintf(out, "daily_vosk_model_status=missing\n")
+	}
+	if strings.TrimSpace(defaults.VoskGrammarPath) == "" {
+		fmt.Fprintf(out, "daily_vosk_grammar_status=not_set\n")
+	} else if fileExists(defaults.VoskGrammarPath) {
+		fmt.Fprintf(out, "daily_vosk_grammar_status=ok\n")
+	} else {
+		fmt.Fprintf(out, "daily_vosk_grammar_status=missing\n")
 	}
 }
 
@@ -581,7 +629,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	dateDefault := "today"
 	dateLabelDefault, _, _, _ := parseDailyDate(dateDefault, time.Now())
 	defaultJSONL, defaultMarkdown := harvest.DailyDefaultOutputPaths(cfg.StateDir, dateLabelDefault)
-	defaultTranscribeCommand := firstEnvValue("TG_HARVEST_DAILY_TRANSCRIBE_CMD", "TG_DAILY_TRANSCRIBE_CMD", "TG_HARVEST_TRANSCRIBE_CMD")
+	defaults := dailyRuntimeDefaults()
 
 	fs := flag.NewFlagSet("daily", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -593,12 +641,17 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	batchSize := fs.Int("batch-size", cfg.BatchSize, "Telegram history/search batch size, max 100")
 	maxBatches := fs.Int("max-batches", cfg.MaxBatches, "maximum batches per dialog; 0 disables the per-dialog cap")
 	includeService := fs.Bool("include-service", false, "include Telegram service messages")
-	downloadMedia := fs.Bool("download-media", true, "download photos, image documents, voice/audio, and round video attachments")
+	downloadMedia := fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
 	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
-	transcribeMedia := fs.Bool("transcribe", strings.TrimSpace(defaultTranscribeCommand) != "", "run transcription command for downloaded voice/audio/round video")
-	transcribeCommand := fs.String("transcribe-cmd", defaultTranscribeCommand, "shell command template; supports {input}, {output}, {output_dir}, {output_base}")
+	transcribeMedia := fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download")
+	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand, "legacy shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
+	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk helper command, called as: command <model> <wav> [grammar]")
+	voskModelPath := fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory")
+	voskGrammarPath := fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path")
+	ffmpegCommand := fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion")
 	transcriptDir := fs.String("transcript-dir", "transcripts", "transcript output directory, relative to state dir unless absolute")
+	retainDays := fs.Int("retain-days", defaults.RetainDays, "daily state retention window in days; <=0 disables pruning")
 	progressOut := fs.Bool("progress", false, "print per-dialog progress")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -628,6 +681,10 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		MaxMediaBytes:     *maxMediaBytes,
 		TranscribeMedia:   *transcribeMedia,
 		TranscribeCommand: *transcribeCommand,
+		VoskCommand:       *voskCommand,
+		VoskModelPath:     *voskModelPath,
+		VoskGrammarPath:   *voskGrammarPath,
+		FFmpegCommand:     *ffmpegCommand,
 	}
 	if *downloadMedia {
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
@@ -694,6 +751,14 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 			return err
 		}
 	}
+	retentionStats, err := harvest.PruneDailyState(harvest.DailyRetentionOptions{
+		StateDir:   cfg.StateDir,
+		RetainDays: *retainDays,
+		Now:        time.Now(),
+	})
+	if err != nil {
+		return err
+	}
 	for _, dialogErr := range stats.DialogErrors {
 		fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
 	}
@@ -709,7 +774,12 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	if markdownPath != "" {
 		fmt.Fprintf(out, " markdown=%s", markdownPath)
 	}
-	fmt.Fprintf(out, " flood_waits=%d complete=%t\n", stats.FloodWaits, stats.Complete)
+	fmt.Fprintf(out, " flood_waits=%d complete=%t pruned_files=%d pruned_dirs=%d\n",
+		stats.FloodWaits,
+		stats.Complete,
+		retentionStats.DeletedFiles,
+		retentionStats.DeletedDirs,
+	)
 	return nil
 }
 
@@ -924,6 +994,61 @@ func dailyDialogLimitDefault() int {
 	return 500
 }
 
+type dailyRuntimeConfig struct {
+	TranscribeMedia   bool
+	TranscribeCommand string
+	VoskCommand       string
+	VoskModelPath     string
+	VoskGrammarPath   string
+	FFmpegCommand     string
+	RetainDays        int
+}
+
+func dailyRuntimeDefaults() dailyRuntimeConfig {
+	transcribeCommand := firstEnvValue("TG_HARVEST_DAILY_TRANSCRIBE_CMD", "TG_DAILY_TRANSCRIBE_CMD", "TG_HARVEST_TRANSCRIBE_CMD")
+	voskCommand := firstEnvValue("TG_HARVEST_DAILY_VOSK_COMMAND", "TG_DAILY_VOSK_COMMAND", "TG_HARVEST_VOSK_COMMAND", "SHELFY_VOSK_COMMAND")
+	if voskCommand == "" {
+		if resolved, err := exec.LookPath("vosk-transcribe"); err == nil {
+			voskCommand = resolved
+		}
+	}
+	voskModelPath := firstEnvValue("TG_HARVEST_DAILY_VOSK_MODEL_PATH", "TG_DAILY_VOSK_MODEL_PATH", "TG_HARVEST_VOSK_MODEL_PATH", "SHELFY_VOSK_MODEL_PATH")
+	if voskModelPath == "" {
+		if candidate := defaultShelfyVoskModelPath(); candidate != "" {
+			voskModelPath = candidate
+		}
+	}
+	ffmpegCommand := firstEnvValue("TG_HARVEST_DAILY_FFMPEG_COMMAND", "TG_DAILY_FFMPEG_COMMAND", "TG_HARVEST_FFMPEG_COMMAND")
+	if ffmpegCommand == "" {
+		ffmpegCommand = transcribe.DefaultFFmpegCommand
+	}
+	retainDays := harvest.DefaultDailyRetentionDays
+	if value, ok := intEnvValue("TG_HARVEST_DAILY_RETENTION_DAYS", "TG_DAILY_RETENTION_DAYS", "TG_HARVEST_RETENTION_DAYS"); ok {
+		retainDays = value
+	}
+	return dailyRuntimeConfig{
+		TranscribeMedia:   strings.TrimSpace(transcribeCommand) != "" || (strings.TrimSpace(voskCommand) != "" && strings.TrimSpace(voskModelPath) != ""),
+		TranscribeCommand: transcribeCommand,
+		VoskCommand:       voskCommand,
+		VoskModelPath:     voskModelPath,
+		VoskGrammarPath:   firstEnvValue("TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH", "TG_DAILY_VOSK_GRAMMAR_PATH", "TG_HARVEST_VOSK_GRAMMAR_PATH", "SHELFY_VOSK_GRAMMAR_PATH"),
+		FFmpegCommand:     ffmpegCommand,
+		RetainDays:        retainDays,
+	}
+}
+
+func defaultShelfyVoskModelPath() string {
+	projectRoot := detectProjectRoot()
+	if projectRoot == "" {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(projectRoot), "shelfy", "models", "vosk-model-small-ru-0.22")
+	if fileExists(candidate) {
+		return candidate
+	}
+	return ""
+}
+
 func intEnvValue(keys ...string) (int, bool) {
 	for _, key := range keys {
 		raw := strings.TrimSpace(os.Getenv(key))
@@ -946,6 +1071,20 @@ func firstEnvValue(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func resolveCommand(command string) (string, bool) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", false
+	}
+	if resolved, err := exec.LookPath(command); err == nil {
+		return resolved, true
+	}
+	if fileExists(command) {
+		return command, true
+	}
+	return "", false
 }
 
 func defaultModeName(mode config.Mode) string {

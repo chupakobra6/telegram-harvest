@@ -3,12 +3,13 @@ package mtproto
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"mime"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/chupakobra6/telegram-study-harvest/internal/config"
 	"github.com/chupakobra6/telegram-study-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-study-harvest/internal/transcribe"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -1507,6 +1509,7 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 		attachment := harvest.Attachment{Kind: kind}
 		if document, ok := typed.GetDocument(); ok {
 			if doc, ok := document.(*tg.Document); ok {
+				attachment.MediaID = documentMediaID(doc)
 				attachment.MIMEType = doc.MimeType
 				attachment.Size = doc.Size
 				attachment.FileName = documentFileName(doc)
@@ -1555,13 +1558,14 @@ func ensureDailyAttachments(msgClass tg.MessageClass, record *harvest.MessageRec
 func dailyDocumentAttachment(media *tg.MessageMediaDocument, messageID int) (harvest.Attachment, bool) {
 	kind := documentKind(media)
 	switch kind {
-	case "voice", "round_video", "audio":
+	case "voice", "round_video", "audio", "video":
 	default:
 		return harvest.Attachment{}, false
 	}
 	attachment := harvest.Attachment{Kind: kind}
 	if document, ok := media.GetDocument(); ok {
 		if doc, ok := document.(*tg.Document); ok {
+			attachment.MediaID = documentMediaID(doc)
 			attachment.MIMEType = doc.MimeType
 			attachment.Size = doc.Size
 			attachment.FileName = documentFileName(doc)
@@ -1577,7 +1581,7 @@ func dailyDocumentAttachment(media *tg.MessageMediaDocument, messageID int) (har
 }
 
 func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
-	if !opts.DownloadMedia || strings.TrimSpace(opts.MediaDir) == "" || record == nil || len(record.Attachments) == 0 {
+	if !opts.DownloadMedia || record == nil || len(record.Attachments) == 0 {
 		return
 	}
 	msg, ok := msgClass.(*tg.Message)
@@ -1615,6 +1619,7 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 		if strings.TrimSpace(fileName) == "" {
 			fileName = fallbackFileName(record.Kind, record.MessageID, doc.MimeType)
 		}
+		record.Attachments[0].MediaID = documentMediaID(doc)
 		record.Attachments[0].MIMEType = doc.MimeType
 		record.Attachments[0].Size = doc.Size
 		record.Attachments[0].FileName = fileName
@@ -1643,10 +1648,17 @@ func (s *Session) downloadAttachment(
 	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
 		return
 	}
+	if transcriptMediaKind(record.Attachments[index].Kind) {
+		s.transcribeAttachmentMedia(ctx, record, index, location, fileName, opts)
+		return
+	}
+	if strings.TrimSpace(opts.MediaDir) == "" {
+		record.Attachments[index].DownloadError = "media dir is empty"
+		return
+	}
 	target := mediaTargetPath(opts.MediaDir, *record, index, fileName)
 	record.Attachments[index].LocalPath = target
 	if existing, err := os.Stat(target); err == nil && existing.Size() > 0 {
-		s.maybeTranscribeAttachment(ctx, record, index, opts)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -1664,77 +1676,79 @@ func (s *Session) downloadAttachment(
 		record.Attachments[index].DownloadError = err.Error()
 		return
 	}
-	s.maybeTranscribeAttachment(ctx, record, index, opts)
 }
 
-func (s *Session) maybeTranscribeAttachment(ctx context.Context, record *harvest.MessageRecord, index int, opts harvest.HistoryOptions) {
-	if !opts.TranscribeMedia || record == nil || index < 0 || index >= len(record.Attachments) {
+func (s *Session) transcribeAttachmentMedia(
+	ctx context.Context,
+	record *harvest.MessageRecord,
+	index int,
+	location tg.InputFileLocationClass,
+	fileName string,
+	opts harvest.HistoryOptions,
+) {
+	if record == nil || index < 0 || index >= len(record.Attachments) {
 		return
 	}
 	attachment := &record.Attachments[index]
 	if !transcriptMediaKind(attachment.Kind) {
 		return
 	}
-	if strings.TrimSpace(attachment.LocalPath) == "" {
-		attachment.TranscriptError = "media local path is empty"
-		return
-	}
-	transcriptPath := transcriptTargetPath(opts.TranscriptDir, *record, index, attachment.FileName, attachment.LocalPath)
+	transcriptPath := transcriptCachePath(opts.TranscriptDir, *record, index, *attachment)
 	attachment.TranscriptPath = transcriptPath
 	if transcript, err := readTranscriptFile(transcriptPath); err == nil {
 		attachment.Transcript = transcript
+		attachment.TranscriptCached = true
+		touchTranscriptFile(transcriptPath)
 		return
 	}
-	if strings.TrimSpace(opts.TranscribeCommand) == "" {
-		attachment.TranscriptError = "transcribe command is empty"
+	if !opts.TranscribeMedia {
+		attachment.TranscriptError = "skipped: transcription disabled for audio/video media"
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
-		attachment.TranscriptError = fmt.Sprintf("prepare transcript dir: %v", err)
+	transcribeOpts := transcribeOptions(opts)
+	if !transcribeOpts.Configured() {
+		attachment.TranscriptError = "transcription is not configured"
 		return
 	}
+	tempPath, err := createTemporaryMediaPath(opts.MediaDir, fileName)
+	if err != nil {
+		attachment.DownloadError = fmt.Sprintf("prepare temporary media: %v", err)
+		return
+	}
+	defer os.Remove(tempPath)
+	if err := s.beforeRPC(ctx); err != nil {
+		attachment.DownloadError = err.Error()
+		return
+	}
+	downloadCtx, cancelDownload := context.WithTimeout(ctx, defaultDownloadTimeout)
+	defer cancelDownload()
+	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, tempPath); err != nil {
+		attachment.DownloadError = err.Error()
+		return
+	}
+
 	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
 	defer cancel()
-	output, err := runTranscribeCommand(transcribeCtx, opts.TranscribeCommand, attachment.LocalPath, transcriptPath)
+	transcript, err := transcribe.Run(transcribeCtx, transcribeOpts, tempPath, transcriptPath)
 	if err != nil {
 		attachment.TranscriptError = oneLine(err.Error())
 		return
 	}
-	if _, statErr := os.Stat(transcriptPath); os.IsNotExist(statErr) && strings.TrimSpace(output) != "" {
-		if writeErr := os.WriteFile(transcriptPath, []byte(output), 0o600); writeErr != nil {
-			attachment.TranscriptError = fmt.Sprintf("write transcript: %v", writeErr)
-			return
+	if strings.TrimSpace(transcript) == "" {
+		if fromFile, readErr := readTranscriptFile(transcriptPath); readErr == nil {
+			transcript = fromFile
 		}
-	}
-	transcript, err := readTranscriptFile(transcriptPath)
-	if err != nil {
-		attachment.TranscriptError = fmt.Sprintf("read transcript: %v", err)
-		return
 	}
 	attachment.Transcript = transcript
 }
 
 func transcriptMediaKind(kind string) bool {
 	switch kind {
-	case "voice", "audio", "round_video":
+	case "voice", "audio", "round_video", "video":
 		return true
 	default:
 		return false
 	}
-}
-
-func transcriptTargetPath(transcriptDir string, record harvest.MessageRecord, index int, fileName string, mediaPath string) string {
-	if strings.TrimSpace(transcriptDir) == "" {
-		transcriptDir = filepath.Dir(mediaPath)
-	}
-	stem := strings.TrimSuffix(safeFileName(fileName), filepath.Ext(fileName))
-	if stem == "" {
-		stem = strings.TrimSuffix(safeFileName(filepath.Base(mediaPath)), filepath.Ext(mediaPath))
-	}
-	if stem == "" {
-		stem = fallbackFileName(record.Kind, record.MessageID, "")
-	}
-	return mediaTargetPath(transcriptDir, record, index, stem+".txt")
 }
 
 func readTranscriptFile(path string) (string, error) {
@@ -1745,27 +1759,72 @@ func readTranscriptFile(path string) (string, error) {
 	return strings.TrimSpace(string(content)), nil
 }
 
-func runTranscribeCommand(ctx context.Context, template string, inputPath string, outputPath string) (string, error) {
-	outputDir := filepath.Dir(outputPath)
-	outputBase := strings.TrimSuffix(outputPath, filepath.Ext(outputPath))
-	command := strings.ReplaceAll(template, "{input}", shellQuote(inputPath))
-	command = strings.ReplaceAll(command, "{output}", shellQuote(outputPath))
-	command = strings.ReplaceAll(command, "{output_dir}", shellQuote(outputDir))
-	command = strings.ReplaceAll(command, "{output_base}", shellQuote(outputBase))
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail == "" {
-			return "", err
-		}
-		return "", fmt.Errorf("%w: %s", err, detail)
-	}
-	return strings.TrimSpace(string(output)), nil
+func touchTranscriptFile(path string) {
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
 }
 
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+func transcriptCachePath(transcriptDir string, record harvest.MessageRecord, index int, attachment harvest.Attachment) string {
+	if strings.TrimSpace(transcriptDir) == "" {
+		transcriptDir = "transcripts"
+	}
+	key := transcriptCacheKey(record, index, attachment)
+	sum := sha256.Sum256([]byte(key))
+	hash := hex.EncodeToString(sum[:])
+	kind := safePathSegment(attachment.Kind)
+	if kind == "" {
+		kind = "media"
+	}
+	return filepath.Join(transcriptDir, "cache", hash[:2], fmt.Sprintf("%s-%s.txt", kind, hash[:24]))
+}
+
+func transcriptCacheKey(record harvest.MessageRecord, index int, attachment harvest.Attachment) string {
+	if mediaID := strings.TrimSpace(attachment.MediaID); mediaID != "" {
+		return attachment.Kind + ":" + mediaID
+	}
+	return fmt.Sprintf("message:%s:%d:%d:%d:%s:%s:%d",
+		record.Source,
+		record.Chat.ID,
+		record.MessageID,
+		index,
+		attachment.Kind,
+		attachment.FileName,
+		attachment.Size,
+	)
+}
+
+func createTemporaryMediaPath(mediaDir string, fileName string) (string, error) {
+	if strings.TrimSpace(mediaDir) == "" {
+		mediaDir = os.TempDir()
+	}
+	tempDir := filepath.Join(mediaDir, ".tmp")
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return "", err
+	}
+	extension := filepath.Ext(safeFileName(fileName))
+	if extension == "" {
+		extension = ".bin"
+	}
+	file, err := os.CreateTemp(tempDir, "telegram-media-*"+extension)
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func transcribeOptions(opts harvest.HistoryOptions) transcribe.Options {
+	return transcribe.Options{
+		CommandTemplate: opts.TranscribeCommand,
+		VoskCommand:     opts.VoskCommand,
+		VoskModelPath:   opts.VoskModelPath,
+		VoskGrammarPath: opts.VoskGrammarPath,
+		FFmpegCommand:   opts.FFmpegCommand,
+	}
 }
 
 func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, bool) {
@@ -1931,17 +1990,26 @@ func documentKind(media *tg.MessageMediaDocument) string {
 		if doc, ok := document.(*tg.Document); ok {
 			for _, attr := range doc.Attributes {
 				audio, ok := attr.(*tg.DocumentAttributeAudio)
-				if !ok {
-					continue
+				if ok {
+					if audio.Voice {
+						return "voice"
+					}
+					return "audio"
 				}
-				if audio.Voice {
-					return "voice"
+				if _, ok := attr.(*tg.DocumentAttributeVideo); ok {
+					return "video"
 				}
-				return "audio"
 			}
 		}
 	}
 	return "document"
+}
+
+func documentMediaID(doc *tg.Document) string {
+	if doc == nil || doc.ID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("document:%d", doc.ID)
 }
 
 func documentFileName(doc *tg.Document) string {
