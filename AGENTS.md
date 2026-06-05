@@ -42,6 +42,7 @@
 - Keep generated `agent-view/AGENTS.md` and `agent-view/README.md` aligned whenever changing the agent read path; they are the agent-facing navigation source of truth.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
 - Daily mode uses `TG_HARVEST_*`. Study mode uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
+- Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-mode feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
 - Default media caps are deliberate: photo/image and generic documents 10 MiB, audio/voice 50 MiB, video/round-video 200 MiB. If a cap is exceeded, keep the skip reason and manual `download-media` hint in output.
 - When changing CLI commands or flags, update CLI help, Makefile shortcuts, README/.env examples when relevant, and command tests in the same pass.

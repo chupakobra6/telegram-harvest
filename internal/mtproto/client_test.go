@@ -201,6 +201,24 @@ func TestExtractAttachmentsIgnoresNonAcademicTelegramMedia(t *testing.T) {
 			media: &tg.MessageMediaDocument{Voice: true},
 		},
 		{
+			name:  "round video",
+			media: &tg.MessageMediaDocument{Round: true},
+		},
+		{
+			name: "audio document",
+			media: func() *tg.MessageMediaDocument {
+				media := &tg.MessageMediaDocument{}
+				media.SetDocument(&tg.Document{
+					MimeType: "audio/ogg",
+					Size:     100,
+					Attributes: []tg.DocumentAttributeClass{
+						&tg.DocumentAttributeAudio{Duration: 5},
+					},
+				})
+				return media
+			}(),
+		},
+		{
 			name:  "video",
 			media: &tg.MessageMediaDocument{Video: true},
 		},

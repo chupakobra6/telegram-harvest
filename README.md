@@ -215,8 +215,10 @@ Typical files are:
 .state/media/
 ```
 
-When `--download-media` is enabled, study `dump` and `sync` use the same caps as daily. If a skipped
-file is needed later, use the study-account manual download command:
+When `--download-media` is enabled, study `dump` and `sync` use the same caps as daily for photos,
+image documents, and generic documents. Study mode does not transcribe audio/video; transcription is
+reserved for daily outgoing harvest. If a skipped file is needed later, use the study-account manual
+download command:
 
 ```bash
 go run ./cmd/telegram-harvest download-media \
