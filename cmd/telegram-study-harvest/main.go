@@ -163,7 +163,7 @@ func shouldUseTelegramDesktopDefaults(command string) bool {
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-study-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "commands are read-only except login/session file creation")
+	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
@@ -174,7 +174,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
 	fmt.Fprintln(out, "  daily --date today [--out days/YYYY-MM-DD.jsonl] [--markdown-out days/YYYY-MM-DD.md] [--download-media=false]")
-	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me | daily-download-media  # use TG_HARVEST_* account settings")
+	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
+	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_HARVEST_* account settings")
 }
 
 func printError(stderr io.Writer, code int, err error) int {

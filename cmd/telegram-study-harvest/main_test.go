@@ -13,8 +13,25 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stdout, "agent-view") || !strings.Contains(stdout, "compact") {
-		t.Fatalf("help missing local commands:\n%s", stdout)
+	for _, want := range []string{
+		"agent-view",
+		"compact",
+		"download-media --chat",
+		"daily-download-media --chat",
+		"Telegram operations are read-only",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("help missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestDailyCommandRouting(t *testing.T) {
+	if !isDailyCommand("daily-download-media") {
+		t.Fatalf("daily-download-media should use daily config")
+	}
+	if isDailyCommand("download-media") {
+		t.Fatalf("download-media should use study config")
 	}
 }
 
@@ -139,6 +156,7 @@ func TestRunReadCommandsRefuseChatsOutsideAllowlistBeforeRuntimeAccess(t *testin
 		{"topics", "--chat", "999"},
 		{"dump", "--chat", "999", "--out", "x.jsonl"},
 		{"sync", "--chat", "999", "--name", "x"},
+		{"download-media", "--chat", "999", "--message-id", "1"},
 	} {
 		code, _, stderr := runCommand(t, args, env)
 		if code != 1 {

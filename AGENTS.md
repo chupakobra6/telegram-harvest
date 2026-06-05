@@ -44,4 +44,5 @@
 - Daily mode uses `TG_HARVEST_*`. Study mode uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
 - Default media caps are deliberate: photo/image and generic documents 10 MiB, audio/voice 50 MiB, video/round-video 200 MiB. If a cap is exceeded, keep the skip reason and manual `download-media` hint in output.
+- When changing CLI commands or flags, update CLI help, Makefile shortcuts, README/.env examples when relevant, and command tests in the same pass.
 - Add tests for parsing/config/state behavior; live Telegram behavior is validated manually after login.
