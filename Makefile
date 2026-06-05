@@ -7,13 +7,14 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt test doctor login daily-doctor daily-login daily-me daily daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup fmt test vosk-transcribe doctor login daily-doctor daily-login daily-me daily daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
 	@printf "  make setup   # go mod tidy\\n"
 	@printf "  make fmt     # gofmt project files\\n"
 	@printf "  make test    # go test ./...\\n"
+	@printf "  make vosk-transcribe # build local Vosk helper into bin/\\n"
 	@printf "  make doctor  # show config/session status\\n"
 	@printf "  make login   # create MTProto user session\\n"
 	@printf "  make daily-doctor # show daily mode config/session status\\n"
@@ -38,6 +39,9 @@ fmt:
 
 test:
 	go test ./...
+
+vosk-transcribe:
+	go build -o bin/vosk-transcribe ./cmd/vosk-transcribe
 
 doctor:
 	$(CLI) doctor
@@ -84,6 +88,6 @@ agent-view:
 refresh-agent-view: agent-view compact
 
 clean:
-	rm -rf .state artifacts telegram-harvest agent-view media media-refresh
+	rm -rf .state artifacts telegram-harvest agent-view media media-refresh bin
 	rm -f messages.jsonl messages.toon *.log
 	rm -f .sessions/runtime.lock

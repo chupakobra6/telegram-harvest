@@ -120,15 +120,15 @@ and transcripts when available. Photos and image documents are kept under `media
 round video, and regular video are downloaded to a temporary file, converted with `ffmpeg`, transcribed,
 then deleted; the report keeps only transcript text and `transcript_path`.
 
-Vosk is the default transcription path. On this Mac the project auto-detects the Shelfy small Russian
-model at `../shelfy/models/vosk-model-small-ru-0.22` when it exists, and uses `vosk-transcribe` from
-`PATH` when available. For a daily run, Harvest starts the Vosk command lazily as a session-scoped
-worker with `--session <model-dir> [grammar-json-path]`; the worker keeps the model loaded until the
-command finishes:
+Vosk is the default transcription path. Build the local helper with `make vosk-transcribe`, place a
+Russian model under `models/vosk-model-small-ru-0.22`, and Harvest will auto-detect both local paths
+when they exist. For a daily run, Harvest starts the Vosk command lazily as a session-scoped worker
+with `--session <model-dir> [grammar-json-path]`; the worker keeps the model loaded until the command
+finishes:
 
 ```dotenv
-TG_HARVEST_VOSK_COMMAND=/usr/local/bin/vosk-transcribe
-TG_HARVEST_VOSK_MODEL_PATH=~/projects/shelfy/models/vosk-model-small-ru-0.22
+TG_HARVEST_VOSK_COMMAND=bin/vosk-transcribe
+TG_HARVEST_VOSK_MODEL_PATH=models/vosk-model-small-ru-0.22
 TG_HARVEST_FFMPEG_COMMAND=ffmpeg
 TG_HARVEST_RETENTION_DAYS=14
 ```
@@ -294,9 +294,10 @@ make fmt
 ## Vosk Runtime
 
 Daily transcription uses one session-scoped Vosk worker per `telegram-harvest daily` process. Harvest
-still converts each audio/video attachment with `ffmpeg`, but the Vosk command is started only on the
-first transcript cache miss and then receives JSONL requests on stdin. `TG_HARVEST_VOSK_COMMAND`
-must point to a helper that supports this protocol:
+owns its Vosk helper in `cmd/vosk-transcribe`; build it with `make vosk-transcribe` to create
+`bin/vosk-transcribe`. Harvest still converts each audio/video attachment with `ffmpeg`, but the Vosk
+command is started only on the first transcript cache miss and then receives JSONL requests on stdin.
+`TG_HARVEST_VOSK_COMMAND` must point to a helper that supports this protocol:
 
 ```text
 vosk-transcribe --session <model-dir> [grammar-json-path]
@@ -311,15 +312,20 @@ The current Russian model pool from Vosk is small:
 
 | Model | Published size | Practical use |
 | --- | ---: | --- |
-| `vosk-model-small-ru-0.22` | 45M | Default. Lightweight wideband Russian model used by Shelfy. |
+| `vosk-model-small-ru-0.22` | 45M | Default. Lightweight wideband Russian model for local Harvest runs. |
 | `vosk-model-ru-0.42` | 1.8G | Larger server model to evaluate only if the small model is too inaccurate. |
 | `vosk-model-ru-0.22` | 1.5G | Older large Russian model. |
 | `vosk-model-ru-0.10` | 2.5G | Older narrowband Russian model. |
 | `vosk-recasepunc-ru-0.22` | 1.6G | Optional punctuation/case post-processing model, not part of the ASR default. |
 
-The checked Shelfy small model is larger after extraction than its download size; its metadata reports
-roughly `0.51-0.56 GiB` runtime memory. That is small enough for a local Mac session worker, but still
-large enough that per-file model startup should be avoided.
+The small Russian model is larger after extraction than its download size; a local extracted copy is
+roughly a few hundred MiB and Vosk metadata reports about `0.51-0.56 GiB` runtime memory. That is small
+enough for a local Mac session worker, but still large enough that per-file model startup should be
+avoided.
+
+`cmd/vosk-transcribe` loads `libvosk` at runtime. Set `TG_HARVEST_VOSK_LIBRARY_PATH` or
+`VOSK_LIBRARY_PATH` if the library is not in a standard location such as `/opt/homebrew/lib` or
+`/usr/local/lib`.
 
 `TG_HARVEST_TRANSCRIBE_CMD` remains an explicit override for non-Vosk ASR commands. Override commands
 run per attachment because they do not share the Vosk session protocol.

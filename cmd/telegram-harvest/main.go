@@ -1126,13 +1126,15 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 	transcribeCommand := firstEnvValue("TG_HARVEST_TRANSCRIBE_CMD")
 	voskCommand := firstEnvValue("TG_HARVEST_VOSK_COMMAND")
 	if voskCommand == "" {
-		if resolved, err := exec.LookPath("vosk-transcribe"); err == nil {
+		if candidate := defaultLocalVoskCommandPath(); candidate != "" {
+			voskCommand = candidate
+		} else if resolved, err := exec.LookPath("vosk-transcribe"); err == nil {
 			voskCommand = resolved
 		}
 	}
 	voskModelPath := firstEnvValue("TG_HARVEST_VOSK_MODEL_PATH")
 	if voskModelPath == "" {
-		if candidate := defaultShelfyVoskModelPath(); candidate != "" {
+		if candidate := defaultLocalVoskModelPath(); candidate != "" {
 			voskModelPath = candidate
 		}
 	}
@@ -1155,12 +1157,24 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 	}
 }
 
-func defaultShelfyVoskModelPath() string {
+func defaultLocalVoskCommandPath() string {
 	projectRoot := detectProjectRoot()
 	if projectRoot == "" {
 		return ""
 	}
-	candidate := filepath.Join(filepath.Dir(projectRoot), "shelfy", "models", "vosk-model-small-ru-0.22")
+	candidate := filepath.Join(projectRoot, "bin", "vosk-transcribe")
+	if fileExists(candidate) {
+		return candidate
+	}
+	return ""
+}
+
+func defaultLocalVoskModelPath() string {
+	projectRoot := detectProjectRoot()
+	if projectRoot == "" {
+		return ""
+	}
+	candidate := filepath.Join(projectRoot, "models", "vosk-model-small-ru-0.22")
 	if fileExists(candidate) {
 		return candidate
 	}

@@ -2,6 +2,8 @@
 .sessions/
 .state/
 artifacts/
+/bin/
+/models/
 /telegram-harvest
 messages.jsonl
 messages.toon
