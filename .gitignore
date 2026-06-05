@@ -2,6 +2,7 @@
 .sessions/
 .state/
 artifacts/
+/reports/
 /bin/
 /models/
 /telegram-harvest

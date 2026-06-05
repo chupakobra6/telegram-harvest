@@ -179,6 +179,26 @@ func compactTranscript(value string) string {
 }
 
 func DailyDefaultOutputPaths(stateDir string, date string) (string, string) {
-	return filepath.Join(stateDir, "reports", "jsonl", date+".jsonl"),
-		filepath.Join(stateDir, "reports", "md", date+".md")
+	reportRoot := DailyDefaultReportRoot(stateDir)
+	return filepath.Join(reportRoot, "jsonl", date+".jsonl"),
+		filepath.Join(reportRoot, "md", date+".md")
+}
+
+func DailyDefaultReportRoot(stateDir string) string {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		return filepath.Join("reports", "daily")
+	}
+	clean := filepath.Clean(stateDir)
+	for current := clean; ; current = filepath.Dir(current) {
+		if filepath.Base(current) == ".state" {
+			parent := filepath.Dir(current)
+			return filepath.Join(parent, "reports", "daily")
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			break
+		}
+	}
+	return filepath.Join(clean, "reports", "daily")
 }

@@ -173,7 +173,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
-	fmt.Fprintln(out, "  daily --date today [--out reports/jsonl/YYYY-MM-DD.jsonl] [--markdown-out reports/md/YYYY-MM-DD.md] [--download-media=false]")
+	fmt.Fprintln(out, "  daily --date today [--out reports/daily/jsonl/YYYY-MM-DD.jsonl] [--markdown-out reports/daily/md/YYYY-MM-DD.md] [--download-media=false]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_HARVEST_* account settings")
 }

@@ -79,12 +79,20 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 }
 
 func TestDailyDefaultOutputPathsSplitsMarkdownAndJSONL(t *testing.T) {
-	jsonl, markdown := DailyDefaultOutputPaths("/state", "2026-06-05")
-	if jsonl != filepath.Join("/state", "reports", "jsonl", "2026-06-05.jsonl") {
+	stateDir := filepath.Join("/repo", ".state", "daily")
+	jsonl, markdown := DailyDefaultOutputPaths(stateDir, "2026-06-05")
+	if jsonl != filepath.Join("/repo", "reports", "daily", "jsonl", "2026-06-05.jsonl") {
 		t.Fatalf("jsonl path = %s", jsonl)
 	}
-	if markdown != filepath.Join("/state", "reports", "md", "2026-06-05.md") {
+	if markdown != filepath.Join("/repo", "reports", "daily", "md", "2026-06-05.md") {
 		t.Fatalf("markdown path = %s", markdown)
+	}
+}
+
+func TestDailyDefaultReportRootFallsBackInsideCustomStateDir(t *testing.T) {
+	got := DailyDefaultReportRoot(filepath.Join("/custom", "daily-state"))
+	if got != filepath.Join("/custom", "daily-state", "reports", "daily") {
+		t.Fatalf("report root = %s", got)
 	}
 }
 

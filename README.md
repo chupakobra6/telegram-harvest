@@ -103,7 +103,8 @@ go run ./cmd/telegram-harvest daily-doctor
 go run ./cmd/telegram-harvest daily-me
 ```
 
-Export a day. Relative output paths live under `TG_HARVEST_STATE_DIR`:
+Export a day. User-facing reports are written to the visible `reports/daily` directory in the project
+root. Relative override paths still resolve under `TG_HARVEST_STATE_DIR`:
 
 ```bash
 go run ./cmd/telegram-harvest daily --date yesterday
@@ -112,17 +113,17 @@ go run ./cmd/telegram-harvest daily --date yesterday
 Default outputs:
 
 ```text
-.state/daily/reports/jsonl/YYYY-MM-DD.jsonl
-.state/daily/reports/md/YYYY-MM-DD.md
+reports/daily/jsonl/YYYY-MM-DD.jsonl
+reports/daily/md/YYYY-MM-DD.md
 .state/daily/media/...
 .state/daily/transcripts/cache/...
 ```
 
-The Markdown file is the agent-readable daily surface: each line shows local time, destination chat,
+The Markdown file is the Finder-friendly daily surface: each line shows local time, destination chat,
 message text or media kind, Telegram message links when Telegram can produce them, saved image paths,
-and transcripts when available. Photos and image documents are kept under `media/`. Voice, audio,
-round video, and regular video are downloaded to a temporary file, converted with `ffmpeg`, transcribed,
-then deleted; the report keeps only transcript text and `transcript_path`.
+and transcripts when available. Photos and image documents are kept under `.state/daily/media/`.
+Voice, audio, round video, and regular video are downloaded to a temporary file, converted with
+`ffmpeg`, transcribed, then deleted; the report keeps only transcript text and `transcript_path`.
 
 Vosk is the default transcription path. Build the local helper with `make vosk-transcribe`, place a
 Russian model under `models/vosk-model-small-ru-0.22`, and Harvest will auto-detect both local paths
