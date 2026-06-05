@@ -1,6 +1,7 @@
 package harvest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,7 +179,7 @@ func TestUpdateAgentMarkdownViewFallsBackToRebuildWhenManifestVersionChanges(t *
 	}
 	manifestPath := filepath.Join(output, agentViewManifestName)
 	manifest := readFile(t, manifestPath)
-	manifest = strings.Replace(manifest, `"version": 2`, `"version": 1`, 1)
+	manifest = strings.Replace(manifest, fmt.Sprintf(`"version": %d`, agentViewManifestVersion), `"version": 1`, 1)
 	writeFile(t, manifestPath, manifest)
 
 	stats, err := UpdateAgentMarkdownView(AgentViewOptions{InputPath: input, OutputDir: output, RecentLimit: 10})

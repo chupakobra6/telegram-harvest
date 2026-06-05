@@ -191,7 +191,8 @@ go run ./cmd/telegram-study-harvest agent-view --in messages.jsonl --out-dir age
 go run ./cmd/telegram-study-harvest compact --in messages.jsonl --out messages.toon
 ```
 
-`agent-view/README.md` is the default agent entrypoint. It points to `all-recent.md`, chat indexes,
+`agent-view/README.md` is the default agent entrypoint. Generated `agent-view/AGENTS.md` contains
+the local reading rules for agents. The generated view points to `all-recent.md`, chat indexes,
 topic indexes, and day files:
 
 ```text
@@ -202,7 +203,19 @@ agent-view/
   chats/chat-1234567890/topics/topic-3/2026-05-12.md
 ```
 
-For the full read protocol, see [docs/agent-navigation.md](docs/agent-navigation.md).
+Normal agent read path:
+
+1. Open `agent-view/README.md`.
+2. Use `all-recent.md` only for vague or latest-message questions.
+3. If the chat or subject is known, search inside one chat/topic directory before opening files.
+4. Open one topic README, then one `YYYY-MM-DD.md` day file.
+5. Use raw JSONL only when Markdown lacks a field needed for audit/debug.
+
+After sync, refresh generated study-agent files:
+
+```bash
+make refresh-agent-view
+```
 
 ## Safety
 
@@ -225,7 +238,6 @@ make fmt
 | Path | Purpose |
 | --- | --- |
 | `cmd/telegram-study-harvest` | CLI entrypoint and command wiring. |
-| `docs/agent-navigation.md` | Rules for fast, low-context Telegram reads by agents. |
 | `internal/config` | Env loading, study and daily mode defaults, and study-chat allowlist. |
 | `internal/mtproto` | Telegram transport, Telegram Desktop import, history, topic, and daily outgoing reads. |
 | `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	agentViewManifestVersion = 2
+	agentViewManifestVersion = 3
 	agentViewManifestName    = ".agent-view-state.json"
 )
 
@@ -428,6 +428,7 @@ func renderAgentIndexFromManifest(opts AgentViewOptions, manifest agentViewManif
 	b.WriteString("## Token Policy\n\n")
 	b.WriteString("- Raw append-only source stays in JSONL; Markdown files are rebuildable slices.\n")
 	b.WriteString("- Message lines omit JSON keys, reply ids, thread ids, views, Telegram source URLs, and raw service actions.\n")
+	b.WriteString("- Attachment labels include `local_path` for saved files.\n")
 	b.WriteString("- Service messages are skipped by default.\n")
 	b.WriteString("- Each visible message keeps `#message_id`; cite facts as `path #message_id`.\n")
 	b.WriteString("- Message time is Europe/Moscow local time.\n\n")
