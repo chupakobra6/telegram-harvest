@@ -56,16 +56,35 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 	}
 	content := readTestFile(t, output)
 	for _, want := range []string{
-		"# Telegram Daily Harvest: 2026-06-05",
-		"09:00 to Notes: Запланировал задачу `#10`",
-		"10:00 to Work: [voice] [`#20`](https://t.me/c/2/20)",
-		"file: voice; media_id=document:123; voice.ogg",
+		"# Telegram-отчет за 2026-06-05",
+		"## Сводка",
+		"- Период: 2026-06-05 00:00 .. 2026-06-06 00:00",
+		"- Исходящих сообщений: 2",
+		"- Вложений: 1",
+		"- Транскриптов: 1",
+		"## Хронология",
+		"09:00 в Notes: Запланировал задачу `#10`",
+		"10:00 в Work: [voice] [`#20`](https://t.me/c/2/20)",
+		"файл: voice; media_id=document:123; voice.ogg",
 		"transcript_cached=true",
-		"transcript: Поговорил про итоги дня",
+		"транскрипт: Поговорил про итоги дня",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("markdown missing %q:\n%s", want, content)
 		}
+	}
+	if strings.Contains(content, "Ошибок: 0") || strings.Contains(content, "Flood waits: 0") {
+		t.Fatalf("markdown includes zero summary fields:\n%s", content)
+	}
+}
+
+func TestDailyDefaultOutputPathsSplitsMarkdownAndJSONL(t *testing.T) {
+	jsonl, markdown := DailyDefaultOutputPaths("/state", "2026-06-05")
+	if jsonl != filepath.Join("/state", "reports", "jsonl", "2026-06-05.jsonl") {
+		t.Fatalf("jsonl path = %s", jsonl)
+	}
+	if markdown != filepath.Join("/state", "reports", "md", "2026-06-05.md") {
+		t.Fatalf("markdown path = %s", markdown)
 	}
 }
 

@@ -40,6 +40,12 @@ func PruneDailyState(opts DailyRetentionOptions) (DailyRetentionStats, error) {
 	if err := pruneDailyDayFiles(filepath.Join(opts.StateDir, "days"), cutoffDay, &stats); err != nil {
 		return stats, err
 	}
+	if err := pruneDailyDayFiles(filepath.Join(opts.StateDir, "reports", "jsonl"), cutoffDay, &stats); err != nil {
+		return stats, err
+	}
+	if err := pruneDailyDayFiles(filepath.Join(opts.StateDir, "reports", "md"), cutoffDay, &stats); err != nil {
+		return stats, err
+	}
 	if err := pruneDateLeafDirs(filepath.Join(opts.StateDir, "media"), cutoffDay, &stats); err != nil {
 		return stats, err
 	}
@@ -53,6 +59,9 @@ func PruneDailyState(opts DailyRetentionOptions) (DailyRetentionStats, error) {
 		return stats, err
 	}
 	if err := pruneEmptyDirs(filepath.Join(opts.StateDir, "transcripts"), &stats); err != nil {
+		return stats, err
+	}
+	if err := pruneEmptyDirs(filepath.Join(opts.StateDir, "reports"), &stats); err != nil {
 		return stats, err
 	}
 	return stats, nil

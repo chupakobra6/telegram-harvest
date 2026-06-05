@@ -108,8 +108,8 @@ go run ./cmd/telegram-harvest daily --date yesterday
 Default outputs:
 
 ```text
-.state/daily/days/YYYY-MM-DD.jsonl
-.state/daily/days/YYYY-MM-DD.md
+.state/daily/reports/jsonl/YYYY-MM-DD.jsonl
+.state/daily/reports/md/YYYY-MM-DD.md
 .state/daily/media/...
 .state/daily/transcripts/cache/...
 ```

@@ -36,37 +36,52 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 		dateLabel = opts.Start.In(moscowLocation).Format("2006-01-02")
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("# Telegram Daily Harvest: %s\n\n", dateLabel))
-	b.WriteString("## Summary\n\n")
+	b.WriteString(fmt.Sprintf("# Telegram-отчет за %s\n\n", dateLabel))
+	b.WriteString("## Сводка\n\n")
 	if !opts.Start.IsZero() && !opts.End.IsZero() {
-		b.WriteString(fmt.Sprintf("- Period: `%s` .. `%s`\n", opts.Start.In(moscowLocation).Format(time.RFC3339), opts.End.In(moscowLocation).Format(time.RFC3339)))
+		b.WriteString(fmt.Sprintf("- Период: %s .. %s\n", formatDailySummaryTime(opts.Start), formatDailySummaryTime(opts.End)))
 	}
 	if strings.TrimSpace(opts.SourcePath) != "" {
-		b.WriteString(fmt.Sprintf("- Raw JSONL: `%s`\n", opts.SourcePath))
+		b.WriteString(fmt.Sprintf("- JSONL: %s\n", opts.SourcePath))
 	}
-	b.WriteString(fmt.Sprintf("- Outgoing messages: `%d`\n", len(records)))
-	b.WriteString(fmt.Sprintf("- Chats with messages: `%d`\n", dailyChatCount(records)))
-	b.WriteString(fmt.Sprintf("- Attachments: `%d`\n", opts.Stats.Attachments))
-	b.WriteString(fmt.Sprintf("- Transcripts: `%d`\n", opts.Stats.Transcripts))
-	b.WriteString(fmt.Sprintf("- Dialogs scanned: `%d`; skipped by date: `%d`; errors: `%d`\n", opts.Stats.DialogsScanned, opts.Stats.DialogsSkipped, len(opts.Stats.DialogErrors)))
+	writeDailySummaryCount(&b, "Исходящих сообщений", len(records))
+	writeDailySummaryCount(&b, "Чатов с сообщениями", dailyChatCount(records))
+	writeDailySummaryCount(&b, "Вложений", opts.Stats.Attachments)
+	writeDailySummaryCount(&b, "Транскриптов", opts.Stats.Transcripts)
+	if opts.Stats.DialogsScanned > 0 || opts.Stats.DialogsSkipped > 0 || len(opts.Stats.DialogErrors) > 0 {
+		parts := make([]string, 0, 3)
+		if opts.Stats.DialogsScanned > 0 {
+			parts = append(parts, fmt.Sprintf("просканировано диалогов: %d", opts.Stats.DialogsScanned))
+		}
+		if opts.Stats.DialogsSkipped > 0 {
+			parts = append(parts, fmt.Sprintf("пропущено по дате: %d", opts.Stats.DialogsSkipped))
+		}
+		if len(opts.Stats.DialogErrors) > 0 {
+			parts = append(parts, fmt.Sprintf("ошибок: %d", len(opts.Stats.DialogErrors)))
+		}
+		b.WriteString("- Диалоги: " + strings.Join(parts, "; ") + "\n")
+	}
 	if opts.Stats.FloodWaits > 0 {
-		b.WriteString(fmt.Sprintf("- Flood waits: `%d`\n", opts.Stats.FloodWaits))
+		b.WriteString(fmt.Sprintf("- Flood waits: %d\n", opts.Stats.FloodWaits))
 	}
 	if len(opts.Stats.DialogErrors) > 0 {
-		b.WriteString("\n## Dialog Errors\n\n")
+		b.WriteString("\n## Ошибки диалогов\n\n")
 		for _, err := range opts.Stats.DialogErrors {
 			b.WriteString("- " + err + "\n")
 		}
 	}
-	b.WriteString("\n## Timeline\n\n")
+	b.WriteString("\n## Хронология\n\n")
 	if len(records) == 0 {
-		b.WriteString("No outgoing messages found for this day.\n")
+		b.WriteString("Исходящих сообщений за этот день не найдено.\n")
 		return b.String()
 	}
 	lastHour := ""
 	for _, record := range records {
 		hour := record.Date.In(moscowLocation).Format("15:00")
 		if hour != lastHour {
+			if lastHour != "" {
+				b.WriteString("\n")
+			}
 			b.WriteString(fmt.Sprintf("### %s\n\n", hour))
 			lastHour = hour
 		}
@@ -75,11 +90,21 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 		for _, attachment := range record.Attachments {
 			b.WriteString("  - " + dailyAttachmentLine(attachment) + "\n")
 			if transcript := compactTranscript(attachment.Transcript); transcript != "" {
-				b.WriteString("  - transcript: " + transcript + "\n")
+				b.WriteString("  - транскрипт: " + transcript + "\n")
 			}
 		}
 	}
 	return b.String()
+}
+
+func formatDailySummaryTime(value time.Time) string {
+	return value.In(moscowLocation).Format("2006-01-02 15:04")
+}
+
+func writeDailySummaryCount(b *strings.Builder, label string, count int) {
+	if count > 0 {
+		b.WriteString(fmt.Sprintf("- %s: %d\n", label, count))
+	}
 }
 
 func dailyMessageLine(record MessageRecord) string {
@@ -93,13 +118,13 @@ func dailyMessageLine(record MessageRecord) string {
 		text = "[" + record.Kind + "]"
 	}
 	if strings.TrimSpace(record.SourceURL) != "" {
-		return fmt.Sprintf("- %s to %s: %s [`#%d`](%s)", timeLabel, destination, text, record.MessageID, record.SourceURL)
+		return fmt.Sprintf("- %s в %s: %s [`#%d`](%s)", timeLabel, destination, text, record.MessageID, record.SourceURL)
 	}
-	return fmt.Sprintf("- %s to %s: %s `#%d`", timeLabel, destination, text, record.MessageID)
+	return fmt.Sprintf("- %s в %s: %s `#%d`", timeLabel, destination, text, record.MessageID)
 }
 
 func dailyAttachmentLine(attachment Attachment) string {
-	parts := []string{"file: " + attachment.Kind}
+	parts := []string{"файл: " + attachment.Kind}
 	if attachment.MediaID != "" {
 		parts = append(parts, "media_id="+attachment.MediaID)
 	}
@@ -154,6 +179,6 @@ func compactTranscript(value string) string {
 }
 
 func DailyDefaultOutputPaths(stateDir string, date string) (string, string) {
-	base := filepath.Join(stateDir, "days")
-	return filepath.Join(base, date+".jsonl"), filepath.Join(base, date+".md")
+	return filepath.Join(stateDir, "reports", "jsonl", date+".jsonl"),
+		filepath.Join(stateDir, "reports", "md", date+".md")
 }
