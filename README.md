@@ -212,6 +212,7 @@ TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {ou
 | 19 дней с локальным Vosk CPU | около 1 часа |
 
 Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
+Перед per-chat поиском daily использует Telegram dialog order и останавливает загрузку списка на первом обычном неприкрепленном чате, где последнее сообщение старше нужного дня. Старые pinned-чаты не останавливают скан, потому что Telegram может держать их сверху вне хронологического порядка.
 
 ## Study sync
 
