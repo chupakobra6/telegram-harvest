@@ -42,20 +42,20 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 	}
 }
 
-func TestRunDailyConfigUsesDailyProfile(t *testing.T) {
+func TestRunDailyConfigUsesHarvestMode(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
-		"TG_DAILY_APP_ID":       "77",
-		"TG_DAILY_APP_HASH":     "daily-hash",
-		"TG_DAILY_STATE_DIR":    filepath.Join(dir, "daily-state"),
-		"TG_DAILY_SESSION_PATH": filepath.Join(dir, "daily-session.json"),
+		"TG_HARVEST_APP_ID":       "77",
+		"TG_HARVEST_APP_HASH":     "daily-hash",
+		"TG_HARVEST_STATE_DIR":    filepath.Join(dir, "daily-state"),
+		"TG_HARVEST_SESSION_PATH": filepath.Join(dir, "daily-session.json"),
 	}
 	code, stdout, stderr := runCommand(t, []string{"daily-config"}, env)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	for _, want := range []string{
-		"profile=daily",
+		"mode=daily",
 		"app_id_set=true",
 		"state_dir=" + filepath.Join(dir, "daily-state"),
 		"session=" + filepath.Join(dir, "daily-session.json"),
@@ -137,7 +137,7 @@ func TestRunReadCommandsRefuseChatsOutsideAllowlistBeforeRuntimeAccess(t *testin
 		if code != 1 {
 			t.Fatalf("%v code=%d stderr=%s", args, code, stderr)
 		}
-		if !strings.Contains(stderr, "outside TG_STUDY_ALLOWED_CHATS") {
+		if !strings.Contains(stderr, "outside TG_HARVEST_STUDY_ALLOWED_CHATS") {
 			t.Fatalf("%v missing allowlist error: %s", args, stderr)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "sessions", "runtime.lock")); !os.IsNotExist(err) {
@@ -182,18 +182,9 @@ func TestParseDailyDateSupportsRelativeDays(t *testing.T) {
 func runCommand(t *testing.T, args []string, env map[string]string) (int, string, string) {
 	t.Helper()
 	baseDir := t.TempDir()
+	clearCommandEnv(t)
 	t.Setenv("TG_STUDY_APP_ID", "0")
 	t.Setenv("TG_STUDY_APP_HASH", "test-hash")
-	t.Setenv("TG_STUDY_PHONE", "")
-	t.Setenv("TG_STUDY_PASSWORD", "")
-	t.Setenv("TG_E2E_APP_ID", "")
-	t.Setenv("TG_E2E_APP_HASH", "")
-	t.Setenv("TG_DAILY_APP_ID", "")
-	t.Setenv("TG_DAILY_APP_HASH", "")
-	t.Setenv("TG_DAILY_PHONE", "")
-	t.Setenv("TG_DAILY_PASSWORD", "")
-	t.Setenv("TG_HARVEST_APP_ID", "")
-	t.Setenv("TG_HARVEST_APP_HASH", "")
 	t.Setenv("TG_STUDY_STATE_DIR", filepath.Join(baseDir, "state"))
 	t.Setenv("TG_STUDY_SESSION_PATH", filepath.Join(baseDir, "sessions", "user.json"))
 	for key, value := range env {
@@ -209,6 +200,36 @@ func runCommand(t *testing.T, args []string, env map[string]string) (int, string
 
 	code := run(args, stdin, stdout, stderr)
 	return code, readTempFile(t, stdout), readTempFile(t, stderr)
+}
+
+func clearCommandEnv(t *testing.T) {
+	t.Helper()
+	prefixes := []string{
+		"TG_HARVEST_",
+		"TG_HARVEST_DAILY_",
+		"TG_DAILY_",
+		"TG_HARVEST_STUDY_",
+		"TG_STUDY_",
+		"TG_E2E_",
+	}
+	suffixes := []string{
+		"APP_ID",
+		"APP_HASH",
+		"PHONE",
+		"PASSWORD",
+		"SESSION_PATH",
+		"STATE_DIR",
+		"ALLOWED_CHATS",
+		"RPC_SPACING_MS",
+		"HISTORY_BATCH_SIZE",
+		"HISTORY_LIMIT",
+		"MAX_BATCHES",
+	}
+	for _, prefix := range prefixes {
+		for _, suffix := range suffixes {
+			t.Setenv(prefix+suffix, "")
+		}
+	}
 }
 
 func tempFile(t *testing.T, name string) *os.File {

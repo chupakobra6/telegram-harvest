@@ -154,14 +154,14 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "commands are read-only except login/session file creation")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
 	fmt.Fprintln(out, "  me [--json]")
-	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by TG_STUDY_ALLOWED_CHATS when set")
+	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --limit 500 --out hse-main.jsonl [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
 	fmt.Fprintln(out, "  daily --date today [--out days/YYYY-MM-DD.jsonl] [--markdown-out days/YYYY-MM-DD.md] [--download-media=false]")
-	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_DAILY_* or TG_HARVEST_* account settings")
+	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_HARVEST_* account settings")
 }
 
 func printError(stderr io.Writer, code int, err error) int {
@@ -170,7 +170,7 @@ func printError(stderr io.Writer, code int, err error) int {
 }
 
 func printConfig(cfg config.Config, out io.Writer) {
-	fmt.Fprintf(out, "profile=%s\n", defaultCLIString(cfg.Profile, "study"))
+	fmt.Fprintf(out, "mode=%s\n", defaultModeName(cfg.Mode))
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -185,7 +185,7 @@ func printConfig(cfg config.Config, out io.Writer) {
 }
 
 func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
-	fmt.Fprintf(out, "profile=%s\n", defaultCLIString(cfg.Profile, "study"))
+	fmt.Fprintf(out, "mode=%s\n", defaultModeName(cfg.Mode))
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -205,7 +205,7 @@ func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
 
 func doctorAuthStatus(cfg config.Config, client *mtproto.Client) (string, string) {
 	if cfg.AppID == 0 || strings.TrimSpace(cfg.AppHash) == "" {
-		return "skipped", fmt.Sprintf("set %s and %s to verify live Telegram authorization", cfg.EnvName("APP_ID"), cfg.EnvName("APP_HASH"))
+		return "skipped", fmt.Sprintf("set %s and %s to verify live Telegram authorization", cfg.EnvNames("APP_ID"), cfg.EnvNames("APP_HASH"))
 	}
 	if !fileExists(cfg.SessionPath) {
 		return "reauth_required", fmt.Sprintf("session file is missing; run `%s`", cfg.LoginCommand())
@@ -581,7 +581,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	dateDefault := "today"
 	dateLabelDefault, _, _, _ := parseDailyDate(dateDefault, time.Now())
 	defaultJSONL, defaultMarkdown := harvest.DailyDefaultOutputPaths(cfg.StateDir, dateLabelDefault)
-	defaultTranscribeCommand := firstEnvValue("TG_DAILY_TRANSCRIBE_CMD", "TG_HARVEST_TRANSCRIBE_CMD")
+	defaultTranscribeCommand := firstEnvValue("TG_HARVEST_DAILY_TRANSCRIBE_CMD", "TG_DAILY_TRANSCRIBE_CMD", "TG_HARVEST_TRANSCRIBE_CMD")
 
 	fs := flag.NewFlagSet("daily", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -848,7 +848,7 @@ func ensureAllowedChat(cfg config.Config, chat string) error {
 	if cfg.ChatAllowed(chat) {
 		return nil
 	}
-	return fmt.Errorf("chat %q is outside TG_STUDY_ALLOWED_CHATS; refusing to read outside study scope", chat)
+	return fmt.Errorf("chat %q is outside %s; refusing to read outside study scope", chat, cfg.EnvNames("ALLOWED_CHATS"))
 }
 
 func withRuntimeLock(cfg config.Config, fn func() error) error {
@@ -918,7 +918,7 @@ func parseDailyDate(value string, now time.Time) (string, time.Time, time.Time, 
 }
 
 func dailyDialogLimitDefault() int {
-	if value, ok := intEnvValue("TG_DAILY_DIALOG_LIMIT", "TG_HARVEST_DIALOG_LIMIT"); ok && value > 0 {
+	if value, ok := intEnvValue("TG_HARVEST_DAILY_DIALOG_LIMIT", "TG_DAILY_DIALOG_LIMIT", "TG_HARVEST_DIALOG_LIMIT"); ok && value > 0 {
 		return value
 	}
 	return 500
@@ -948,11 +948,11 @@ func firstEnvValue(keys ...string) string {
 	return ""
 }
 
-func defaultCLIString(value string, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
+func defaultModeName(mode config.Mode) string {
+	if strings.TrimSpace(string(mode)) == "" {
+		return string(config.ModeStudy)
 	}
-	return value
+	return string(mode)
 }
 
 func defaultTDataPath() string {

@@ -691,16 +691,12 @@ func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolved
 	return records, stats, err
 }
 
+type outgoingDayBatchLoader func(context.Context, int, int) (tg.MessagesMessagesClass, error)
+
 func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	topicByID := map[int]harvest.Topic{}
-	records := make([]harvest.MessageRecord, 0)
-	stats := harvest.HistoryStats{}
-	offsetID := 0
-	for shouldContinueOutgoingDay(opts, stats.Batches) {
-		stats.Batches++
-		batchLimit := opts.History.BatchSize
+	return s.collectOutgoingDay(ctx, target, opts, false, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
-		err := s.performRPC(ctx, "search_messages", func(callCtx context.Context) error {
+		err := s.performRPC(callCtx, "search_messages", func(rpcCtx context.Context) error {
 			var callErr error
 			req := &tg.MessagesSearchRequest{
 				Peer:     target.InputPeer,
@@ -713,64 +709,19 @@ func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolv
 				Hash:     0,
 			}
 			req.SetFromID(&tg.InputPeerSelf{})
-			result, callErr = s.raw.MessagesSearch(callCtx, req)
+			result, callErr = s.raw.MessagesSearch(rpcCtx, req)
 			return callErr
 		})
-		if err != nil {
-			stats.FloodWaits = s.FloodWaits()
-			return nil, stats, err
-		}
-		entities := historyEntities(result)
-		messages := historyMessages(result)
-		if len(messages) == 0 {
-			stats.Complete = true
-			break
-		}
-		mergeTopicMap(topicByID, historyTopics(result), messages)
-
-		minMessageID := 0
-		for _, msgClass := range messages {
-			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
-				minMessageID = id
-			}
-			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts)
-			if !ok {
-				continue
-			}
-			records = append(records, record)
-		}
-		if minMessageID == 0 || len(messages) < batchLimit {
-			stats.Complete = true
-			break
-		}
-		offsetID = minMessageID
-	}
-	sortDailyRecords(records)
-	stats.Records = len(records)
-	stats.FloodWaits = s.FloodWaits()
-	for _, record := range records {
-		if stats.FirstID == 0 || record.MessageID < stats.FirstID {
-			stats.FirstID = record.MessageID
-		}
-		if record.MessageID > stats.LastID {
-			stats.LastID = record.MessageID
-		}
-	}
-	return records, stats, nil
+		return result, err
+	})
 }
 
 func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	topicByID := map[int]harvest.Topic{}
-	records := make([]harvest.MessageRecord, 0)
-	stats := harvest.HistoryStats{}
-	offsetID := 0
-	for shouldContinueOutgoingDay(opts, stats.Batches) {
-		stats.Batches++
-		batchLimit := opts.History.BatchSize
+	return s.collectOutgoingDay(ctx, target, opts, true, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
-		err := s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
+		err := s.performRPC(callCtx, "get_history", func(rpcCtx context.Context) error {
 			var callErr error
-			result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
+			result, callErr = s.raw.MessagesGetHistory(rpcCtx, &tg.MessagesGetHistoryRequest{
 				Peer:     target.InputPeer,
 				OffsetID: offsetID,
 				Limit:    batchLimit,
@@ -778,6 +729,25 @@ func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolve
 			})
 			return callErr
 		})
+		return result, err
+	})
+}
+
+func (s *Session) collectOutgoingDay(
+	ctx context.Context,
+	target resolvedTarget,
+	opts harvest.OutgoingDayOptions,
+	stopAtStart bool,
+	load outgoingDayBatchLoader,
+) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	topicByID := map[int]harvest.Topic{}
+	records := make([]harvest.MessageRecord, 0)
+	stats := harvest.HistoryStats{}
+	offsetID := 0
+	for shouldContinueOutgoingDay(opts, stats.Batches) {
+		stats.Batches++
+		batchLimit := opts.History.BatchSize
+		result, err := load(ctx, offsetID, batchLimit)
 		if err != nil {
 			stats.FloodWaits = s.FloodWaits()
 			return nil, stats, err
@@ -796,7 +766,7 @@ func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolve
 			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
 				minMessageID = id
 			}
-			if date := messageDate(msgClass); date > 0 && !time.Unix(int64(date), 0).UTC().After(opts.Start) {
+			if stopAtStart && messageAtOrBefore(msgClass, opts.Start) {
 				reachedStart = true
 			}
 			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts)
@@ -812,8 +782,18 @@ func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolve
 		offsetID = minMessageID
 	}
 	sortDailyRecords(records)
+	finalizeHistoryStats(&stats, records, s.FloodWaits())
+	return records, stats, nil
+}
+
+func messageAtOrBefore(msg tg.MessageClass, boundary time.Time) bool {
+	date := messageDate(msg)
+	return date > 0 && !time.Unix(int64(date), 0).UTC().After(boundary)
+}
+
+func finalizeHistoryStats(stats *harvest.HistoryStats, records []harvest.MessageRecord, floodWaits int) {
 	stats.Records = len(records)
-	stats.FloodWaits = s.FloodWaits()
+	stats.FloodWaits = floodWaits
 	for _, record := range records {
 		if stats.FirstID == 0 || record.MessageID < stats.FirstID {
 			stats.FirstID = record.MessageID
@@ -822,7 +802,6 @@ func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolve
 			stats.LastID = record.MessageID
 		}
 	}
-	return records, stats, nil
 }
 
 func (s *Session) normalizeOutgoingDayRecord(

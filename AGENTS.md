@@ -4,7 +4,7 @@
 - Local Go CLI for read-only Telegram harvesting through MTProto user authorization.
 - The tool exports selected study chat data and daily outgoing personal context for downstream automation and agent reads.
 - Keep runtime credentials, sessions, state, dumps, and generated agent views out of git.
-- Study runtime scope is the configured study-chat allowlist; daily runtime scope is outgoing/self messages for one day under the daily profile.
+- Study runtime scope is the configured study-chat allowlist; daily runtime scope is outgoing/self messages for one day under the main harvest account config.
 
 ## Safety
 - Read-only is a hard boundary: do not add commands that send messages, click buttons, delete messages, pin/unpin, join chats, mark chats read, or mutate Telegram state.
@@ -41,5 +41,5 @@
 - When generated `agent-view` templates or manifest semantics change, bump `agentViewManifestVersion` and keep rebuild/noop/incremental tests aligned.
 - Keep `docs/agent-navigation.md` aligned with generated `agent-view/AGENTS.md` and `agent-view/README.md` whenever changing the agent read path.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
-- Daily profile config uses `TG_DAILY_*` first, then `TG_HARVEST_*`; old study commands must keep `TG_STUDY_*` compatibility.
+- Daily mode's canonical namespace is `TG_HARVEST_*`; `TG_HARVEST_DAILY_*`/`TG_DAILY_*` are accepted aliases. Study mode uses `TG_HARVEST_STUDY_*` and keeps `TG_STUDY_*` compatibility.
 - Add tests for parsing/config/state behavior; live Telegram behavior is validated manually after login.

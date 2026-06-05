@@ -23,8 +23,7 @@ const (
 )
 
 type Config struct {
-	Profile      string
-	EnvPrefix    string
+	Mode         Mode
 	AppID        int
 	AppHash      string
 	Phone        string
@@ -38,105 +37,94 @@ type Config struct {
 	MaxBatches   int
 }
 
+type Mode string
+
+const (
+	ModeStudy Mode = "study"
+	ModeDaily Mode = "daily"
+)
+
 func Load() (Config, error) {
 	return LoadStudy()
 }
 
 func LoadStudy() (Config, error) {
-	return loadProfile(profileSpec{
-		Profile:            "study",
-		EnvPrefix:          "TG_STUDY",
-		AppIDEnv:           []string{"TG_STUDY_APP_ID", "TG_E2E_APP_ID"},
-		AppHashEnv:         []string{"TG_STUDY_APP_HASH", "TG_E2E_APP_HASH"},
-		PhoneEnv:           []string{"TG_STUDY_PHONE", "TG_E2E_PHONE"},
-		PasswordEnv:        []string{"TG_STUDY_PASSWORD", "TG_E2E_PASSWORD"},
-		SessionPathEnv:     []string{"TG_STUDY_SESSION_PATH"},
-		StateDirEnv:        []string{"TG_STUDY_STATE_DIR"},
-		AllowedChatsEnv:    []string{"TG_STUDY_ALLOWED_CHATS"},
-		RPCSpacingMSEnv:    []string{"TG_STUDY_RPC_SPACING_MS"},
-		HistoryBatchEnv:    []string{"TG_STUDY_HISTORY_BATCH_SIZE"},
-		HistoryLimitEnv:    []string{"TG_STUDY_HISTORY_LIMIT"},
-		MaxBatchesEnv:      []string{"TG_STUDY_MAX_BATCHES"},
-		DefaultSessionPath: DefaultSessionPath,
-		DefaultStateDir:    DefaultStateDir,
-	})
+	return loadMode(ModeStudy, DefaultSessionPath, DefaultStateDir)
 }
 
 func LoadDaily() (Config, error) {
-	return loadProfile(profileSpec{
-		Profile:            "daily",
-		EnvPrefix:          "TG_DAILY",
-		AppIDEnv:           []string{"TG_DAILY_APP_ID", "TG_HARVEST_APP_ID"},
-		AppHashEnv:         []string{"TG_DAILY_APP_HASH", "TG_HARVEST_APP_HASH"},
-		PhoneEnv:           []string{"TG_DAILY_PHONE", "TG_HARVEST_PHONE"},
-		PasswordEnv:        []string{"TG_DAILY_PASSWORD", "TG_HARVEST_PASSWORD"},
-		SessionPathEnv:     []string{"TG_DAILY_SESSION_PATH", "TG_HARVEST_SESSION_PATH"},
-		StateDirEnv:        []string{"TG_DAILY_STATE_DIR", "TG_HARVEST_STATE_DIR"},
-		AllowedChatsEnv:    []string{"TG_DAILY_ALLOWED_CHATS", "TG_HARVEST_ALLOWED_CHATS"},
-		RPCSpacingMSEnv:    []string{"TG_DAILY_RPC_SPACING_MS", "TG_HARVEST_RPC_SPACING_MS"},
-		HistoryBatchEnv:    []string{"TG_DAILY_HISTORY_BATCH_SIZE", "TG_HARVEST_HISTORY_BATCH_SIZE"},
-		HistoryLimitEnv:    []string{"TG_DAILY_HISTORY_LIMIT", "TG_HARVEST_HISTORY_LIMIT"},
-		MaxBatchesEnv:      []string{"TG_DAILY_MAX_BATCHES", "TG_HARVEST_MAX_BATCHES"},
-		DefaultSessionPath: DefaultDailySessionPath,
-		DefaultStateDir:    DefaultDailyStateDir,
-	})
+	return loadMode(ModeDaily, DefaultDailySessionPath, DefaultDailyStateDir)
 }
 
-type profileSpec struct {
-	Profile            string
-	EnvPrefix          string
-	AppIDEnv           []string
-	AppHashEnv         []string
-	PhoneEnv           []string
-	PasswordEnv        []string
-	SessionPathEnv     []string
-	StateDirEnv        []string
-	AllowedChatsEnv    []string
-	RPCSpacingMSEnv    []string
-	HistoryBatchEnv    []string
-	HistoryLimitEnv    []string
-	MaxBatchesEnv      []string
-	DefaultSessionPath string
-	DefaultStateDir    string
-}
-
-func loadProfile(spec profileSpec) (Config, error) {
-	appID, err := intFromEnvAny(spec.AppIDEnv, 0)
+func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Config, error) {
+	appID, err := intFromEnvAny(envKeys(mode, "APP_ID"), 0)
 	if err != nil {
 		return Config{}, err
 	}
-	rpcSpacingMS, err := intFromEnvAny(spec.RPCSpacingMSEnv, DefaultRPCSpacingMS)
+	rpcSpacingMS, err := intFromEnvAny(envKeys(mode, "RPC_SPACING_MS"), DefaultRPCSpacingMS)
 	if err != nil {
 		return Config{}, err
 	}
-	batchSize, err := intFromEnvAny(spec.HistoryBatchEnv, DefaultBatchSize)
+	batchSize, err := intFromEnvAny(envKeys(mode, "HISTORY_BATCH_SIZE"), DefaultBatchSize)
 	if err != nil {
 		return Config{}, err
 	}
-	historyLimit, err := intFromEnvAny(spec.HistoryLimitEnv, DefaultHistoryLimit)
+	historyLimit, err := intFromEnvAny(envKeys(mode, "HISTORY_LIMIT"), DefaultHistoryLimit)
 	if err != nil {
 		return Config{}, err
 	}
-	maxBatches, err := intFromEnvAny(spec.MaxBatchesEnv, DefaultMaxBatches)
+	maxBatches, err := intFromEnvAny(envKeys(mode, "MAX_BATCHES"), DefaultMaxBatches)
 	if err != nil {
 		return Config{}, err
 	}
 
 	return Config{
-		Profile:      spec.Profile,
-		EnvPrefix:    spec.EnvPrefix,
+		Mode:         mode,
 		AppID:        appID,
-		AppHash:      firstEnv(spec.AppHashEnv...),
-		Phone:        firstEnv(spec.PhoneEnv...),
-		Password:     firstEnv(spec.PasswordEnv...),
-		SessionPath:  defaultString(firstEnv(spec.SessionPathEnv...), spec.DefaultSessionPath),
-		StateDir:     defaultString(firstEnv(spec.StateDirEnv...), spec.DefaultStateDir),
-		AllowedChats: splitList(firstEnv(spec.AllowedChatsEnv...)),
+		AppHash:      firstEnv(envKeys(mode, "APP_HASH")...),
+		Phone:        firstEnv(envKeys(mode, "PHONE")...),
+		Password:     firstEnv(envKeys(mode, "PASSWORD")...),
+		SessionPath:  defaultString(firstEnv(envKeys(mode, "SESSION_PATH")...), defaultSessionPath),
+		StateDir:     defaultString(firstEnv(envKeys(mode, "STATE_DIR")...), defaultStateDir),
+		AllowedChats: splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...)),
 		RPCSpacing:   time.Duration(rpcSpacingMS) * time.Millisecond,
 		BatchSize:    batchSize,
 		HistoryLimit: historyLimit,
 		MaxBatches:   maxBatches,
 	}, nil
+}
+
+func envKeys(mode Mode, suffix string) []string {
+	switch mode {
+	case ModeDaily:
+		return []string{
+			"TG_HARVEST_DAILY_" + suffix,
+			"TG_DAILY_" + suffix,
+			"TG_HARVEST_" + suffix,
+		}
+	default:
+		keys := []string{
+			"TG_HARVEST_STUDY_" + suffix,
+			"TG_STUDY_" + suffix,
+		}
+		if suffix == "APP_ID" || suffix == "APP_HASH" || suffix == "PHONE" || suffix == "PASSWORD" {
+			keys = append(keys, "TG_E2E_"+suffix)
+		}
+		return keys
+	}
+}
+
+func displayEnvKeys(mode Mode, suffix string) []string {
+	switch mode {
+	case ModeDaily:
+		return []string{
+			"TG_HARVEST_" + suffix,
+			"TG_HARVEST_DAILY_" + suffix,
+			"TG_DAILY_" + suffix,
+		}
+	default:
+		return envKeys(mode, suffix)
+	}
 }
 
 func (c Config) WithTelegramDesktopDefaults() Config {
@@ -147,14 +135,6 @@ func (c Config) WithTelegramDesktopDefaults() Config {
 		c.AppHash = telegram.TestAppHash
 	}
 	return c
-}
-
-func DefaultAppIDEnv() []string {
-	return []string{"TG_STUDY_APP_ID", "TG_E2E_APP_ID"}
-}
-
-func DefaultAppHashEnv() []string {
-	return []string{"TG_STUDY_APP_HASH", "TG_E2E_APP_HASH"}
 }
 
 func (c Config) ValidateLogin() error {
@@ -225,15 +205,16 @@ func (c Config) WithRoot(root string) Config {
 }
 
 func (c Config) EnvName(suffix string) string {
-	prefix := strings.TrimSpace(c.EnvPrefix)
-	if prefix == "" {
-		prefix = "TG_STUDY"
-	}
-	return prefix + "_" + suffix
+	keys := displayEnvKeys(c.Mode, suffix)
+	return keys[0]
+}
+
+func (c Config) EnvNames(suffix string) string {
+	return strings.Join(displayEnvKeys(c.Mode, suffix), " or ")
 }
 
 func (c Config) LoginCommand() string {
-	if c.Profile == "daily" {
+	if c.Mode == ModeDaily {
 		return "telegram-study-harvest daily-login"
 	}
 	return "telegram-study-harvest login"

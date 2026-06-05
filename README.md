@@ -25,15 +25,15 @@
 `telegram-study-harvest` is the legacy CLI path for a broader Telegram Harvest tool. It reads
 Telegram through MTProto user authorization and writes local data for downstream agents.
 
-Study commands stay scoped by an explicit allowlist. Daily commands use a separate account profile
-and export only messages sent by the authorized user. The tool does not send messages, click
+Study commands stay scoped by an explicit allowlist. Daily commands use the main harvest account
+configuration and export only messages sent by the authorized user. The tool does not send messages, click
 buttons, delete content, join chats, pin/unpin messages, or mark chats read.
 
 | Capability | What it gives |
 | --- | --- |
-| Study profile | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows keep using `TG_STUDY_*`. |
-| Daily profile | `daily` scans dialogs sequentially with `TG_DAILY_*` or `TG_HARVEST_*` and exports only outgoing/self messages for one day. |
-| Allowlisted reads | Study commands refuse chats outside `TG_STUDY_ALLOWED_CHATS` when the allowlist is set. |
+| Study mode | Existing `dump`, `sync`, `topics`, `agent-view`, and `compact` flows use `TG_HARVEST_STUDY_*` or legacy `TG_STUDY_*`. |
+| Daily mode | `daily` scans dialogs sequentially with `TG_HARVEST_*` and exports only outgoing/self messages for one day. |
+| Allowlisted reads | Study commands refuse chats outside the study allowlist when it is set. |
 | Resumable sync | Full backfills can resume from `backfill.next_offset_id` after interruption. |
 | JSONL source layer | Every message record keeps chat, message id, date, sender, text, links, attachments, and optional local attachment paths. |
 | Daily media | Daily harvest can download photos, image documents, voice/audio, and round video files for later review or transcription. |
@@ -47,12 +47,14 @@ buttons, delete content, join chats, pin/unpin messages, or mark chats read.
 cd telegram-study-harvest
 cp .env.example .env
 make setup
-make doctor
-make login
+make daily-doctor
+make daily-login
 ```
 
-For fresh login, create Telegram app credentials at <https://my.telegram.org>. If Telegram Desktop
-is already logged in locally, you can import its `tdata` session instead:
+For fresh daily login, create Telegram app credentials at <https://my.telegram.org>. For study mode,
+configure `TG_HARVEST_STUDY_*` or legacy `TG_STUDY_*`, then run `make doctor` and `make login`.
+If Telegram Desktop is already logged in locally, you can import its `tdata` session for study mode
+instead:
 
 ```bash
 go run ./cmd/telegram-study-harvest import-tdesktop --account-index 1
@@ -62,8 +64,8 @@ go run ./cmd/telegram-study-harvest me
 The CLI auto-loads `.env` from the current directory and the project root. Keep the allowlist narrow:
 
 ```dotenv
-TG_STUDY_STATE_DIR=.state
-TG_STUDY_ALLOWED_CHATS=1234567890,@study_chat
+TG_HARVEST_STUDY_STATE_DIR=.state
+TG_HARVEST_STUDY_ALLOWED_CHATS=1234567890,@study_chat
 ```
 
 Useful commands:
@@ -78,15 +80,15 @@ make topics CHAT=1234567890
 
 ## Daily Harvest
 
-Daily harvest is intended for a separate main-account session. It does not use the Telegram Desktop
-test-app fallback; configure app credentials from <https://my.telegram.org>:
+Daily harvest is intended for the main-account session. It does not use the Telegram Desktop
+test-app fallback; configure app credentials from <https://my.telegram.org> with `TG_HARVEST_*`:
 
 ```dotenv
-TG_DAILY_APP_ID=12345678
-TG_DAILY_APP_HASH=your_main_account_app_hash
-TG_DAILY_PHONE=+10000000000
-TG_DAILY_SESSION_PATH=.sessions/daily.json
-TG_DAILY_STATE_DIR=.state/daily
+TG_HARVEST_APP_ID=12345678
+TG_HARVEST_APP_HASH=your_main_account_app_hash
+TG_HARVEST_PHONE=+10000000000
+TG_HARVEST_SESSION_PATH=.sessions/daily.json
+TG_HARVEST_STATE_DIR=.state/daily
 ```
 
 Login and verify:
@@ -97,7 +99,7 @@ go run ./cmd/telegram-study-harvest daily-doctor
 go run ./cmd/telegram-study-harvest daily-me
 ```
 
-Export a day. Relative output paths live under `TG_DAILY_STATE_DIR`:
+Export a day. Relative output paths live under `TG_HARVEST_STATE_DIR`:
 
 ```bash
 go run ./cmd/telegram-study-harvest daily --date yesterday
@@ -116,7 +118,7 @@ message text or media kind, local media paths, and transcripts when available. T
 transcription, provide a local command template; placeholders are shell-quoted by the CLI:
 
 ```dotenv
-TG_DAILY_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
+TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
 ```
 
 The command may either write `{output}` or print transcript text to stdout. Use
@@ -185,7 +187,7 @@ For the full read protocol, see [docs/agent-navigation.md](docs/agent-navigation
 
 - `.env`, `.sessions/`, `.state/`, generated chat dumps, and local binaries are ignored by git.
 - `sync` and `dump` can download supported photo/document attachments with `--download-media --media-dir <dir>`. Downloaded files stay in private local state and are referenced from JSONL/agent views through `local_path`.
-- Runtime reads are constrained by `TG_STUDY_ALLOWED_CHATS` when set.
+- Study reads are constrained by `TG_HARVEST_STUDY_ALLOWED_CHATS` or legacy `TG_STUDY_ALLOWED_CHATS` when set.
 - Daily full-account scans are limited to outgoing/self messages and should use `.state/daily` or another private state directory.
 - Full-account broad dumps of other people's messages do not belong in this repository.
 - Live Telegram access is validated manually; automated tests use local fixtures.
@@ -203,7 +205,7 @@ make fmt
 | --- | --- |
 | `cmd/telegram-study-harvest` | CLI entrypoint and command wiring. |
 | `docs/agent-navigation.md` | Rules for fast, low-context Telegram reads by agents. |
-| `internal/config` | Env loading, study and daily profile defaults, and study-chat allowlist. |
+| `internal/config` | Env loading, study and daily mode defaults, and study-chat allowlist. |
 | `internal/mtproto` | Telegram transport, Telegram Desktop import, history, topic, and daily outgoing reads. |
 | `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |
 | `internal/runlock` | Per-session runtime lock. |
