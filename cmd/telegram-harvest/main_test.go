@@ -25,9 +25,6 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 			t.Fatalf("help missing %q:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, "daily-login") {
-		t.Fatalf("help should not advertise legacy daily-login:\n%s", stdout)
-	}
 }
 
 func TestDefaultProfileRouting(t *testing.T) {
@@ -42,10 +39,6 @@ func TestDefaultProfileRouting(t *testing.T) {
 	}
 	if got := defaultProfileForCommand("login"); got != "main" {
 		t.Fatalf("login default profile = %s", got)
-	}
-	command, profile, includeRuntime := normalizeCommandAlias("daily-login")
-	if command != "login" || profile != "main" || includeRuntime {
-		t.Fatalf("daily-login alias = command:%s profile:%s runtime:%t", command, profile, includeRuntime)
 	}
 }
 
@@ -78,8 +71,8 @@ func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
 		"TG_HARVEST_APP_ID":          "77",
-		"TG_HARVEST_APP_HASH":        "daily-hash",
-		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "daily-state"),
+		"TG_HARVEST_APP_HASH":        "main-hash",
+		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "main-state"),
 		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
 		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
 		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
@@ -92,39 +85,11 @@ func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 	for _, want := range []string{
 		"profile=main",
 		"app_id_set=true",
-		"state_dir=" + filepath.Join(dir, "daily-state"),
+		"state_dir=" + filepath.Join(dir, "main-state"),
 		"session=" + filepath.Join(dir, "main-session.json"),
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("main print-config missing %q:\n%s", want, stdout)
-		}
-	}
-}
-
-func TestLegacyDailyConfigAliasUsesMainProfileAndRuntime(t *testing.T) {
-	dir := t.TempDir()
-	env := map[string]string{
-		"TG_HARVEST_APP_ID":          "77",
-		"TG_HARVEST_APP_HASH":        "daily-hash",
-		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "daily-state"),
-		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
-		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
-		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
-		"TG_HARVEST_RETENTION_DAYS":  "10",
-	}
-	code, stdout, stderr := runCommand(t, []string{"daily-config"}, env)
-	if code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	for _, want := range []string{
-		"profile=main",
-		"daily_transcribe_default=true",
-		"daily_vosk_command=/tmp/vosk-transcribe",
-		"daily_vosk_model_path=" + filepath.Join(dir, "vosk-model-small-ru-0.22"),
-		"daily_retention_days=10",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Fatalf("daily-config missing %q:\n%s", want, stdout)
 		}
 	}
 }

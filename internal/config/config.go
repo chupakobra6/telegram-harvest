@@ -12,14 +12,14 @@ import (
 )
 
 const (
-	DefaultSessionPath      = ".sessions/study.json"
-	DefaultStateDir         = ".state"
-	DefaultDailySessionPath = ".sessions/main.json"
-	DefaultDailyStateDir    = ".state/daily"
-	DefaultRPCSpacingMS     = 1500
-	DefaultBatchSize        = 80
-	DefaultHistoryLimit     = 500
-	DefaultMaxBatches       = 20
+	DefaultSessionPath     = ".sessions/study.json"
+	DefaultStateDir        = ".state"
+	DefaultMainSessionPath = ".sessions/main.json"
+	DefaultMainStateDir    = ".state/daily"
+	DefaultRPCSpacingMS    = 1500
+	DefaultBatchSize       = 80
+	DefaultHistoryLimit    = 500
+	DefaultMaxBatches      = 20
 )
 
 type Config struct {
@@ -41,7 +41,7 @@ type Mode string
 
 const (
 	ModeStudy Mode = "study"
-	ModeDaily Mode = "daily"
+	ModeMain  Mode = "main"
 )
 
 func Load() (Config, error) {
@@ -52,8 +52,8 @@ func LoadStudy() (Config, error) {
 	return loadMode(ModeStudy, DefaultSessionPath, DefaultStateDir)
 }
 
-func LoadDaily() (Config, error) {
-	return loadMode(ModeDaily, DefaultDailySessionPath, DefaultDailyStateDir)
+func LoadMain() (Config, error) {
+	return loadMode(ModeMain, DefaultMainSessionPath, DefaultMainStateDir)
 }
 
 func LoadProfile(profile string) (Config, error) {
@@ -62,8 +62,8 @@ func LoadProfile(profile string) (Config, error) {
 		return Config{}, err
 	}
 	switch mode {
-	case ModeDaily:
-		return LoadDaily()
+	case ModeMain:
+		return LoadMain()
 	default:
 		return LoadStudy()
 	}
@@ -73,8 +73,8 @@ func ProfileMode(profile string) (Mode, error) {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "", "study":
 		return ModeStudy, nil
-	case "main", "daily":
-		return ModeDaily, nil
+	case "main":
+		return ModeMain, nil
 	default:
 		return "", fmt.Errorf("unknown profile %q; use main or study", profile)
 	}
@@ -82,7 +82,7 @@ func ProfileMode(profile string) (Mode, error) {
 
 func ProfileName(mode Mode) string {
 	switch mode {
-	case ModeDaily:
+	case ModeMain:
 		return "main"
 	default:
 		return "study"
@@ -129,7 +129,7 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 
 func envKeys(mode Mode, suffix string) []string {
 	switch mode {
-	case ModeDaily:
+	case ModeMain:
 		return []string{
 			"TG_HARVEST_" + suffix,
 		}
@@ -142,7 +142,7 @@ func envKeys(mode Mode, suffix string) []string {
 
 func displayEnvKeys(mode Mode, suffix string) []string {
 	switch mode {
-	case ModeDaily:
+	case ModeMain:
 		return []string{
 			"TG_HARVEST_" + suffix,
 		}
@@ -238,7 +238,7 @@ func (c Config) EnvNames(suffix string) string {
 }
 
 func (c Config) LoginCommand() string {
-	if c.Mode == ModeDaily {
+	if c.Mode == ModeMain {
 		return "telegram-harvest login"
 	}
 	return "telegram-harvest --profile " + ProfileName(c.Mode) + " login"

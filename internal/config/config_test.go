@@ -32,29 +32,29 @@ func TestLoadUsesStudyEnv(t *testing.T) {
 	}
 }
 
-func TestLoadDailyUsesHarvestEnvAndDefaults(t *testing.T) {
+func TestLoadMainUsesHarvestEnvAndDefaults(t *testing.T) {
 	clearTelegramConfigEnv(t)
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
 	t.Setenv("TG_HARVEST_APP_ID", "77")
-	t.Setenv("TG_HARVEST_APP_HASH", "daily-hash")
+	t.Setenv("TG_HARVEST_APP_HASH", "main-hash")
 	t.Setenv("TG_HARVEST_PHONE", "+200")
 
-	cfg, err := LoadDaily()
+	cfg, err := LoadMain()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode != ModeDaily {
+	if cfg.Mode != ModeMain {
 		t.Fatalf("mode = %q", cfg.Mode)
 	}
-	if cfg.AppID != 77 || cfg.AppHash != "daily-hash" || cfg.Phone != "+200" {
-		t.Fatalf("daily env not loaded: %+v", cfg)
+	if cfg.AppID != 77 || cfg.AppHash != "main-hash" || cfg.Phone != "+200" {
+		t.Fatalf("main env not loaded: %+v", cfg)
 	}
-	if cfg.SessionPath != DefaultDailySessionPath {
-		t.Fatalf("daily session path = %s", cfg.SessionPath)
+	if cfg.SessionPath != DefaultMainSessionPath {
+		t.Fatalf("main session path = %s", cfg.SessionPath)
 	}
-	if cfg.StateDir != DefaultDailyStateDir {
-		t.Fatalf("daily state dir = %s", cfg.StateDir)
+	if cfg.StateDir != DefaultMainStateDir {
+		t.Fatalf("main state dir = %s", cfg.StateDir)
 	}
 }
 
@@ -76,15 +76,11 @@ func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if main.Mode != ModeDaily || main.AppID != 77 || main.AppHash != "main-hash" {
+	if main.Mode != ModeMain || main.AppID != 77 || main.AppHash != "main-hash" {
 		t.Fatalf("main profile = %+v", main)
 	}
-	legacy, err := LoadProfile("daily")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if legacy.Mode != ModeDaily {
-		t.Fatalf("legacy daily profile mode = %q", legacy.Mode)
+	if _, err := LoadProfile("daily"); err == nil {
+		t.Fatalf("expected daily profile to be rejected")
 	}
 	if _, err := LoadProfile("unknown"); err == nil {
 		t.Fatalf("expected unknown profile error")

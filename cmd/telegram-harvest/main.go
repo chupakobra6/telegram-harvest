@@ -45,11 +45,8 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		printUsage(stdout)
 		return 0
 	}
-	command, aliasProfile, includeDailyRuntime := normalizeCommandAlias(args[0])
-	args[0] = command
-	if profile == "" {
-		profile = aliasProfile
-	}
+	command := args[0]
+	includeDailyRuntime := command == "daily"
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
 		return printError(stderr, 1, err)
@@ -178,27 +175,12 @@ func extractProfileArg(args []string) (string, []string, error) {
 	return profile, result, nil
 }
 
-func normalizeCommandAlias(command string) (string, string, bool) {
-	switch command {
-	case "daily-config":
-		return "print-config", "main", true
-	case "daily-doctor":
-		return "doctor", "main", true
-	case "daily-login":
-		return "login", "main", false
-	case "daily-me":
-		return "me", "main", false
-	default:
-		return command, "", command == "daily"
-	}
-}
-
 func loadProfileConfig(profile string) (config.Config, error) {
 	return config.LoadProfile(profile)
 }
 
 func isDailyCommand(command string) bool {
-	return command == "daily" || strings.HasPrefix(command, "daily-")
+	return command == "daily" || command == "daily-download-media"
 }
 
 func defaultProfileForCommand(command string) string {
@@ -905,7 +887,7 @@ func runDownloadMedia(cfg config.Config, client *mtproto.Client, args []string, 
 	if strings.TrimSpace(*chat) == "" {
 		return fmt.Errorf("--chat is required")
 	}
-	if cfg.Mode != config.ModeDaily {
+	if cfg.Mode != config.ModeMain {
 		if err := ensureAllowedChat(cfg, *chat); err != nil {
 			return err
 		}

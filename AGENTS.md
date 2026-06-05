@@ -4,7 +4,7 @@
 - Local Go CLI for read-only Telegram harvesting through MTProto user authorization.
 - The tool exports selected study chat data and daily outgoing personal context for downstream automation and agent reads.
 - Keep runtime credentials, sessions, state, dumps, and generated agent views out of git.
-- Study runtime scope is the configured study-chat allowlist; daily runtime scope is outgoing/self messages for one day under the main harvest account config.
+- Study runtime scope is the configured study-chat allowlist; main-profile daily harvest scope is outgoing/self messages for one day under the main account config.
 
 ## Safety
 - Read-only is a hard boundary: do not add commands that send messages, click buttons, delete messages, pin/unpin, join chats, mark chats read, or mutate Telegram state.
@@ -19,8 +19,6 @@
 - Tests: `go test ./...`
 - Doctor: `go run ./cmd/telegram-harvest doctor`
 - Login: `go run ./cmd/telegram-harvest login`
-- Daily doctor: `go run ./cmd/telegram-harvest daily-doctor`
-- Daily login: `go run ./cmd/telegram-harvest daily-login`
 - Daily outgoing harvest: `go run ./cmd/telegram-harvest daily --date yesterday`
 - Import Telegram Desktop session: `go run ./cmd/telegram-harvest import-tdesktop --account-index <n>`, then verify with `go run ./cmd/telegram-harvest me`
 - List chats: `go run ./cmd/telegram-harvest chats --query вшэ`
@@ -41,9 +39,10 @@
 - When generated `agent-view` templates or manifest semantics change, bump `agentViewManifestVersion` and keep rebuild/noop/incremental tests aligned.
 - Keep generated `agent-view/AGENTS.md` and `agent-view/README.md` aligned whenever changing the agent read path; they are the agent-facing navigation source of truth.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
-- Daily mode uses `TG_HARVEST_*`. Study mode uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
-- Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-mode feature only.
+- Main profile uses `TG_HARVEST_*`. Study profile uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
+- Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
 - Default media caps are deliberate: photo/image and generic documents 10 MiB, audio/voice 50 MiB, video/round-video 200 MiB. If a cap is exceeded, keep the skip reason and manual `download-media` hint in output.
 - When changing CLI commands or flags, update CLI help, Makefile shortcuts, README/.env examples when relevant, and command tests in the same pass.
+- Do not add backwards-compatibility command aliases, profile aliases, env aliases, shims, or fallback code paths unless the user explicitly requests them. If compatibility seems useful, raise it as a question first; otherwise remove the old path when replacing it.
 - Add tests for parsing/config/state behavior; live Telegram behavior is validated manually after login.
