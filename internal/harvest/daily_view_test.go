@@ -24,6 +24,9 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 					Kind:             "voice",
 					MediaID:          "document:123",
 					FileName:         "voice.ogg",
+					MIMEType:         "audio/ogg",
+					Size:             12000,
+					LocalPath:        filepath.Join(dir, "voice.ogg"),
 					TranscriptPath:   filepath.Join(dir, "voice.txt"),
 					TranscriptCached: true,
 					Transcript:       "Поговорил про итоги дня",
@@ -62,18 +65,32 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		"- Вложений: 1",
 		"- Транскриптов: 1",
 		"## Хронология",
-		"09:00 в Notes: Запланировал задачу<br><br>Проверил формат `#10`",
-		"10:00 в Work: [voice] [`#20`](https://t.me/c/2/20)",
-		"файл: voice; media_id=document:123; voice.ogg",
-		"transcript_cached=true",
-		"транскрипт: Поговорил про итоги дня",
+		"- **09:00** в **Notes** #10",
+		"  > Запланировал задачу\n  >\n  > Проверил формат",
+		"- **10:00** в **Work** [#20](https://t.me/c/2/20)",
+		"  **Вложение:** голосовое",
+		"  **Транскрипт:**\n  > Поговорил про итоги дня",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("markdown missing %q:\n%s", want, content)
 		}
 	}
-	if strings.Contains(content, "JSONL:") || strings.Contains(content, "Ошибок: 0") || strings.Contains(content, "Flood waits: 0") {
-		t.Fatalf("markdown includes zero summary fields:\n%s", content)
+	for _, unwanted := range []string{
+		"<br>",
+		"JSONL:",
+		"Ошибок: 0",
+		"Flood waits: 0",
+		"media_id=",
+		"voice.ogg",
+		"audio/ogg",
+		"12000 bytes",
+		"local_path=",
+		"transcript_path=",
+		"transcript_cached=true",
+	} {
+		if strings.Contains(content, unwanted) {
+			t.Fatalf("markdown includes %q:\n%s", unwanted, content)
+		}
 	}
 }
 

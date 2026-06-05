@@ -3,7 +3,6 @@ package harvest
 import (
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -81,14 +80,8 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 			b.WriteString(fmt.Sprintf("### %s\n\n", hour))
 			lastHour = hour
 		}
-		b.WriteString(dailyMessageLine(record))
+		writeDailyMessage(&b, record)
 		b.WriteString("\n")
-		for _, attachment := range record.Attachments {
-			b.WriteString("  - " + dailyAttachmentLine(attachment) + "\n")
-			if transcript := compactTranscript(attachment.Transcript); transcript != "" {
-				b.WriteString("  - транскрипт: " + transcript + "\n")
-			}
-		}
 	}
 	return b.String()
 }
@@ -103,55 +96,88 @@ func writeDailySummaryCount(b *strings.Builder, label string, count int) {
 	}
 }
 
-func dailyMessageLine(record MessageRecord) string {
+func writeDailyMessage(b *strings.Builder, record MessageRecord) {
+	b.WriteString(dailyMessageHeader(record))
+	b.WriteString("\n")
+	if text := dailyMarkdownText(record.Text); text != "" {
+		b.WriteString("\n")
+		writeDailyQuote(b, text, "  ")
+	} else if len(record.Attachments) == 0 && strings.TrimSpace(record.Kind) != "" && record.Kind != "text" {
+		b.WriteString("\n")
+		b.WriteString("  _" + dailyAttachmentKindLabel(record.Kind) + "_\n")
+	}
+	for _, attachment := range record.Attachments {
+		b.WriteString("\n")
+		b.WriteString("  **Вложение:** " + dailyAttachmentSummary(attachment) + "\n")
+		for _, issue := range dailyAttachmentIssues(attachment) {
+			b.WriteString("  **Проблема:** " + issue + "\n")
+		}
+		if transcript := compactTranscript(attachment.Transcript); transcript != "" {
+			b.WriteString("\n")
+			b.WriteString("  **Транскрипт:**\n")
+			writeDailyQuote(b, transcript, "  ")
+		}
+	}
+}
+
+func dailyMessageHeader(record MessageRecord) string {
 	timeLabel := record.Date.In(moscowLocation).Format("15:04")
 	destination := displayChat(record.Chat)
 	if topic := displayTopic(record); topic != "" {
 		destination += " / " + topic
 	}
-	text := dailyMarkdownText(record.Text)
-	if text == "" {
-		text = "[" + record.Kind + "]"
-	}
+	ref := fmt.Sprintf("#%d", record.MessageID)
 	if strings.TrimSpace(record.SourceURL) != "" {
-		return fmt.Sprintf("- %s в %s: %s [`#%d`](%s)", timeLabel, destination, text, record.MessageID, record.SourceURL)
+		ref = fmt.Sprintf("[#%d](%s)", record.MessageID, record.SourceURL)
 	}
-	return fmt.Sprintf("- %s в %s: %s `#%d`", timeLabel, destination, text, record.MessageID)
+	return fmt.Sprintf("- **%s** в **%s** %s", timeLabel, destination, ref)
 }
 
-func dailyAttachmentLine(attachment Attachment) string {
-	parts := []string{"файл: " + attachment.Kind}
-	if attachment.MediaID != "" {
-		parts = append(parts, "media_id="+attachment.MediaID)
+func dailyAttachmentSummary(attachment Attachment) string {
+	label := dailyAttachmentKindLabel(attachment.Kind)
+	url := strings.TrimSpace(attachment.URL)
+	if url == "" {
+		return label
 	}
-	if attachment.FileName != "" {
-		parts = append(parts, attachment.FileName)
+	title := strings.TrimSpace(attachment.Title)
+	if title == "" {
+		title = url
 	}
-	if attachment.MIMEType != "" {
-		parts = append(parts, attachment.MIMEType)
+	return label + ": " + markdownLink(title, url)
+}
+
+func dailyAttachmentKindLabel(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "photo", "image":
+		return "изображение"
+	case "voice":
+		return "голосовое"
+	case "audio":
+		return "аудио"
+	case "round_video":
+		return "кружок"
+	case "video":
+		return "видео"
+	case "document":
+		return "документ"
+	case "webpage":
+		return "ссылка"
+	case "":
+		return "вложение"
+	default:
+		return kind
 	}
-	if attachment.Size > 0 {
-		parts = append(parts, strconv.FormatInt(attachment.Size, 10)+" bytes")
+}
+
+func dailyAttachmentIssues(attachment Attachment) []string {
+	var issues []string
+	if issue := dailyMarkdownInlineText(attachment.DownloadError); issue != "" {
+		issues = append(issues, "не скачано: "+issue)
 	}
-	if attachment.LocalPath != "" {
-		parts = append(parts, "local_path="+attachment.LocalPath)
+	if issue := dailyMarkdownInlineText(attachment.TranscriptError); issue != "" {
+		issues = append(issues, "транскрипция не получилась: "+issue)
 	}
-	if attachment.TranscriptPath != "" {
-		parts = append(parts, "transcript_path="+attachment.TranscriptPath)
-	}
-	if attachment.TranscriptCached {
-		parts = append(parts, "transcript_cached=true")
-	}
-	if attachment.DownloadError != "" {
-		parts = append(parts, "download_error="+attachment.DownloadError)
-	}
-	if attachment.DownloadHint != "" {
-		parts = append(parts, "download_hint="+attachment.DownloadHint)
-	}
-	if attachment.TranscriptError != "" {
-		parts = append(parts, "transcript_error="+attachment.TranscriptError)
-	}
-	return strings.Join(parts, "; ")
+	return issues
 }
 
 func dailyChatCount(records []MessageRecord) int {
@@ -171,11 +197,36 @@ func compactTranscript(value string) string {
 		return value
 	}
 	runes := []rune(value)
-	return string(runes[:dailyTranscriptPreviewRunes]) + " ... [truncated, see transcript_path]"
+	return string(runes[:dailyTranscriptPreviewRunes]) + " ... [обрезано]"
 }
 
 func dailyMarkdownText(value string) string {
-	return strings.ReplaceAll(compactText(value), "\\n", "<br>")
+	value = strings.ReplaceAll(value, "<br />", "\n")
+	value = strings.ReplaceAll(value, "<br/>", "\n")
+	value = strings.ReplaceAll(value, "<br>", "\n")
+	return strings.ReplaceAll(compactText(value), "\\n", "\n")
+}
+
+func dailyMarkdownInlineText(value string) string {
+	return strings.Join(strings.Fields(dailyMarkdownText(value)), " ")
+}
+
+func writeDailyQuote(b *strings.Builder, value string, prefix string) {
+	lines := strings.Split(value, "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			b.WriteString(prefix + ">\n")
+			continue
+		}
+		b.WriteString(prefix + "> " + line + "\n")
+	}
+}
+
+func markdownLink(label string, url string) string {
+	label = strings.ReplaceAll(label, "\\", "\\\\")
+	label = strings.ReplaceAll(label, "]", "\\]")
+	label = strings.ReplaceAll(label, "\n", " ")
+	return "[" + label + "](" + url + ")"
 }
 
 func DailyDefaultOutputPaths(stateDir string, date string) (string, string) {
