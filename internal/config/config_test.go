@@ -47,6 +47,48 @@ func TestLoadFallsBackToE2EEnv(t *testing.T) {
 	}
 }
 
+func TestLoadDailyUsesSeparateEnvAndDefaults(t *testing.T) {
+	t.Setenv("TG_STUDY_APP_ID", "42")
+	t.Setenv("TG_STUDY_APP_HASH", "study-hash")
+	t.Setenv("TG_DAILY_APP_ID", "77")
+	t.Setenv("TG_DAILY_APP_HASH", "daily-hash")
+	t.Setenv("TG_DAILY_PHONE", "+200")
+
+	cfg, err := LoadDaily()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profile != "daily" || cfg.EnvPrefix != "TG_DAILY" {
+		t.Fatalf("unexpected profile: %+v", cfg)
+	}
+	if cfg.AppID != 77 || cfg.AppHash != "daily-hash" || cfg.Phone != "+200" {
+		t.Fatalf("daily env not loaded: %+v", cfg)
+	}
+	if cfg.SessionPath != DefaultDailySessionPath {
+		t.Fatalf("daily session path = %s", cfg.SessionPath)
+	}
+	if cfg.StateDir != DefaultDailyStateDir {
+		t.Fatalf("daily state dir = %s", cfg.StateDir)
+	}
+}
+
+func TestLoadDailyFallsBackToHarvestEnv(t *testing.T) {
+	t.Setenv("TG_HARVEST_APP_ID", "88")
+	t.Setenv("TG_HARVEST_APP_HASH", "harvest-hash")
+	t.Setenv("TG_HARVEST_SESSION_PATH", ".sessions/main.json")
+
+	cfg, err := LoadDaily()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppID != 88 || cfg.AppHash != "harvest-hash" {
+		t.Fatalf("harvest fallback not loaded: %+v", cfg)
+	}
+	if cfg.SessionPath != ".sessions/main.json" {
+		t.Fatalf("session path = %s", cfg.SessionPath)
+	}
+}
+
 func TestLoadDotEnvDoesNotOverrideExistingEnv(t *testing.T) {
 	t.Setenv("KEY", "existing")
 	dir := t.TempDir()

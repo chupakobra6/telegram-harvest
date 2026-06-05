@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunHelpPrintsCommands(t *testing.T) {
@@ -37,6 +38,30 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("print-config missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestRunDailyConfigUsesDailyProfile(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"TG_DAILY_APP_ID":       "77",
+		"TG_DAILY_APP_HASH":     "daily-hash",
+		"TG_DAILY_STATE_DIR":    filepath.Join(dir, "daily-state"),
+		"TG_DAILY_SESSION_PATH": filepath.Join(dir, "daily-session.json"),
+	}
+	code, stdout, stderr := runCommand(t, []string{"daily-config"}, env)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{
+		"profile=daily",
+		"app_id_set=true",
+		"state_dir=" + filepath.Join(dir, "daily-state"),
+		"session=" + filepath.Join(dir, "daily-session.json"),
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("daily-config missing %q:\n%s", want, stdout)
 		}
 	}
 }
@@ -137,6 +162,23 @@ func TestParseCompactSinceUsesMoscowForDateOnly(t *testing.T) {
 	}
 }
 
+func TestParseDailyDateSupportsRelativeDays(t *testing.T) {
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	date, start, end, err := parseDailyDate("yesterday", now)
+	if err != nil {
+		t.Fatalf("parse daily date: %v", err)
+	}
+	if date != "2026-06-04" {
+		t.Fatalf("date=%s", date)
+	}
+	if start.Format("2006-01-02T15:04:05-07:00") != "2026-06-04T00:00:00+03:00" {
+		t.Fatalf("start=%s", start.Format("2006-01-02T15:04:05-07:00"))
+	}
+	if end.Sub(start) != 24*time.Hour {
+		t.Fatalf("end-start=%s", end.Sub(start))
+	}
+}
+
 func runCommand(t *testing.T, args []string, env map[string]string) (int, string, string) {
 	t.Helper()
 	baseDir := t.TempDir()
@@ -146,6 +188,12 @@ func runCommand(t *testing.T, args []string, env map[string]string) (int, string
 	t.Setenv("TG_STUDY_PASSWORD", "")
 	t.Setenv("TG_E2E_APP_ID", "")
 	t.Setenv("TG_E2E_APP_HASH", "")
+	t.Setenv("TG_DAILY_APP_ID", "")
+	t.Setenv("TG_DAILY_APP_HASH", "")
+	t.Setenv("TG_DAILY_PHONE", "")
+	t.Setenv("TG_DAILY_PASSWORD", "")
+	t.Setenv("TG_HARVEST_APP_ID", "")
+	t.Setenv("TG_HARVEST_APP_HASH", "")
 	t.Setenv("TG_STUDY_STATE_DIR", filepath.Join(baseDir, "state"))
 	t.Setenv("TG_STUDY_SESSION_PATH", filepath.Join(baseDir, "sessions", "user.json"))
 	for key, value := range env {

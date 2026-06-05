@@ -12,15 +12,19 @@ import (
 )
 
 const (
-	DefaultSessionPath  = ".sessions/user.json"
-	DefaultStateDir     = ".state"
-	DefaultRPCSpacingMS = 1500
-	DefaultBatchSize    = 80
-	DefaultHistoryLimit = 500
-	DefaultMaxBatches   = 20
+	DefaultSessionPath      = ".sessions/user.json"
+	DefaultStateDir         = ".state"
+	DefaultDailySessionPath = ".sessions/daily.json"
+	DefaultDailyStateDir    = ".state/daily"
+	DefaultRPCSpacingMS     = 1500
+	DefaultBatchSize        = 80
+	DefaultHistoryLimit     = 500
+	DefaultMaxBatches       = 20
 )
 
 type Config struct {
+	Profile      string
+	EnvPrefix    string
 	AppID        int
 	AppHash      string
 	Phone        string
@@ -35,35 +39,99 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	appID, err := intFromEnvAny(DefaultAppIDEnv(), 0)
+	return LoadStudy()
+}
+
+func LoadStudy() (Config, error) {
+	return loadProfile(profileSpec{
+		Profile:            "study",
+		EnvPrefix:          "TG_STUDY",
+		AppIDEnv:           []string{"TG_STUDY_APP_ID", "TG_E2E_APP_ID"},
+		AppHashEnv:         []string{"TG_STUDY_APP_HASH", "TG_E2E_APP_HASH"},
+		PhoneEnv:           []string{"TG_STUDY_PHONE", "TG_E2E_PHONE"},
+		PasswordEnv:        []string{"TG_STUDY_PASSWORD", "TG_E2E_PASSWORD"},
+		SessionPathEnv:     []string{"TG_STUDY_SESSION_PATH"},
+		StateDirEnv:        []string{"TG_STUDY_STATE_DIR"},
+		AllowedChatsEnv:    []string{"TG_STUDY_ALLOWED_CHATS"},
+		RPCSpacingMSEnv:    []string{"TG_STUDY_RPC_SPACING_MS"},
+		HistoryBatchEnv:    []string{"TG_STUDY_HISTORY_BATCH_SIZE"},
+		HistoryLimitEnv:    []string{"TG_STUDY_HISTORY_LIMIT"},
+		MaxBatchesEnv:      []string{"TG_STUDY_MAX_BATCHES"},
+		DefaultSessionPath: DefaultSessionPath,
+		DefaultStateDir:    DefaultStateDir,
+	})
+}
+
+func LoadDaily() (Config, error) {
+	return loadProfile(profileSpec{
+		Profile:            "daily",
+		EnvPrefix:          "TG_DAILY",
+		AppIDEnv:           []string{"TG_DAILY_APP_ID", "TG_HARVEST_APP_ID"},
+		AppHashEnv:         []string{"TG_DAILY_APP_HASH", "TG_HARVEST_APP_HASH"},
+		PhoneEnv:           []string{"TG_DAILY_PHONE", "TG_HARVEST_PHONE"},
+		PasswordEnv:        []string{"TG_DAILY_PASSWORD", "TG_HARVEST_PASSWORD"},
+		SessionPathEnv:     []string{"TG_DAILY_SESSION_PATH", "TG_HARVEST_SESSION_PATH"},
+		StateDirEnv:        []string{"TG_DAILY_STATE_DIR", "TG_HARVEST_STATE_DIR"},
+		AllowedChatsEnv:    []string{"TG_DAILY_ALLOWED_CHATS", "TG_HARVEST_ALLOWED_CHATS"},
+		RPCSpacingMSEnv:    []string{"TG_DAILY_RPC_SPACING_MS", "TG_HARVEST_RPC_SPACING_MS"},
+		HistoryBatchEnv:    []string{"TG_DAILY_HISTORY_BATCH_SIZE", "TG_HARVEST_HISTORY_BATCH_SIZE"},
+		HistoryLimitEnv:    []string{"TG_DAILY_HISTORY_LIMIT", "TG_HARVEST_HISTORY_LIMIT"},
+		MaxBatchesEnv:      []string{"TG_DAILY_MAX_BATCHES", "TG_HARVEST_MAX_BATCHES"},
+		DefaultSessionPath: DefaultDailySessionPath,
+		DefaultStateDir:    DefaultDailyStateDir,
+	})
+}
+
+type profileSpec struct {
+	Profile            string
+	EnvPrefix          string
+	AppIDEnv           []string
+	AppHashEnv         []string
+	PhoneEnv           []string
+	PasswordEnv        []string
+	SessionPathEnv     []string
+	StateDirEnv        []string
+	AllowedChatsEnv    []string
+	RPCSpacingMSEnv    []string
+	HistoryBatchEnv    []string
+	HistoryLimitEnv    []string
+	MaxBatchesEnv      []string
+	DefaultSessionPath string
+	DefaultStateDir    string
+}
+
+func loadProfile(spec profileSpec) (Config, error) {
+	appID, err := intFromEnvAny(spec.AppIDEnv, 0)
 	if err != nil {
 		return Config{}, err
 	}
-	rpcSpacingMS, err := intFromEnvAny([]string{"TG_STUDY_RPC_SPACING_MS"}, DefaultRPCSpacingMS)
+	rpcSpacingMS, err := intFromEnvAny(spec.RPCSpacingMSEnv, DefaultRPCSpacingMS)
 	if err != nil {
 		return Config{}, err
 	}
-	batchSize, err := intFromEnvAny([]string{"TG_STUDY_HISTORY_BATCH_SIZE"}, DefaultBatchSize)
+	batchSize, err := intFromEnvAny(spec.HistoryBatchEnv, DefaultBatchSize)
 	if err != nil {
 		return Config{}, err
 	}
-	historyLimit, err := intFromEnvAny([]string{"TG_STUDY_HISTORY_LIMIT"}, DefaultHistoryLimit)
+	historyLimit, err := intFromEnvAny(spec.HistoryLimitEnv, DefaultHistoryLimit)
 	if err != nil {
 		return Config{}, err
 	}
-	maxBatches, err := intFromEnvAny([]string{"TG_STUDY_MAX_BATCHES"}, DefaultMaxBatches)
+	maxBatches, err := intFromEnvAny(spec.MaxBatchesEnv, DefaultMaxBatches)
 	if err != nil {
 		return Config{}, err
 	}
 
 	return Config{
+		Profile:      spec.Profile,
+		EnvPrefix:    spec.EnvPrefix,
 		AppID:        appID,
-		AppHash:      firstEnv(DefaultAppHashEnv()...),
-		Phone:        firstEnv("TG_STUDY_PHONE", "TG_E2E_PHONE"),
-		Password:     firstEnv("TG_STUDY_PASSWORD", "TG_E2E_PASSWORD"),
-		SessionPath:  defaultString(firstEnv("TG_STUDY_SESSION_PATH"), DefaultSessionPath),
-		StateDir:     defaultString(firstEnv("TG_STUDY_STATE_DIR"), DefaultStateDir),
-		AllowedChats: splitList(firstEnv("TG_STUDY_ALLOWED_CHATS")),
+		AppHash:      firstEnv(spec.AppHashEnv...),
+		Phone:        firstEnv(spec.PhoneEnv...),
+		Password:     firstEnv(spec.PasswordEnv...),
+		SessionPath:  defaultString(firstEnv(spec.SessionPathEnv...), spec.DefaultSessionPath),
+		StateDir:     defaultString(firstEnv(spec.StateDirEnv...), spec.DefaultStateDir),
+		AllowedChats: splitList(firstEnv(spec.AllowedChatsEnv...)),
 		RPCSpacing:   time.Duration(rpcSpacingMS) * time.Millisecond,
 		BatchSize:    batchSize,
 		HistoryLimit: historyLimit,
@@ -94,7 +162,7 @@ func (c Config) ValidateLogin() error {
 		return err
 	}
 	if strings.TrimSpace(c.Phone) == "" {
-		return fmt.Errorf("TG_STUDY_PHONE is required for login")
+		return fmt.Errorf("%s is required for login", c.EnvName("PHONE"))
 	}
 	return nil
 }
@@ -121,16 +189,16 @@ func (c Config) AllowedChatCount() int {
 
 func (c Config) ValidateRuntime() error {
 	if c.AppID == 0 {
-		return fmt.Errorf("TG_STUDY_APP_ID is required")
+		return fmt.Errorf("%s is required", c.EnvName("APP_ID"))
 	}
 	if strings.TrimSpace(c.AppHash) == "" {
-		return fmt.Errorf("TG_STUDY_APP_HASH is required")
+		return fmt.Errorf("%s is required", c.EnvName("APP_HASH"))
 	}
 	if strings.TrimSpace(c.SessionPath) == "" {
-		return fmt.Errorf("TG_STUDY_SESSION_PATH is required")
+		return fmt.Errorf("%s is required", c.EnvName("SESSION_PATH"))
 	}
 	if strings.TrimSpace(c.StateDir) == "" {
-		return fmt.Errorf("TG_STUDY_STATE_DIR is required")
+		return fmt.Errorf("%s is required", c.EnvName("STATE_DIR"))
 	}
 	if c.RPCSpacing <= 0 {
 		return fmt.Errorf("rpc spacing must be > 0")
@@ -154,6 +222,21 @@ func (c Config) WithRoot(root string) Config {
 	c.SessionPath = resolvePath(root, c.SessionPath)
 	c.StateDir = resolvePath(root, c.StateDir)
 	return c
+}
+
+func (c Config) EnvName(suffix string) string {
+	prefix := strings.TrimSpace(c.EnvPrefix)
+	if prefix == "" {
+		prefix = "TG_STUDY"
+	}
+	return prefix + "_" + suffix
+}
+
+func (c Config) LoginCommand() string {
+	if c.Profile == "daily" {
+		return "telegram-study-harvest daily-login"
+	}
+	return "telegram-study-harvest login"
 }
 
 func (c Config) RuntimeLockPath() string {

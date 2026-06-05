@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,24 +31,25 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		printUsage(stderr)
 		return 2
 	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printUsage(stdout)
+		return 0
+	}
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
 		return printError(stderr, 1, err)
 	}
-	cfg, err := config.Load()
+	cfg, err := loadCommandConfig(args[0])
 	if err != nil {
 		return printError(stderr, 1, err)
 	}
 	cfg = cfg.WithRoot(projectRoot)
-	if args[0] != "login" {
+	if shouldUseTelegramDesktopDefaults(args[0]) {
 		cfg = cfg.WithTelegramDesktopDefaults()
 	}
 	client := mtproto.New(cfg)
 
 	switch args[0] {
-	case "help", "--help", "-h":
-		printUsage(stdout)
-		return 0
 	case "print-config":
 		printConfig(cfg, stdout)
 		return 0
@@ -58,6 +60,29 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		if err := withRuntimeLock(cfg, func() error {
 			return client.Login(context.Background(), stdin, stdout)
 		}); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "daily-config":
+		printConfig(cfg, stdout)
+		return 0
+	case "daily-doctor":
+		printDoctor(cfg, stdout, client)
+		return 0
+	case "daily-login":
+		if err := withRuntimeLock(cfg, func() error {
+			return client.Login(context.Background(), stdin, stdout)
+		}); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "daily-me":
+		if err := runMe(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "daily":
+		if err := runDaily(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
 		return 0
@@ -108,8 +133,23 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	}
 }
 
+func loadCommandConfig(command string) (config.Config, error) {
+	if isDailyCommand(command) {
+		return config.LoadDaily()
+	}
+	return config.LoadStudy()
+}
+
+func isDailyCommand(command string) bool {
+	return command == "daily" || strings.HasPrefix(command, "daily-")
+}
+
+func shouldUseTelegramDesktopDefaults(command string) bool {
+	return command != "login" && !isDailyCommand(command)
+}
+
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-study-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|compact|agent-view> [options]")
+	fmt.Fprintln(out, "usage: telegram-study-harvest <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|compact|agent-view|daily> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "commands are read-only except login/session file creation")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
@@ -120,6 +160,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
+	fmt.Fprintln(out, "  daily --date today [--out days/YYYY-MM-DD.jsonl] [--markdown-out days/YYYY-MM-DD.md] [--download-media=false]")
+	fmt.Fprintln(out, "  daily-login | daily-doctor | daily-me  # use TG_DAILY_* or TG_HARVEST_* account settings")
 }
 
 func printError(stderr io.Writer, code int, err error) int {
@@ -128,6 +170,7 @@ func printError(stderr io.Writer, code int, err error) int {
 }
 
 func printConfig(cfg config.Config, out io.Writer) {
+	fmt.Fprintf(out, "profile=%s\n", defaultCLIString(cfg.Profile, "study"))
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -142,6 +185,7 @@ func printConfig(cfg config.Config, out io.Writer) {
 }
 
 func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
+	fmt.Fprintf(out, "profile=%s\n", defaultCLIString(cfg.Profile, "study"))
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -161,10 +205,10 @@ func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client) {
 
 func doctorAuthStatus(cfg config.Config, client *mtproto.Client) (string, string) {
 	if cfg.AppID == 0 || strings.TrimSpace(cfg.AppHash) == "" {
-		return "skipped", "set TG_STUDY_APP_ID and TG_STUDY_APP_HASH to verify live Telegram authorization"
+		return "skipped", fmt.Sprintf("set %s and %s to verify live Telegram authorization", cfg.EnvName("APP_ID"), cfg.EnvName("APP_HASH"))
 	}
 	if !fileExists(cfg.SessionPath) {
-		return "reauth_required", "session file is missing; run `telegram-study-harvest login`"
+		return "reauth_required", fmt.Sprintf("session file is missing; run `%s`", cfg.LoginCommand())
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -175,7 +219,7 @@ func doctorAuthStatus(cfg config.Config, client *mtproto.Client) (string, string
 	if status.Authorized {
 		return "authorized", "Telegram accepted the current session"
 	}
-	return "reauth_required", "Telegram requires re-login"
+	return "reauth_required", fmt.Sprintf("Telegram requires re-login; run `%s`", cfg.LoginCommand())
 }
 
 func runChats(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
@@ -533,6 +577,142 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	})
 }
 
+func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
+	dateDefault := "today"
+	dateLabelDefault, _, _, _ := parseDailyDate(dateDefault, time.Now())
+	defaultJSONL, defaultMarkdown := harvest.DailyDefaultOutputPaths(cfg.StateDir, dateLabelDefault)
+	defaultTranscribeCommand := firstEnvValue("TG_DAILY_TRANSCRIBE_CMD", "TG_HARVEST_TRANSCRIBE_CMD")
+
+	fs := flag.NewFlagSet("daily", flag.ContinueOnError)
+	fs.SetOutput(out)
+	dateRaw := fs.String("date", dateDefault, "day to harvest: today, yesterday, or YYYY-MM-DD in Europe/Moscow")
+	output := fs.String("out", defaultJSONL, "JSONL output path; relative paths are resolved under state dir")
+	markdownOut := fs.String("markdown-out", defaultMarkdown, "Markdown output path; relative paths are resolved under state dir")
+	dialogLimit := fs.Int("dialog-limit", dailyDialogLimitDefault(), "maximum dialogs to scan")
+	limit := fs.Int("limit", 0, "maximum newest records to write after filtering; 0 means all")
+	batchSize := fs.Int("batch-size", cfg.BatchSize, "Telegram history/search batch size, max 100")
+	maxBatches := fs.Int("max-batches", cfg.MaxBatches, "maximum batches per dialog; 0 disables the per-dialog cap")
+	includeService := fs.Bool("include-service", false, "include Telegram service messages")
+	downloadMedia := fs.Bool("download-media", true, "download photos, image documents, voice/audio, and round video attachments")
+	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
+	maxMediaBytes := fs.Int64("max-media-bytes", 50*1024*1024, "maximum document bytes to download; 0 disables the size cap")
+	transcribeMedia := fs.Bool("transcribe", strings.TrimSpace(defaultTranscribeCommand) != "", "run transcription command for downloaded voice/audio/round video")
+	transcribeCommand := fs.String("transcribe-cmd", defaultTranscribeCommand, "shell command template; supports {input}, {output}, {output_dir}, {output_base}")
+	transcriptDir := fs.String("transcript-dir", "transcripts", "transcript output directory, relative to state dir unless absolute")
+	progressOut := fs.Bool("progress", false, "print per-dialog progress")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dateLabel, start, end, err := parseDailyDate(*dateRaw, time.Now())
+	if err != nil {
+		return err
+	}
+	if !flagWasSet(fs, "out") {
+		jsonl, _ := harvest.DailyDefaultOutputPaths(cfg.StateDir, dateLabel)
+		*output = jsonl
+	}
+	if !flagWasSet(fs, "markdown-out") {
+		_, markdown := harvest.DailyDefaultOutputPaths(cfg.StateDir, dateLabel)
+		*markdownOut = markdown
+	}
+	outputPath := resolveOutputPath(cfg.StateDir, *output)
+	markdownPath := ""
+	if strings.TrimSpace(*markdownOut) != "" {
+		markdownPath = resolveOutputPath(cfg.StateDir, *markdownOut)
+	}
+	history := harvest.HistoryOptions{
+		Limit:             *limit,
+		BatchSize:         *batchSize,
+		MaxBatches:        *maxBatches,
+		DownloadMedia:     *downloadMedia,
+		MaxMediaBytes:     *maxMediaBytes,
+		TranscribeMedia:   *transcribeMedia,
+		TranscribeCommand: *transcribeCommand,
+	}
+	if *downloadMedia {
+		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
+	}
+	if *transcribeMedia {
+		history.TranscriptDir = resolveOutputPath(cfg.StateDir, *transcriptDir)
+	}
+	records := make([]harvest.MessageRecord, 0)
+	var stats harvest.OutgoingDayStats
+	if err := withRuntimeLock(cfg, func() error {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
+			encoder, file, err := harvest.OpenJSONL(outputPath, false)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			progress := func(progress harvest.OutgoingDayProgress) error {
+				if !*progressOut {
+					return nil
+				}
+				if progress.Skipped {
+					fmt.Fprintf(out, "progress skipped=true chat=%s total=%d flood_waits=%d\n", progress.Chat.Display, progress.Total, progress.FloodWaits)
+					return nil
+				}
+				if progress.Error != "" {
+					fmt.Fprintf(out, "progress error=true chat=%s detail=%s total=%d batches=%d flood_waits=%d\n", progress.Chat.Display, progress.Error, progress.Total, progress.Batches, progress.FloodWaits)
+					return nil
+				}
+				fmt.Fprintf(out, "progress chat=%s records=%d total=%d batches=%d flood_waits=%d\n", progress.Chat.Display, progress.Records, progress.Total, progress.Batches, progress.FloodWaits)
+				return nil
+			}
+			stats, err = session.DumpOutgoingDay(ctx, harvest.OutgoingDayOptions{
+				Start:          start,
+				End:            end,
+				DialogLimit:    *dialogLimit,
+				IncludeService: *includeService,
+				History:        history,
+				Progress:       progress,
+			}, func(record harvest.MessageRecord) error {
+				records = append(records, record)
+				return encoder.Encode(record)
+			})
+			return err
+		})
+	}); err != nil {
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintf(out, "interrupted=true out=%s records=%d\n", outputPath, len(records))
+			return nil
+		}
+		return err
+	}
+	if markdownPath != "" {
+		if err := harvest.WriteDailyMarkdown(harvest.DailyMarkdownOptions{
+			OutputPath: markdownPath,
+			SourcePath: outputPath,
+			Date:       dateLabel,
+			Start:      start,
+			End:        end,
+			Stats:      stats,
+			Records:    records,
+		}); err != nil {
+			return err
+		}
+	}
+	for _, dialogErr := range stats.DialogErrors {
+		fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
+	}
+	fmt.Fprintf(out, "date=%s wrote=%d dialogs=%d dialogs_with_records=%d attachments=%d transcripts=%d out=%s",
+		dateLabel,
+		stats.Records,
+		stats.DialogsScanned,
+		stats.DialogsWithRecords,
+		stats.Attachments,
+		stats.Transcripts,
+		outputPath,
+	)
+	if markdownPath != "" {
+		fmt.Fprintf(out, " markdown=%s", markdownPath)
+	}
+	fmt.Fprintf(out, " flood_waits=%d complete=%t\n", stats.FloodWaits, stats.Complete)
+	return nil
+}
+
 func runCompact(cfg config.Config, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("compact", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -710,6 +890,69 @@ func parseCompactSince(value string) (time.Time, error) {
 		return parsed, nil
 	}
 	return time.Time{}, fmt.Errorf("--since must be YYYY-MM-DD or RFC3339")
+}
+
+func parseDailyDate(value string, now time.Time) (string, time.Time, time.Time, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = "today"
+	}
+	moscow := time.FixedZone("Europe/Moscow", 3*60*60)
+	now = now.In(moscow)
+	var day time.Time
+	switch value {
+	case "today":
+		day = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, moscow)
+	case "yesterday":
+		base := now.AddDate(0, 0, -1)
+		day = time.Date(base.Year(), base.Month(), base.Day(), 0, 0, 0, 0, moscow)
+	default:
+		parsed, err := time.ParseInLocation("2006-01-02", value, moscow)
+		if err != nil {
+			return "", time.Time{}, time.Time{}, fmt.Errorf("--date must be today, yesterday, or YYYY-MM-DD")
+		}
+		day = parsed
+	}
+	dateLabel := day.Format("2006-01-02")
+	return dateLabel, day, day.AddDate(0, 0, 1), nil
+}
+
+func dailyDialogLimitDefault() int {
+	if value, ok := intEnvValue("TG_DAILY_DIALOG_LIMIT", "TG_HARVEST_DIALOG_LIMIT"); ok && value > 0 {
+		return value
+	}
+	return 500
+}
+
+func intEnvValue(keys ...string) (int, bool) {
+	for _, key := range keys {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, false
+		}
+		return value, true
+	}
+	return 0, false
+}
+
+func firstEnvValue(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func defaultCLIString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func defaultTDataPath() string {

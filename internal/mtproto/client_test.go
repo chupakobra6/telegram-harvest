@@ -174,6 +174,55 @@ func TestExtractAttachmentsIgnoresNonAcademicTelegramMedia(t *testing.T) {
 	}
 }
 
+func TestEnsureDailyAttachmentsIncludesVoiceAudioAndRoundVideo(t *testing.T) {
+	cases := []struct {
+		name  string
+		media *tg.MessageMediaDocument
+		want  string
+	}{
+		{
+			name:  "voice",
+			media: &tg.MessageMediaDocument{Voice: true},
+			want:  "voice",
+		},
+		{
+			name:  "round video",
+			media: &tg.MessageMediaDocument{Round: true},
+			want:  "round_video",
+		},
+		{
+			name: "audio document",
+			media: func() *tg.MessageMediaDocument {
+				media := &tg.MessageMediaDocument{}
+				media.SetDocument(&tg.Document{
+					MimeType: "audio/ogg",
+					Size:     100,
+					Attributes: []tg.DocumentAttributeClass{
+						&tg.DocumentAttributeAudio{Duration: 5},
+					},
+				})
+				return media
+			}(),
+			want: "audio",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := harvest.MessageRecord{MessageID: 10}
+			ensureDailyAttachments(&tg.Message{ID: 10, Media: tc.media}, &record)
+			if len(record.Attachments) != 1 {
+				t.Fatalf("attachments=%#v", record.Attachments)
+			}
+			if record.Attachments[0].Kind != tc.want {
+				t.Fatalf("kind=%q want %q", record.Attachments[0].Kind, tc.want)
+			}
+			if record.Attachments[0].FileName == "" {
+				t.Fatalf("expected fallback file name")
+			}
+		})
+	}
+}
+
 func TestNormalizeRecordMergesTextAndWebpageLinks(t *testing.T) {
 	record, ok := normalizeRecord(
 		&tg.Message{

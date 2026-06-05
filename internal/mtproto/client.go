@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -28,13 +29,15 @@ import (
 )
 
 const (
-	defaultRPCTimeout      = 30 * time.Second
-	defaultDialogTimeout   = 45 * time.Second
-	defaultHistoryTimeout  = 45 * time.Second
-	defaultDownloadTimeout = 2 * time.Minute
-	maxFloodWaitRetries    = 3
-	defaultDialogBatchSize = 100
-	defaultMaxMediaBytes   = 50 * 1024 * 1024
+	defaultRPCTimeout        = 30 * time.Second
+	defaultDialogTimeout     = 45 * time.Second
+	defaultHistoryTimeout    = 45 * time.Second
+	defaultDownloadTimeout   = 2 * time.Minute
+	defaultTranscribeTimeout = 10 * time.Minute
+	maxFloodWaitRetries      = 3
+	defaultDialogBatchSize   = 100
+	defaultDailyDialogLimit  = 500
+	defaultMaxMediaBytes     = 50 * 1024 * 1024
 )
 
 var linkPattern = regexp.MustCompile(`(?i)\b(?:https?://|t\.me/|telegram\.me/)[^\s<>()"'` + "`" + `]+`)
@@ -135,13 +138,13 @@ func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
 
 func (c *Client) AuthStatus(ctx context.Context) (AuthStatus, error) {
 	if c.cfg.AppID == 0 {
-		return AuthStatus{}, fmt.Errorf("TG_STUDY_APP_ID is required")
+		return AuthStatus{}, fmt.Errorf("%s is required", c.cfg.EnvName("APP_ID"))
 	}
 	if strings.TrimSpace(c.cfg.AppHash) == "" {
-		return AuthStatus{}, fmt.Errorf("TG_STUDY_APP_HASH is required")
+		return AuthStatus{}, fmt.Errorf("%s is required", c.cfg.EnvName("APP_HASH"))
 	}
 	if strings.TrimSpace(c.cfg.SessionPath) == "" {
-		return AuthStatus{}, fmt.Errorf("TG_STUDY_SESSION_PATH is required")
+		return AuthStatus{}, fmt.Errorf("%s is required", c.cfg.EnvName("SESSION_PATH"))
 	}
 	if err := ensureSessionDir(c.cfg.SessionPath); err != nil {
 		return AuthStatus{}, err
@@ -190,9 +193,9 @@ func (c *Client) RunAuthorized(ctx context.Context, fn func(context.Context, *Se
 
 func unauthorizedRuntimeError(sessionPath string) error {
 	if sessionFileExists(sessionPath) {
-		return fmt.Errorf("telegram session is not authorized: session file exists at %s, but Telegram requires re-login; run `telegram-study-harvest login` again", sessionPath)
+		return fmt.Errorf("telegram session is not authorized: session file exists at %s, but Telegram requires re-login; run the matching login command again", sessionPath)
 	}
-	return fmt.Errorf("telegram session is not authorized: no valid Telegram session is available; run `telegram-study-harvest login`")
+	return fmt.Errorf("telegram session is not authorized: no valid Telegram session is available; run the matching login command")
 }
 
 func (s *Session) ListDialogs(ctx context.Context, limit int, query string) ([]harvest.Chat, error) {
@@ -418,6 +421,119 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 	return target.Chat, stats, nil
 }
 
+func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingDayStats, error) {
+	opts = normalizeOutgoingDayOptions(opts)
+	if opts.Start.IsZero() {
+		return harvest.OutgoingDayStats{}, fmt.Errorf("start time is required")
+	}
+	if opts.End.IsZero() || !opts.End.After(opts.Start) {
+		return harvest.OutgoingDayStats{}, fmt.Errorf("end time must be after start time")
+	}
+	dialogs, err := s.loadDialogs(ctx, opts.DialogLimit)
+	if err != nil {
+		return harvest.OutgoingDayStats{}, err
+	}
+
+	stats := harvest.OutgoingDayStats{DialogsScanned: len(dialogs)}
+	records := make([]harvest.MessageRecord, 0)
+	for _, chat := range dialogs {
+		if !chat.LastMessageAt.IsZero() && chat.LastMessageAt.Before(opts.Start) {
+			stats.DialogsSkipped++
+			if opts.Progress != nil {
+				if err := opts.Progress(harvest.OutgoingDayProgress{
+					Chat:       chat,
+					Skipped:    true,
+					Total:      len(records),
+					FloodWaits: s.FloodWaits(),
+				}); err != nil {
+					return harvest.OutgoingDayStats{}, err
+				}
+			}
+			continue
+		}
+
+		target, err := s.resolveTarget(ctx, strconv.FormatInt(chat.ID, 10))
+		if err != nil {
+			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
+			if opts.Progress != nil {
+				if err := opts.Progress(harvest.OutgoingDayProgress{
+					Chat:       chat,
+					Error:      oneLine(err.Error()),
+					Total:      len(records),
+					FloodWaits: s.FloodWaits(),
+				}); err != nil {
+					return harvest.OutgoingDayStats{}, err
+				}
+			}
+			continue
+		}
+
+		dialogRecords, dialogStats, err := s.searchOutgoingDayInDialog(ctx, target, opts)
+		stats.Batches += dialogStats.Batches
+		if err != nil {
+			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
+			if opts.Progress != nil {
+				if err := opts.Progress(harvest.OutgoingDayProgress{
+					Chat:       chat,
+					Error:      oneLine(err.Error()),
+					Total:      len(records),
+					Batches:    dialogStats.Batches,
+					FloodWaits: s.FloodWaits(),
+				}); err != nil {
+					return harvest.OutgoingDayStats{}, err
+				}
+			}
+			continue
+		}
+		if len(dialogRecords) > 0 {
+			stats.DialogsWithRecords++
+			records = append(records, dialogRecords...)
+		}
+		if !dialogStats.Complete {
+			stats.DialogErrors = append(stats.DialogErrors, dailyDialogIncomplete(chat, opts.History.MaxBatches))
+		}
+		if opts.Progress != nil {
+			if err := opts.Progress(harvest.OutgoingDayProgress{
+				Chat:       chat,
+				Records:    len(dialogRecords),
+				Total:      len(records),
+				Batches:    dialogStats.Batches,
+				FloodWaits: s.FloodWaits(),
+			}); err != nil {
+				return harvest.OutgoingDayStats{}, err
+			}
+		}
+	}
+
+	sortDailyRecords(records)
+	if opts.History.Limit > 0 && len(records) > opts.History.Limit {
+		records = records[len(records)-opts.History.Limit:]
+	}
+	for _, record := range records {
+		stats.Records++
+		if stats.FirstAt.IsZero() || record.Date.Before(stats.FirstAt) {
+			stats.FirstAt = record.Date
+		}
+		if record.Date.After(stats.LastAt) {
+			stats.LastAt = record.Date
+		}
+		for _, attachment := range record.Attachments {
+			stats.Attachments++
+			if strings.TrimSpace(attachment.Transcript) != "" {
+				stats.Transcripts++
+			}
+		}
+		if emit != nil {
+			if err := emit(record); err != nil {
+				return harvest.OutgoingDayStats{}, err
+			}
+		}
+	}
+	stats.FloodWaits = s.FloodWaits()
+	stats.Complete = len(stats.DialogErrors) == 0
+	return stats, nil
+}
+
 func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarget, opts harvest.HistoryOptions, emit func(harvest.MessageRecord) error, topicByID map[int]harvest.Topic) (harvest.Chat, harvest.HistoryStats, error) {
 	offsetID := opts.StartOffsetID
 	stats := harvest.HistoryStats{}
@@ -549,6 +665,235 @@ func normalizeHistoryOptions(opts harvest.HistoryOptions) harvest.HistoryOptions
 		opts.MaxBatches = config.DefaultMaxBatches
 	}
 	return opts
+}
+
+func normalizeOutgoingDayOptions(opts harvest.OutgoingDayOptions) harvest.OutgoingDayOptions {
+	if opts.DialogLimit <= 0 {
+		opts.DialogLimit = defaultDailyDialogLimit
+	}
+	if opts.History.BatchSize <= 0 {
+		opts.History.BatchSize = config.DefaultBatchSize
+	}
+	if opts.History.BatchSize > 100 {
+		opts.History.BatchSize = 100
+	}
+	if opts.History.MaxBatches < 0 {
+		opts.History.MaxBatches = config.DefaultMaxBatches
+	}
+	return opts
+}
+
+func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	records, stats, err := s.searchOutgoingDayWithSearch(ctx, target, opts)
+	if err != nil && isSearchQueryEmpty(err) {
+		return s.scanOutgoingDayWithHistory(ctx, target, opts)
+	}
+	return records, stats, err
+}
+
+func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	topicByID := map[int]harvest.Topic{}
+	records := make([]harvest.MessageRecord, 0)
+	stats := harvest.HistoryStats{}
+	offsetID := 0
+	for shouldContinueOutgoingDay(opts, stats.Batches) {
+		stats.Batches++
+		batchLimit := opts.History.BatchSize
+		var result tg.MessagesMessagesClass
+		err := s.performRPC(ctx, "search_messages", func(callCtx context.Context) error {
+			var callErr error
+			req := &tg.MessagesSearchRequest{
+				Peer:     target.InputPeer,
+				Q:        "",
+				Filter:   &tg.InputMessagesFilterEmpty{},
+				MinDate:  int(opts.Start.Unix()) - 1,
+				MaxDate:  int(opts.End.Unix()),
+				OffsetID: offsetID,
+				Limit:    batchLimit,
+				Hash:     0,
+			}
+			req.SetFromID(&tg.InputPeerSelf{})
+			result, callErr = s.raw.MessagesSearch(callCtx, req)
+			return callErr
+		})
+		if err != nil {
+			stats.FloodWaits = s.FloodWaits()
+			return nil, stats, err
+		}
+		entities := historyEntities(result)
+		messages := historyMessages(result)
+		if len(messages) == 0 {
+			stats.Complete = true
+			break
+		}
+		mergeTopicMap(topicByID, historyTopics(result), messages)
+
+		minMessageID := 0
+		for _, msgClass := range messages {
+			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
+				minMessageID = id
+			}
+			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts)
+			if !ok {
+				continue
+			}
+			records = append(records, record)
+		}
+		if minMessageID == 0 || len(messages) < batchLimit {
+			stats.Complete = true
+			break
+		}
+		offsetID = minMessageID
+	}
+	sortDailyRecords(records)
+	stats.Records = len(records)
+	stats.FloodWaits = s.FloodWaits()
+	for _, record := range records {
+		if stats.FirstID == 0 || record.MessageID < stats.FirstID {
+			stats.FirstID = record.MessageID
+		}
+		if record.MessageID > stats.LastID {
+			stats.LastID = record.MessageID
+		}
+	}
+	return records, stats, nil
+}
+
+func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	topicByID := map[int]harvest.Topic{}
+	records := make([]harvest.MessageRecord, 0)
+	stats := harvest.HistoryStats{}
+	offsetID := 0
+	for shouldContinueOutgoingDay(opts, stats.Batches) {
+		stats.Batches++
+		batchLimit := opts.History.BatchSize
+		var result tg.MessagesMessagesClass
+		err := s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
+			var callErr error
+			result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
+				Peer:     target.InputPeer,
+				OffsetID: offsetID,
+				Limit:    batchLimit,
+				Hash:     0,
+			})
+			return callErr
+		})
+		if err != nil {
+			stats.FloodWaits = s.FloodWaits()
+			return nil, stats, err
+		}
+		entities := historyEntities(result)
+		messages := historyMessages(result)
+		if len(messages) == 0 {
+			stats.Complete = true
+			break
+		}
+		mergeTopicMap(topicByID, historyTopics(result), messages)
+
+		minMessageID := 0
+		reachedStart := false
+		for _, msgClass := range messages {
+			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
+				minMessageID = id
+			}
+			if date := messageDate(msgClass); date > 0 && !time.Unix(int64(date), 0).UTC().After(opts.Start) {
+				reachedStart = true
+			}
+			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts)
+			if !ok {
+				continue
+			}
+			records = append(records, record)
+		}
+		if reachedStart || minMessageID == 0 || len(messages) < batchLimit {
+			stats.Complete = true
+			break
+		}
+		offsetID = minMessageID
+	}
+	sortDailyRecords(records)
+	stats.Records = len(records)
+	stats.FloodWaits = s.FloodWaits()
+	for _, record := range records {
+		if stats.FirstID == 0 || record.MessageID < stats.FirstID {
+			stats.FirstID = record.MessageID
+		}
+		if record.MessageID > stats.LastID {
+			stats.LastID = record.MessageID
+		}
+	}
+	return records, stats, nil
+}
+
+func (s *Session) normalizeOutgoingDayRecord(
+	ctx context.Context,
+	msgClass tg.MessageClass,
+	target resolvedTarget,
+	entities peer.Entities,
+	topicByID map[int]harvest.Topic,
+	opts harvest.OutgoingDayOptions,
+) (harvest.MessageRecord, bool) {
+	record, ok := normalizeRecord(msgClass, target.Chat, entities)
+	if !ok {
+		return harvest.MessageRecord{}, false
+	}
+	annotateRecordTopic(&record, opts.History, topicByID)
+	if !opts.IncludeService && record.Kind == "service" {
+		return harvest.MessageRecord{}, false
+	}
+	if record.Date.Before(opts.Start) || !record.Date.Before(opts.End) {
+		return harvest.MessageRecord{}, false
+	}
+	if !record.Outgoing && !record.Sender.Self {
+		return harvest.MessageRecord{}, false
+	}
+	if record.Sender.Display == "" && record.Outgoing {
+		record.Sender = harvest.Sender{Type: "self", Display: "self", Self: true}
+	}
+	ensureDailyAttachments(msgClass, &record)
+	s.downloadRecordMedia(ctx, msgClass, &record, opts.History)
+	return record, true
+}
+
+func shouldContinueOutgoingDay(opts harvest.OutgoingDayOptions, batches int) bool {
+	if opts.History.MaxBatches > 0 && batches >= opts.History.MaxBatches {
+		return false
+	}
+	return true
+}
+
+func sortDailyRecords(records []harvest.MessageRecord) {
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].Date.Equal(records[j].Date) {
+			if records[i].Chat.ID == records[j].Chat.ID {
+				return records[i].MessageID < records[j].MessageID
+			}
+			return records[i].Chat.ID < records[j].Chat.ID
+		}
+		return records[i].Date.Before(records[j].Date)
+	})
+}
+
+func dailyDialogError(chat harvest.Chat, err error) string {
+	return fmt.Sprintf("%s (%d): %s", displayChannel(chat.Title, chat.Username, chat.ID), chat.ID, oneLine(err.Error()))
+}
+
+func dailyDialogIncomplete(chat harvest.Chat, maxBatches int) string {
+	if maxBatches > 0 {
+		return fmt.Sprintf("%s (%d): stopped after max_batches=%d before confirming the day boundary", displayChannel(chat.Title, chat.Username, chat.ID), chat.ID, maxBatches)
+	}
+	return fmt.Sprintf("%s (%d): stopped before confirming the day boundary", displayChannel(chat.Title, chat.Username, chat.ID), chat.ID)
+}
+
+func isSearchQueryEmpty(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToUpper(err.Error()), "SEARCH_QUERY_EMPTY")
+}
+
+func oneLine(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func initialHistoryCapacity(opts harvest.HistoryOptions) int {
@@ -1205,6 +1550,53 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 	}
 }
 
+func ensureDailyAttachments(msgClass tg.MessageClass, record *harvest.MessageRecord) {
+	if record == nil || len(record.Attachments) > 0 {
+		return
+	}
+	msg, ok := msgClass.(*tg.Message)
+	if !ok {
+		return
+	}
+	switch media := msg.Media.(type) {
+	case *tg.MessageMediaDocument:
+		attachment, ok := dailyDocumentAttachment(media, record.MessageID)
+		if ok {
+			record.Attachments = []harvest.Attachment{attachment}
+		}
+	case *tg.MessageMediaPoll:
+		if attached, ok := media.GetAttachedMedia(); ok {
+			copyMsg := *msg
+			copyMsg.Media = attached
+			ensureDailyAttachments(&copyMsg, record)
+		}
+	}
+}
+
+func dailyDocumentAttachment(media *tg.MessageMediaDocument, messageID int) (harvest.Attachment, bool) {
+	kind := documentKind(media)
+	switch kind {
+	case "voice", "round_video", "audio":
+	default:
+		return harvest.Attachment{}, false
+	}
+	attachment := harvest.Attachment{Kind: kind}
+	if document, ok := media.GetDocument(); ok {
+		if doc, ok := document.(*tg.Document); ok {
+			attachment.MIMEType = doc.MimeType
+			attachment.Size = doc.Size
+			attachment.FileName = documentFileName(doc)
+			if strings.TrimSpace(attachment.FileName) == "" {
+				attachment.FileName = fallbackFileName(kind, messageID, doc.MimeType)
+			}
+		}
+	}
+	if strings.TrimSpace(attachment.FileName) == "" {
+		attachment.FileName = fallbackFileName(kind, messageID, "")
+	}
+	return attachment, true
+}
+
 func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
 	if !opts.DownloadMedia || strings.TrimSpace(opts.MediaDir) == "" || record == nil || len(record.Attachments) == 0 {
 		return
@@ -1242,7 +1634,7 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 		}
 		fileName := documentFileName(doc)
 		if strings.TrimSpace(fileName) == "" {
-			fileName = fallbackFileName("document", record.MessageID, doc.MimeType)
+			fileName = fallbackFileName(record.Kind, record.MessageID, doc.MimeType)
 		}
 		record.Attachments[0].MIMEType = doc.MimeType
 		record.Attachments[0].Size = doc.Size
@@ -1275,6 +1667,7 @@ func (s *Session) downloadAttachment(
 	target := mediaTargetPath(opts.MediaDir, *record, index, fileName)
 	record.Attachments[index].LocalPath = target
 	if existing, err := os.Stat(target); err == nil && existing.Size() > 0 {
+		s.maybeTranscribeAttachment(ctx, record, index, opts)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -1290,7 +1683,110 @@ func (s *Session) downloadAttachment(
 	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, target); err != nil {
 		_ = os.Remove(target)
 		record.Attachments[index].DownloadError = err.Error()
+		return
 	}
+	s.maybeTranscribeAttachment(ctx, record, index, opts)
+}
+
+func (s *Session) maybeTranscribeAttachment(ctx context.Context, record *harvest.MessageRecord, index int, opts harvest.HistoryOptions) {
+	if !opts.TranscribeMedia || record == nil || index < 0 || index >= len(record.Attachments) {
+		return
+	}
+	attachment := &record.Attachments[index]
+	if !transcriptMediaKind(attachment.Kind) {
+		return
+	}
+	if strings.TrimSpace(attachment.LocalPath) == "" {
+		attachment.TranscriptError = "media local path is empty"
+		return
+	}
+	transcriptPath := transcriptTargetPath(opts.TranscriptDir, *record, index, attachment.FileName, attachment.LocalPath)
+	attachment.TranscriptPath = transcriptPath
+	if transcript, err := readTranscriptFile(transcriptPath); err == nil {
+		attachment.Transcript = transcript
+		return
+	}
+	if strings.TrimSpace(opts.TranscribeCommand) == "" {
+		attachment.TranscriptError = "transcribe command is empty"
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o700); err != nil {
+		attachment.TranscriptError = fmt.Sprintf("prepare transcript dir: %v", err)
+		return
+	}
+	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
+	defer cancel()
+	output, err := runTranscribeCommand(transcribeCtx, opts.TranscribeCommand, attachment.LocalPath, transcriptPath)
+	if err != nil {
+		attachment.TranscriptError = oneLine(err.Error())
+		return
+	}
+	if _, statErr := os.Stat(transcriptPath); os.IsNotExist(statErr) && strings.TrimSpace(output) != "" {
+		if writeErr := os.WriteFile(transcriptPath, []byte(output), 0o600); writeErr != nil {
+			attachment.TranscriptError = fmt.Sprintf("write transcript: %v", writeErr)
+			return
+		}
+	}
+	transcript, err := readTranscriptFile(transcriptPath)
+	if err != nil {
+		attachment.TranscriptError = fmt.Sprintf("read transcript: %v", err)
+		return
+	}
+	attachment.Transcript = transcript
+}
+
+func transcriptMediaKind(kind string) bool {
+	switch kind {
+	case "voice", "audio", "round_video":
+		return true
+	default:
+		return false
+	}
+}
+
+func transcriptTargetPath(transcriptDir string, record harvest.MessageRecord, index int, fileName string, mediaPath string) string {
+	if strings.TrimSpace(transcriptDir) == "" {
+		transcriptDir = filepath.Dir(mediaPath)
+	}
+	stem := strings.TrimSuffix(safeFileName(fileName), filepath.Ext(fileName))
+	if stem == "" {
+		stem = strings.TrimSuffix(safeFileName(filepath.Base(mediaPath)), filepath.Ext(mediaPath))
+	}
+	if stem == "" {
+		stem = fallbackFileName(record.Kind, record.MessageID, "")
+	}
+	return mediaTargetPath(transcriptDir, record, index, stem+".txt")
+}
+
+func readTranscriptFile(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(content)), nil
+}
+
+func runTranscribeCommand(ctx context.Context, template string, inputPath string, outputPath string) (string, error) {
+	outputDir := filepath.Dir(outputPath)
+	outputBase := strings.TrimSuffix(outputPath, filepath.Ext(outputPath))
+	command := strings.ReplaceAll(template, "{input}", shellQuote(inputPath))
+	command = strings.ReplaceAll(command, "{output}", shellQuote(outputPath))
+	command = strings.ReplaceAll(command, "{output_dir}", shellQuote(outputDir))
+	command = strings.ReplaceAll(command, "{output_base}", shellQuote(outputBase))
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", err, detail)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, bool) {

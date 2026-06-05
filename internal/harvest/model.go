@@ -49,14 +49,17 @@ type SelfProfile struct {
 }
 
 type Attachment struct {
-	Kind          string `json:"kind"`
-	FileName      string `json:"file_name,omitempty"`
-	MIMEType      string `json:"mime_type,omitempty"`
-	Size          int64  `json:"size,omitempty"`
-	Title         string `json:"title,omitempty"`
-	URL           string `json:"url,omitempty"`
-	LocalPath     string `json:"local_path,omitempty"`
-	DownloadError string `json:"download_error,omitempty"`
+	Kind            string `json:"kind"`
+	FileName        string `json:"file_name,omitempty"`
+	MIMEType        string `json:"mime_type,omitempty"`
+	Size            int64  `json:"size,omitempty"`
+	Title           string `json:"title,omitempty"`
+	URL             string `json:"url,omitempty"`
+	LocalPath       string `json:"local_path,omitempty"`
+	DownloadError   string `json:"download_error,omitempty"`
+	Transcript      string `json:"transcript,omitempty"`
+	TranscriptPath  string `json:"transcript_path,omitempty"`
+	TranscriptError string `json:"transcript_error,omitempty"`
 }
 
 type MessageRecord struct {
@@ -102,18 +105,21 @@ type Backfill struct {
 }
 
 type HistoryOptions struct {
-	Limit         int
-	BatchSize     int
-	MaxBatches    int
-	MinID         int
-	StartOffsetID int
-	All           bool
-	TopicID       int
-	TopicTitle    string
-	DownloadMedia bool
-	MediaDir      string
-	MaxMediaBytes int64
-	Progress      func(HistoryProgress) error
+	Limit             int
+	BatchSize         int
+	MaxBatches        int
+	MinID             int
+	StartOffsetID     int
+	All               bool
+	TopicID           int
+	TopicTitle        string
+	DownloadMedia     bool
+	MediaDir          string
+	MaxMediaBytes     int64
+	TranscribeMedia   bool
+	TranscriptDir     string
+	TranscribeCommand string
+	Progress          func(HistoryProgress) error
 }
 
 type HistoryStats struct {
@@ -138,4 +144,38 @@ type HistoryProgress struct {
 
 type HistorySource interface {
 	DumpHistory(ctx context.Context, chat string, opts HistoryOptions, emit func(MessageRecord) error) (Chat, HistoryStats, error)
+}
+
+type OutgoingDayOptions struct {
+	Start          time.Time
+	End            time.Time
+	DialogLimit    int
+	IncludeService bool
+	History        HistoryOptions
+	Progress       func(OutgoingDayProgress) error
+}
+
+type OutgoingDayStats struct {
+	Records            int       `json:"records"`
+	DialogsScanned     int       `json:"dialogs_scanned"`
+	DialogsWithRecords int       `json:"dialogs_with_records"`
+	DialogsSkipped     int       `json:"dialogs_skipped"`
+	DialogErrors       []string  `json:"dialog_errors,omitempty"`
+	Attachments        int       `json:"attachments"`
+	Transcripts        int       `json:"transcripts"`
+	FirstAt            time.Time `json:"first_at,omitempty"`
+	LastAt             time.Time `json:"last_at,omitempty"`
+	Batches            int       `json:"batches"`
+	FloodWaits         int       `json:"flood_waits"`
+	Complete           bool      `json:"complete,omitempty"`
+}
+
+type OutgoingDayProgress struct {
+	Chat       Chat
+	Records    int
+	Total      int
+	Batches    int
+	Skipped    bool
+	Error      string
+	FloodWaits int
 }
