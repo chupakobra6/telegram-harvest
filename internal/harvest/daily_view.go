@@ -36,31 +36,12 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# Telegram-отчет за %s\n\n", dateLabel))
 	b.WriteString("## Сводка\n\n")
-	if !opts.Start.IsZero() && !opts.End.IsZero() {
-		b.WriteString(fmt.Sprintf("- Период: %s .. %s\n", formatDailySummaryTime(opts.Start), formatDailySummaryTime(opts.End)))
-	}
 	writeDailySummaryCount(&b, "Исходящих сообщений", len(records))
 	writeDailySummaryCount(&b, "Чатов с сообщениями", dailyChatCount(records))
 	writeDailySummaryCount(&b, "Вложений", opts.Stats.Attachments)
 	writeDailySummaryCount(&b, "Транскриптов", opts.Stats.Transcripts)
-	if opts.Stats.DialogsScanned > 0 || opts.Stats.DialogsSkipped > 0 || len(opts.Stats.DialogErrors) > 0 {
-		parts := make([]string, 0, 3)
-		if opts.Stats.DialogsScanned > 0 {
-			parts = append(parts, fmt.Sprintf("просканировано диалогов: %d", opts.Stats.DialogsScanned))
-		}
-		if opts.Stats.DialogsSkipped > 0 {
-			parts = append(parts, fmt.Sprintf("пропущено по дате: %d", opts.Stats.DialogsSkipped))
-		}
-		if len(opts.Stats.DialogErrors) > 0 {
-			parts = append(parts, fmt.Sprintf("ошибок: %d", len(opts.Stats.DialogErrors)))
-		}
-		b.WriteString("- Диалоги: " + strings.Join(parts, "; ") + "\n")
-	}
-	if opts.Stats.FloodWaits > 0 {
-		b.WriteString(fmt.Sprintf("- Flood waits: %d\n", opts.Stats.FloodWaits))
-	}
 	if len(opts.Stats.DialogErrors) > 0 {
-		b.WriteString("\n## Ошибки диалогов\n\n")
+		b.WriteString("\n## Проблемы сбора\n\n")
 		for _, err := range opts.Stats.DialogErrors {
 			b.WriteString("- " + err + "\n")
 		}
@@ -84,10 +65,6 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-func formatDailySummaryTime(value time.Time) string {
-	return value.In(moscowLocation).Format("2006-01-02 15:04")
 }
 
 func writeDailySummaryCount(b *strings.Builder, label string, count int) {

@@ -48,6 +48,8 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		End:        start.AddDate(0, 0, 1),
 		Stats: OutgoingDayStats{
 			DialogsScanned: 10,
+			DialogsSkipped: 3,
+			FloodWaits:     1,
 			Attachments:    1,
 			Transcripts:    1,
 		},
@@ -60,7 +62,6 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 	for _, want := range []string{
 		"# Telegram-отчет за 2026-06-05",
 		"## Сводка",
-		"- Период: 2026-06-05 00:00 .. 2026-06-06 00:00",
 		"- Исходящих сообщений: 2",
 		"- Вложений: 1",
 		"- Транскриптов: 1",
@@ -77,9 +78,13 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 	}
 	for _, unwanted := range []string{
 		"<br>",
+		"Период:",
+		"Диалоги:",
+		"просканировано",
+		"пропущено по дате",
 		"JSONL:",
 		"Ошибок: 0",
-		"Flood waits: 0",
+		"Flood waits",
 		"media_id=",
 		"voice.ogg",
 		"audio/ogg",
