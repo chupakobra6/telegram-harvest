@@ -137,7 +137,12 @@ type HistoryOptions struct {
 	VoskModelPath         string
 	VoskGrammarPath       string
 	FFmpegCommand         string
+	Transcriber           Transcriber
 	Progress              func(HistoryProgress) error
+}
+
+type Transcriber interface {
+	Run(ctx context.Context, inputPath string, outputPath string) (string, error)
 }
 
 type HistoryStats struct {

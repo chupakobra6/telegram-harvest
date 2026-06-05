@@ -660,7 +660,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	mediaLimits := addMediaLimitFlags(fs)
 	transcribeMedia := fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download")
 	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand, "custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
-	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk helper command, called as: command <model> <wav> [grammar]")
+	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk session worker command, called as: command --session <model> [grammar]")
 	voskModelPath := fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory")
 	voskGrammarPath := fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path")
 	ffmpegCommand := fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion")
@@ -706,6 +706,11 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	}
 	if *transcribeMedia {
 		history.TranscriptDir = resolveOutputPath(cfg.StateDir, *transcriptDir)
+		if transcribeOpts := dailyTranscribeOptions(history); transcribeOpts.Configured() {
+			managedTranscriber := transcribe.NewManagedRunner(transcribeOpts)
+			defer managedTranscriber.Close()
+			history.Transcriber = managedTranscriber
+		}
 	}
 	records := make([]harvest.MessageRecord, 0)
 	var stats harvest.OutgoingDayStats
@@ -752,6 +757,11 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 			return nil
 		}
 		return err
+	}
+	if managedTranscriber, ok := history.Transcriber.(transcribe.ManagedRunner); ok {
+		if err := managedTranscriber.Close(); err != nil {
+			return err
+		}
 	}
 	if markdownPath != "" {
 		if err := harvest.WriteDailyMarkdown(harvest.DailyMarkdownOptions{
@@ -1090,6 +1100,16 @@ func dailyDialogLimitDefault() int {
 		return value
 	}
 	return 500
+}
+
+func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
+	return transcribe.Options{
+		CommandTemplate: opts.TranscribeCommand,
+		VoskCommand:     opts.VoskCommand,
+		VoskModelPath:   opts.VoskModelPath,
+		VoskGrammarPath: opts.VoskGrammarPath,
+		FFmpegCommand:   opts.FFmpegCommand,
+	}
 }
 
 type dailyRuntimeConfig struct {

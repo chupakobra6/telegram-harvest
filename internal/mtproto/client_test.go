@@ -1,10 +1,12 @@
 package mtproto
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 )
@@ -62,6 +64,17 @@ func TestHistoryProgressCopiesStats(t *testing.T) {
 	}
 }
 
+func TestRunTranscriberUsesExplicitRunnerWithoutCommandConfig(t *testing.T) {
+	runner := &fakeTranscriber{text: "from runner"}
+	text, err := runTranscriber(context.Background(), runner, transcribe.Options{}, "input.ogg", "out.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "from runner" || runner.calls != 1 {
+		t.Fatalf("text=%q calls=%d", text, runner.calls)
+	}
+}
+
 func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing.T) {
 	got := extractLinks(
 		"open https://example.com/task, then t.me/group/10 and https://example.com/task",
@@ -83,6 +96,16 @@ func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing
 			t.Fatalf("links[%d]=%q want %q; all=%#v", i, got[i], want[i], got)
 		}
 	}
+}
+
+type fakeTranscriber struct {
+	text  string
+	calls int
+}
+
+func (f *fakeTranscriber) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
+	f.calls++
+	return f.text, nil
 }
 
 func TestMediaLinksAndAttachmentsKeepAcademicMaterialsOnly(t *testing.T) {

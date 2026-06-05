@@ -1870,7 +1870,7 @@ func (s *Session) transcribeAttachmentMedia(
 		return
 	}
 	transcribeOpts := transcribeOptions(opts)
-	if !transcribeOpts.Configured() {
+	if opts.Transcriber == nil && !transcribeOpts.Configured() {
 		attachment.TranscriptError = "transcription is not configured"
 		return
 	}
@@ -1893,7 +1893,7 @@ func (s *Session) transcribeAttachmentMedia(
 
 	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
 	defer cancel()
-	transcript, err := transcribe.Run(transcribeCtx, transcribeOpts, tempPath, transcriptPath)
+	transcript, err := runTranscriber(transcribeCtx, opts.Transcriber, transcribeOpts, tempPath, transcriptPath)
 	if err != nil {
 		attachment.TranscriptError = oneLine(err.Error())
 		return
@@ -1904,6 +1904,13 @@ func (s *Session) transcribeAttachmentMedia(
 		}
 	}
 	attachment.Transcript = transcript
+}
+
+func runTranscriber(ctx context.Context, runner harvest.Transcriber, opts transcribe.Options, inputPath string, outputPath string) (string, error) {
+	if runner != nil {
+		return runner.Run(ctx, inputPath, outputPath)
+	}
+	return transcribe.Run(ctx, opts, inputPath, outputPath)
 }
 
 func transcriptMediaKind(kind string) bool {

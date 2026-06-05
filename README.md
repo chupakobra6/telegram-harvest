@@ -122,7 +122,9 @@ then deleted; the report keeps only transcript text and `transcript_path`.
 
 Vosk is the default transcription path. On this Mac the project auto-detects the Shelfy small Russian
 model at `../shelfy/models/vosk-model-small-ru-0.22` when it exists, and uses `vosk-transcribe` from
-`PATH` when available:
+`PATH` when available. For a daily run, Harvest starts the Vosk command lazily as a session-scoped
+worker with `--session <model-dir> [grammar-json-path]`; the worker keeps the model loaded until the
+command finishes:
 
 ```dotenv
 TG_HARVEST_VOSK_COMMAND=/usr/local/bin/vosk-transcribe
@@ -134,7 +136,7 @@ TG_HARVEST_RETENTION_DAYS=14
 `daily-doctor` reports `daily_ffmpeg_status`, `daily_vosk_command_status`, and
 `daily_vosk_model_status`. Vosk itself is CPU-based; `ffmpeg` handles audio extraction/conversion.
 Transcript cache is keyed by Telegram media id when available, so reruns skip already-transcribed
-audio/video without downloading it again.
+audio/video without downloading it again and do not start the Vosk worker for cache hits.
 
 A custom command-template hook can override Vosk; placeholders are shell-quoted by the CLI:
 
@@ -289,17 +291,35 @@ make fmt
 | `internal/harvest` | JSONL model, sync state, resumable backfill, compact views, daily Markdown, and agent views. |
 | `internal/runlock` | Per-session runtime lock. |
 
-## Vosk Runtime Options
+## Vosk Runtime
 
-The harvester calls an external `vosk-transcribe` command after `ffmpeg` has produced mono 16 kHz
-PCM WAV. Practical options:
+Daily transcription uses one session-scoped Vosk worker per `telegram-harvest daily` process. Harvest
+still converts each audio/video attachment with `ffmpeg`, but the Vosk command is started only on the
+first transcript cache miss and then receives JSONL requests on stdin. `TG_HARVEST_VOSK_COMMAND`
+must point to a helper that supports this protocol:
 
-| Runtime | Tradeoff |
-| --- | --- |
-| Native macOS helper | Best per-file latency after setup. Requires a macOS-compatible Vosk library and helper binary, or an official Python Vosk wrapper exposed through `TG_HARVEST_TRANSCRIBE_CMD`. |
-| Shelfy Docker runtime | Reuses Shelfy's Linux/cgo `vosk-transcribe` stack, but each short transcription pays Docker/container overhead unless a long-lived service is added. |
-| Custom command hook | Useful for `vosk-transcriber`, Whisper, or another local ASR; set `TG_HARVEST_TRANSCRIBE_CMD` and keep the same cache/delete behavior. |
+```text
+vosk-transcribe --session <model-dir> [grammar-json-path]
+{"id":1,"wav_path":"/tmp/.vosk-123.wav"}
+{"id":1,"text":"recognized text"}
+```
 
-For frequent daily runs, native macOS helper or a long-lived local ASR service is better than spawning
-Docker for every voice/video. Docker is acceptable for occasional checks, but startup and volume mounts
-will dominate short voice messages.
+This avoids loading the Vosk model for every short Telegram voice message while also avoiding a
+permanent local daemon. When all transcripts are already cached, no Vosk process is started.
+
+The current Russian model pool from Vosk is small:
+
+| Model | Published size | Practical use |
+| --- | ---: | --- |
+| `vosk-model-small-ru-0.22` | 45M | Default. Lightweight wideband Russian model used by Shelfy. |
+| `vosk-model-ru-0.42` | 1.8G | Larger server model to evaluate only if the small model is too inaccurate. |
+| `vosk-model-ru-0.22` | 1.5G | Older large Russian model. |
+| `vosk-model-ru-0.10` | 2.5G | Older narrowband Russian model. |
+| `vosk-recasepunc-ru-0.22` | 1.6G | Optional punctuation/case post-processing model, not part of the ASR default. |
+
+The checked Shelfy small model is larger after extraction than its download size; its metadata reports
+roughly `0.51-0.56 GiB` runtime memory. That is small enough for a local Mac session worker, but still
+large enough that per-file model startup should be avoided.
+
+`TG_HARVEST_TRANSCRIBE_CMD` remains an explicit override for non-Vosk ASR commands. Override commands
+run per attachment because they do not share the Vosk session protocol.
