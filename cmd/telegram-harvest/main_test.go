@@ -40,6 +40,9 @@ func TestDefaultProfileRouting(t *testing.T) {
 	if got := defaultProfileForCommand("sync"); got != "study" {
 		t.Fatalf("sync default profile = %s", got)
 	}
+	if got := defaultProfileForCommand("login"); got != "main" {
+		t.Fatalf("login default profile = %s", got)
+	}
 	command, profile, includeRuntime := normalizeCommandAlias("daily-login")
 	if command != "login" || profile != "main" || includeRuntime {
 		t.Fatalf("daily-login alias = command:%s profile:%s runtime:%t", command, profile, includeRuntime)
@@ -50,18 +53,18 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
 		"TG_HARVEST_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
-		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "user.json"),
+		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "study.json"),
 		"TG_HARVEST_STUDY_ALLOWED_CHATS": "12345,@study",
 		"TG_HARVEST_STUDY_HISTORY_LIMIT": "25",
 	}
-	code, stdout, stderr := runCommand(t, []string{"print-config"}, env)
+	code, stdout, stderr := runCommand(t, []string{"print-config", "--profile", "study"}, env)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	for _, want := range []string{
 		"profile=study",
 		"state_dir=" + filepath.Join(dir, "state"),
-		"session=" + filepath.Join(dir, "sessions", "user.json"),
+		"session=" + filepath.Join(dir, "sessions", "study.json"),
 		"allowed_chats=2",
 		"history_limit=25",
 	} {
@@ -77,7 +80,7 @@ func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 		"TG_HARVEST_APP_ID":          "77",
 		"TG_HARVEST_APP_HASH":        "daily-hash",
 		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "daily-state"),
-		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "daily-session.json"),
+		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
 		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
 		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
 		"TG_HARVEST_RETENTION_DAYS":  "10",
@@ -90,7 +93,7 @@ func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 		"profile=main",
 		"app_id_set=true",
 		"state_dir=" + filepath.Join(dir, "daily-state"),
-		"session=" + filepath.Join(dir, "daily-session.json"),
+		"session=" + filepath.Join(dir, "main-session.json"),
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("main print-config missing %q:\n%s", want, stdout)
@@ -104,7 +107,7 @@ func TestLegacyDailyConfigAliasUsesMainProfileAndRuntime(t *testing.T) {
 		"TG_HARVEST_APP_ID":          "77",
 		"TG_HARVEST_APP_HASH":        "daily-hash",
 		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "daily-state"),
-		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "daily-session.json"),
+		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
 		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
 		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
 		"TG_HARVEST_RETENTION_DAYS":  "10",
@@ -145,7 +148,7 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 	}, "\n")+"\n")
 	env := map[string]string{
 		"TG_HARVEST_STUDY_STATE_DIR":    stateDir,
-		"TG_HARVEST_STUDY_SESSION_PATH": filepath.Join(dir, "sessions", "user.json"),
+		"TG_HARVEST_STUDY_SESSION_PATH": filepath.Join(dir, "sessions", "study.json"),
 	}
 
 	code, stdout, stderr := runCommand(t, []string{"compact", "--in", "messages.jsonl", "--out", "messages.toon"}, env)
@@ -185,7 +188,7 @@ func TestRunReadCommandsRefuseChatsOutsideAllowlistBeforeRuntimeAccess(t *testin
 	dir := t.TempDir()
 	env := map[string]string{
 		"TG_HARVEST_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
-		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "user.json"),
+		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "study.json"),
 		"TG_HARVEST_STUDY_ALLOWED_CHATS": "12345",
 	}
 	for _, args := range [][]string{
@@ -247,7 +250,7 @@ func runCommand(t *testing.T, args []string, env map[string]string) (int, string
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "0")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "test-hash")
 	t.Setenv("TG_HARVEST_STUDY_STATE_DIR", filepath.Join(baseDir, "state"))
-	t.Setenv("TG_HARVEST_STUDY_SESSION_PATH", filepath.Join(baseDir, "sessions", "user.json"))
+	t.Setenv("TG_HARVEST_STUDY_SESSION_PATH", filepath.Join(baseDir, "sessions", "study.json"))
 	for key, value := range env {
 		t.Setenv(key, value)
 	}

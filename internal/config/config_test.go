@@ -144,7 +144,7 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 	valid := Config{
 		AppID:        1,
 		AppHash:      "hash",
-		SessionPath:  ".sessions/user.json",
+		SessionPath:  ".sessions/study.json",
 		StateDir:     ".state",
 		RPCSpacing:   time.Second,
 		BatchSize:    80,
@@ -182,10 +182,10 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 func TestWithRootAndRuntimeLockPath(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
-		SessionPath: ".sessions/user.json",
+		SessionPath: ".sessions/study.json",
 		StateDir:    ".state",
 	}.WithRoot(root)
-	if cfg.SessionPath != filepath.Join(root, ".sessions", "user.json") {
+	if cfg.SessionPath != filepath.Join(root, ".sessions", "study.json") {
 		t.Fatalf("unexpected session path: %s", cfg.SessionPath)
 	}
 	if cfg.StateDir != filepath.Join(root, ".state") {

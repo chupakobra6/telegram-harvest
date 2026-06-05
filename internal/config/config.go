@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	DefaultSessionPath      = ".sessions/user.json"
+	DefaultSessionPath      = ".sessions/study.json"
 	DefaultStateDir         = ".state"
-	DefaultDailySessionPath = ".sessions/daily.json"
+	DefaultDailySessionPath = ".sessions/main.json"
 	DefaultDailyStateDir    = ".state/daily"
 	DefaultRPCSpacingMS     = 1500
 	DefaultBatchSize        = 80
@@ -238,6 +238,9 @@ func (c Config) EnvNames(suffix string) string {
 }
 
 func (c Config) LoginCommand() string {
+	if c.Mode == ModeDaily {
+		return "telegram-harvest login"
+	}
 	return "telegram-harvest --profile " + ProfileName(c.Mode) + " login"
 }
 

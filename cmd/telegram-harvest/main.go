@@ -205,6 +205,10 @@ func defaultProfileForCommand(command string) string {
 	if isDailyCommand(command) {
 		return "main"
 	}
+	switch command {
+	case "login", "me", "doctor", "print-config":
+		return "main"
+	}
 	return "study"
 }
 
@@ -216,7 +220,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-harvest [--profile main|study] <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
-	fmt.Fprintln(out, "  --profile main|study  # account profile; defaults to main for daily*, study for study commands")
+	fmt.Fprintln(out, "  --profile main|study  # account profile; defaults to main for account/daily commands, study for study commands")
 	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")

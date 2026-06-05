@@ -49,8 +49,8 @@ chats read.
 cd telegram-harvest
 cp .env.example .env
 make setup
-go run ./cmd/telegram-harvest --profile main doctor
-go run ./cmd/telegram-harvest --profile main login
+go run ./cmd/telegram-harvest doctor
+go run ./cmd/telegram-harvest login
 ```
 
 For fresh main-profile login, create Telegram app credentials at <https://my.telegram.org>. For study
@@ -89,19 +89,19 @@ other commands; configure main app credentials from <https://my.telegram.org> wi
 TG_HARVEST_APP_ID=12345678
 TG_HARVEST_APP_HASH=your_main_account_app_hash
 TG_HARVEST_PHONE=+10000000000
-TG_HARVEST_SESSION_PATH=.sessions/daily.json
+TG_HARVEST_SESSION_PATH=.sessions/main.json
 TG_HARVEST_STATE_DIR=.state/daily
 ```
 
 `TG_HARVEST_SESSION_PATH` defaults to a dedicated main-account session. Study-mode Telegram Desktop
-imports default to `TG_HARVEST_STUDY_SESSION_PATH=.sessions/user.json`.
+imports default to `TG_HARVEST_STUDY_SESSION_PATH=.sessions/study.json`.
 
 Login and verify:
 
 ```bash
-go run ./cmd/telegram-harvest --profile main login
-go run ./cmd/telegram-harvest --profile main doctor
-go run ./cmd/telegram-harvest --profile main me
+go run ./cmd/telegram-harvest login
+go run ./cmd/telegram-harvest doctor
+go run ./cmd/telegram-harvest me
 ```
 
 Export a day. User-facing reports are written to the visible `reports/daily` directory in the project
