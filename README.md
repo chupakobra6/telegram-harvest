@@ -13,7 +13,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Область | Поведение |
 | --- | --- |
 | Авторизация | MTProto user session через `login` и явные API credentials для каждого профиля. |
-| Профили | `main` читает `TG_HARVEST_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей нет. |
+| Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей/env нет. |
 | Daily | Сканирует диалоги за один московский день и пишет только outgoing/self сообщения авторизованного аккаунта. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации. |
@@ -34,10 +34,10 @@ make test
 Заполнить `.env`:
 
 ```dotenv
-TG_HARVEST_APP_ID=12345678
-TG_HARVEST_APP_HASH=main_account_app_hash
+TG_HARVEST_DAILY_APP_ID=12345678
+TG_HARVEST_DAILY_APP_HASH=main_account_app_hash
 # Опционально: если не задано, `login` спросит номер интерактивно.
-# TG_HARVEST_PHONE=+10000000000
+# TG_HARVEST_DAILY_PHONE=+10000000000
 
 # Учебный аккаунт:
 TG_HARVEST_STUDY_APP_ID=12345678
@@ -161,12 +161,12 @@ make vosk-transcribe
 Ожидаемая настройка:
 
 ```dotenv
-TG_HARVEST_VOSK_COMMAND=bin/vosk-transcribe
-TG_HARVEST_VOSK_MODEL_PATH=models/vosk-model-small-ru-0.22
-TG_HARVEST_FFMPEG_COMMAND=ffmpeg
+TG_HARVEST_DAILY_VOSK_COMMAND=bin/vosk-transcribe
+TG_HARVEST_DAILY_VOSK_MODEL_PATH=models/vosk-model-small-ru-0.22
+TG_HARVEST_DAILY_FFMPEG_COMMAND=ffmpeg
 
 # Если libvosk не лежит в /opt/homebrew/lib или /usr/local/lib:
-TG_HARVEST_VOSK_LIBRARY_PATH=.state/vosk-runtime/libvosk.dylib
+TG_HARVEST_DAILY_VOSK_LIBRARY_PATH=.state/vosk-runtime/libvosk.dylib
 ```
 
 Worker protocol:
@@ -182,14 +182,14 @@ vosk-transcribe --session <model-dir> [grammar-json-path]
 Поддерживаемые настройки:
 
 ```dotenv
-TG_HARVEST_VOSK_GRAMMAR_PATH=
-TG_HARVEST_RETENTION_DAYS=14
+TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH=
+TG_HARVEST_DAILY_RETENTION_DAYS=14
 ```
 
 Кастомный ASR hook можно задать явно:
 
 ```dotenv
-TG_HARVEST_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
+TG_HARVEST_DAILY_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
 ```
 
 Такой hook запускается per attachment и не использует Vosk session protocol.

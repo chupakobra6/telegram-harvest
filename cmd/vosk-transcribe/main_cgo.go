@@ -320,7 +320,7 @@ func voskLibraryCandidates() []string {
 		seen[path] = true
 		candidates = append(candidates, path)
 	}
-	add(os.Getenv("TG_HARVEST_VOSK_LIBRARY_PATH"))
+	add(os.Getenv("TG_HARVEST_DAILY_VOSK_LIBRARY_PATH"))
 	add(os.Getenv("VOSK_LIBRARY_PATH"))
 	switch runtime.GOOS {
 	case "darwin":

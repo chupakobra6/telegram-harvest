@@ -83,13 +83,13 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
-		"TG_HARVEST_APP_ID":          "77",
-		"TG_HARVEST_APP_HASH":        "main-hash",
-		"TG_HARVEST_STATE_DIR":       filepath.Join(dir, "main-state"),
-		"TG_HARVEST_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
-		"TG_HARVEST_VOSK_COMMAND":    "/tmp/vosk-transcribe",
-		"TG_HARVEST_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
-		"TG_HARVEST_RETENTION_DAYS":  "10",
+		"TG_HARVEST_DAILY_APP_ID":          "77",
+		"TG_HARVEST_DAILY_APP_HASH":        "main-hash",
+		"TG_HARVEST_DAILY_STATE_DIR":       filepath.Join(dir, "main-state"),
+		"TG_HARVEST_DAILY_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
+		"TG_HARVEST_DAILY_VOSK_COMMAND":    "/tmp/vosk-transcribe",
+		"TG_HARVEST_DAILY_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
+		"TG_HARVEST_DAILY_RETENTION_DAYS":  "10",
 	}
 	code, stdout, stderr := runCommand(t, []string{"print-config", "--profile", "main"}, env)
 	if code != 0 {
@@ -247,7 +247,7 @@ func runCommand(t *testing.T, args []string, env map[string]string) (int, string
 func clearCommandEnv(t *testing.T) {
 	t.Helper()
 	prefixes := []string{
-		"TG_HARVEST_",
+		"TG_HARVEST_DAILY_",
 		"TG_HARVEST_STUDY_",
 	}
 	suffixes := []string{
@@ -267,6 +267,7 @@ func clearCommandEnv(t *testing.T) {
 		"VOSK_COMMAND",
 		"VOSK_MODEL_PATH",
 		"VOSK_GRAMMAR_PATH",
+		"VOSK_LIBRARY_PATH",
 		"FFMPEG_COMMAND",
 		"RETENTION_DAYS",
 	}

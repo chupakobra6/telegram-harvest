@@ -129,7 +129,7 @@ func envKeys(mode Mode, suffix string) []string {
 	switch mode {
 	case ModeMain:
 		return []string{
-			"TG_HARVEST_" + suffix,
+			"TG_HARVEST_DAILY_" + suffix,
 		}
 	default:
 		return []string{
@@ -142,7 +142,7 @@ func displayEnvKeys(mode Mode, suffix string) []string {
 	switch mode {
 	case ModeMain:
 		return []string{
-			"TG_HARVEST_" + suffix,
+			"TG_HARVEST_DAILY_" + suffix,
 		}
 	default:
 		return envKeys(mode, suffix)

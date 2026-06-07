@@ -52,9 +52,6 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return printError(stderr, 1, err)
 	}
 	if profile == "" {
-		profile = firstEnvValue("TG_HARVEST_PROFILE")
-	}
-	if profile == "" {
 		profile = defaultProfileForCommand(command)
 	}
 	cfg, err := loadProfileConfig(profile)
@@ -1089,7 +1086,7 @@ func parseDailyDate(value string, now time.Time) (string, time.Time, time.Time, 
 }
 
 func dailyDialogLimitDefault() int {
-	if value, ok := intEnvValue("TG_HARVEST_DIALOG_LIMIT"); ok && value > 0 {
+	if value, ok := intEnvValue("TG_HARVEST_DAILY_DIALOG_LIMIT"); ok && value > 0 {
 		return value
 	}
 	return 500
@@ -1116,8 +1113,8 @@ type dailyRuntimeConfig struct {
 }
 
 func dailyRuntimeDefaults() dailyRuntimeConfig {
-	transcribeCommand := firstEnvValue("TG_HARVEST_TRANSCRIBE_CMD")
-	voskCommand := firstEnvValue("TG_HARVEST_VOSK_COMMAND")
+	transcribeCommand := firstEnvValue("TG_HARVEST_DAILY_TRANSCRIBE_CMD")
+	voskCommand := firstEnvValue("TG_HARVEST_DAILY_VOSK_COMMAND")
 	if voskCommand == "" {
 		if candidate := defaultLocalVoskCommandPath(); candidate != "" {
 			voskCommand = candidate
@@ -1125,18 +1122,18 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 			voskCommand = resolved
 		}
 	}
-	voskModelPath := firstEnvValue("TG_HARVEST_VOSK_MODEL_PATH")
+	voskModelPath := firstEnvValue("TG_HARVEST_DAILY_VOSK_MODEL_PATH")
 	if voskModelPath == "" {
 		if candidate := defaultLocalVoskModelPath(); candidate != "" {
 			voskModelPath = candidate
 		}
 	}
-	ffmpegCommand := firstEnvValue("TG_HARVEST_FFMPEG_COMMAND")
+	ffmpegCommand := firstEnvValue("TG_HARVEST_DAILY_FFMPEG_COMMAND")
 	if ffmpegCommand == "" {
 		ffmpegCommand = transcribe.DefaultFFmpegCommand
 	}
 	retainDays := harvest.DefaultDailyRetentionDays
-	if value, ok := intEnvValue("TG_HARVEST_RETENTION_DAYS"); ok {
+	if value, ok := intEnvValue("TG_HARVEST_DAILY_RETENTION_DAYS"); ok {
 		retainDays = value
 	}
 	return dailyRuntimeConfig{
@@ -1144,7 +1141,7 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 		TranscribeCommand: transcribeCommand,
 		VoskCommand:       voskCommand,
 		VoskModelPath:     voskModelPath,
-		VoskGrammarPath:   firstEnvValue("TG_HARVEST_VOSK_GRAMMAR_PATH"),
+		VoskGrammarPath:   firstEnvValue("TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH"),
 		FFmpegCommand:     ffmpegCommand,
 		RetainDays:        retainDays,
 	}

@@ -32,13 +32,15 @@ func TestLoadUsesStudyEnv(t *testing.T) {
 	}
 }
 
-func TestLoadMainUsesHarvestEnvAndDefaults(t *testing.T) {
+func TestLoadMainUsesDailyEnvAndDefaults(t *testing.T) {
 	clearTelegramConfigEnv(t)
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
-	t.Setenv("TG_HARVEST_APP_ID", "77")
-	t.Setenv("TG_HARVEST_APP_HASH", "main-hash")
-	t.Setenv("TG_HARVEST_PHONE", "+200")
+	t.Setenv("TG_HARVEST_APP_ID", "999")
+	t.Setenv("TG_HARVEST_APP_HASH", "legacy-hash")
+	t.Setenv("TG_HARVEST_DAILY_APP_ID", "77")
+	t.Setenv("TG_HARVEST_DAILY_APP_HASH", "main-hash")
+	t.Setenv("TG_HARVEST_DAILY_PHONE", "+200")
 
 	cfg, err := LoadMain()
 	if err != nil {
@@ -58,12 +60,29 @@ func TestLoadMainUsesHarvestEnvAndDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadMainIgnoresUnscopedHarvestEnv(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	t.Setenv("TG_HARVEST_APP_ID", "77")
+	t.Setenv("TG_HARVEST_APP_HASH", "legacy-hash")
+
+	cfg, err := LoadMain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppID != 0 || cfg.AppHash != "" {
+		t.Fatalf("legacy env leaked into daily profile: %+v", cfg)
+	}
+	if err := cfg.ValidateRuntime(); err == nil {
+		t.Fatalf("expected missing TG_HARVEST_DAILY_* validation error")
+	}
+}
+
 func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
-	t.Setenv("TG_HARVEST_APP_ID", "77")
-	t.Setenv("TG_HARVEST_APP_HASH", "main-hash")
+	t.Setenv("TG_HARVEST_DAILY_APP_ID", "77")
+	t.Setenv("TG_HARVEST_DAILY_APP_HASH", "main-hash")
 
 	study, err := LoadProfile("study")
 	if err != nil {
@@ -222,7 +241,7 @@ func TestLoadDotEnvReportsMalformedLines(t *testing.T) {
 func clearTelegramConfigEnv(t *testing.T) {
 	t.Helper()
 	prefixes := []string{
-		"TG_HARVEST_",
+		"TG_HARVEST_DAILY_",
 		"TG_HARVEST_STUDY_",
 	}
 	suffixes := []string{
@@ -237,7 +256,6 @@ func clearTelegramConfigEnv(t *testing.T) {
 		"HISTORY_BATCH_SIZE",
 		"HISTORY_LIMIT",
 		"MAX_BATCHES",
-		"PROFILE",
 	}
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {
