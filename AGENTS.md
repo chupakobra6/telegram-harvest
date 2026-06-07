@@ -17,17 +17,17 @@
 - Install/update dependencies: `go mod tidy`
 - Format: `gofmt -w ./cmd ./internal`
 - Tests: `go test ./...`
-- Doctor: `go run ./cmd/telegram-harvest doctor`
-- Login: `go run ./cmd/telegram-harvest login`
-- Daily outgoing harvest: `go run ./cmd/telegram-harvest daily --date yesterday`
-- List chats: `go run ./cmd/telegram-harvest chats --query вшэ`
-- List forum topics: `go run ./cmd/telegram-harvest topics --chat <forum-id-or-username>`
-- Dump chat: `go run ./cmd/telegram-harvest dump --chat <id-or-username> --out .state/chat.jsonl`
-- Start full sync: `go run ./cmd/telegram-harvest sync --chat <id-or-username> --name hse-main --all --reset --batch-size 100`
+- Doctor: `go run ./cmd/telegram-harvest --profile <main|study> doctor`
+- Login: `go run ./cmd/telegram-harvest --profile <main|study> login`
+- Daily outgoing harvest: `go run ./cmd/telegram-harvest --profile main daily --date yesterday`
+- List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
+- List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
+- Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out .state/chat.jsonl`
+- Start full sync: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset --batch-size 100`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
-- Incremental sync after full sync completion: `go run ./cmd/telegram-harvest sync --chat <id-or-username> --name hse-main`
-- Compact agent view: `go run ./cmd/telegram-harvest compact --in messages.jsonl --out messages.toon`
-- Markdown navigation for agents: `go run ./cmd/telegram-harvest agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
+- Incremental sync after full sync completion: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
+- Compact agent view: `go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
+- Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.
@@ -39,6 +39,7 @@
 - Keep generated `agent-view/AGENTS.md` and `agent-view/README.md` aligned whenever changing the agent read path; they are the agent-facing navigation source of truth.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
 - Main profile uses `TG_HARVEST_DAILY_*`. Study profile uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
+- CLI commands must receive `--profile main|study`; do not add command-based profile defaults or profile env fallbacks.
 - Both profiles use explicit Telegram API credentials and CLI `login`; do not read or import Telegram Desktop `tdata`.
 - Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.

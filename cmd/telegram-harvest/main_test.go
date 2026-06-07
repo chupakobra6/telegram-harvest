@@ -19,6 +19,7 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"download-media --chat",
 		"daily-download-media --chat",
 		"--profile main|study",
+		"required account profile",
 		"Telegram operations are read-only",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -40,18 +41,13 @@ func TestRunRejectsTelegramDesktopImportCommand(t *testing.T) {
 	}
 }
 
-func TestDefaultProfileRouting(t *testing.T) {
-	if got := defaultProfileForCommand("daily"); got != "main" {
-		t.Fatalf("daily default profile = %s", got)
+func TestRunRequiresExplicitProfile(t *testing.T) {
+	code, _, stderr := runCommand(t, []string{"doctor"}, nil)
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	if got := defaultProfileForCommand("daily-download-media"); got != "main" {
-		t.Fatalf("daily-download-media default profile = %s", got)
-	}
-	if got := defaultProfileForCommand("sync"); got != "study" {
-		t.Fatalf("sync default profile = %s", got)
-	}
-	if got := defaultProfileForCommand("login"); got != "main" {
-		t.Fatalf("login default profile = %s", got)
+	if !strings.Contains(stderr, "--profile main|study is required") {
+		t.Fatalf("missing profile error: %s", stderr)
 	}
 }
 
@@ -129,7 +125,7 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 		"TG_HARVEST_STUDY_SESSION_PATH": filepath.Join(dir, "sessions", "study.json"),
 	}
 
-	code, stdout, stderr := runCommand(t, []string{"compact", "--in", "messages.jsonl", "--out", "messages.toon"}, env)
+	code, stdout, stderr := runCommand(t, []string{"--profile", "study", "compact", "--in", "messages.jsonl", "--out", "messages.toon"}, env)
 	if code != 0 {
 		t.Fatalf("compact code=%d stderr=%s", code, stderr)
 	}
@@ -141,7 +137,7 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 		t.Fatalf("compact output missing records:\n%s", toon)
 	}
 
-	code, stdout, stderr = runCommand(t, []string{"agent-view", "--in", "messages.jsonl", "--out-dir", "agent-view", "--recent", "5"}, env)
+	code, stdout, stderr = runCommand(t, []string{"--profile", "study", "agent-view", "--in", "messages.jsonl", "--out-dir", "agent-view", "--recent", "5"}, env)
 	if code != 0 {
 		t.Fatalf("agent-view code=%d stderr=%s", code, stderr)
 	}
@@ -153,7 +149,7 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 		t.Fatalf("agent-view index missing summary:\n%s", index)
 	}
 
-	code, stdout, stderr = runCommand(t, []string{"agent-view", "--in", "messages.jsonl", "--out-dir", "agent-view", "--recent", "5"}, env)
+	code, stdout, stderr = runCommand(t, []string{"--profile", "study", "agent-view", "--in", "messages.jsonl", "--out-dir", "agent-view", "--recent", "5"}, env)
 	if code != 0 {
 		t.Fatalf("agent-view noop code=%d stderr=%s", code, stderr)
 	}
@@ -170,10 +166,10 @@ func TestRunReadCommandsRefuseChatsOutsideAllowlistBeforeRuntimeAccess(t *testin
 		"TG_HARVEST_STUDY_ALLOWED_CHATS": "12345",
 	}
 	for _, args := range [][]string{
-		{"topics", "--chat", "999"},
-		{"dump", "--chat", "999", "--out", "x.jsonl"},
-		{"sync", "--chat", "999", "--name", "x"},
-		{"download-media", "--chat", "999", "--message-id", "1"},
+		{"--profile", "study", "topics", "--chat", "999"},
+		{"--profile", "study", "dump", "--chat", "999", "--out", "x.jsonl"},
+		{"--profile", "study", "sync", "--chat", "999", "--name", "x"},
+		{"--profile", "study", "download-media", "--chat", "999", "--message-id", "1"},
 	} {
 		code, _, stderr := runCommand(t, args, env)
 		if code != 1 {

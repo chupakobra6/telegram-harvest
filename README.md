@@ -51,9 +51,9 @@ Telegram app credentials создаются на <https://my.telegram.org>. Се
 Логин основного аккаунта:
 
 ```bash
-make login
-make doctor
-go run ./cmd/telegram-harvest me
+make login PROFILE=main
+make doctor PROFILE=main
+go run ./cmd/telegram-harvest --profile main me
 ```
 
 Логин учебного аккаунта через API credentials:
@@ -64,28 +64,21 @@ make doctor PROFILE=study
 go run ./cmd/telegram-harvest --profile study me
 ```
 
-## Профили и дефолты
+## Профили
 
-Глобальный флаг:
+Профиль всегда указывается явно. CLI не выбирает аккаунт по команде и не имеет дефолтного аккаунта.
 
 ```bash
 go run ./cmd/telegram-harvest --profile main  <command>
 go run ./cmd/telegram-harvest --profile study <command>
 ```
 
-Если `--profile` не указан, CLI выбирает профиль по команде:
-
-| Команды | Дефолтный профиль |
-| --- | --- |
-| `login`, `doctor`, `print-config`, `me` | `main` |
-| `daily`, `daily-download-media` | `main` |
-| `chats`, `topics`, `dump`, `sync`, `download-media`, `compact`, `agent-view` | `study` |
-
-Makefile повторяет эту модель: `make daily`, `make login`, `make chats` используют CLI-дефолты. Для явного выбора добавляй один и тот же параметр:
+Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study`.
 
 ```bash
+make doctor PROFILE=main
 make doctor PROFILE=study
-make daily DATE=2026-06-04 PROFILE=main
+make daily PROFILE=main DATE=2026-06-04
 make sync CHAT=1234567890 NAME=study-main PROFILE=study
 ```
 
@@ -94,14 +87,14 @@ make sync CHAT=1234567890 NAME=study-main PROFILE=study
 Один день:
 
 ```bash
-make daily DATE=yesterday
-make daily DATE=2026-06-04
+make daily PROFILE=main DATE=yesterday
+make daily PROFILE=main DATE=2026-06-04
 ```
 
 То же напрямую через CLI:
 
 ```bash
-go run ./cmd/telegram-harvest daily --date 2026-06-04
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04
 ```
 
 Выходные файлы по умолчанию:
@@ -120,11 +113,11 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 Полезные флаги:
 
 ```bash
-go run ./cmd/telegram-harvest daily --date 2026-06-04 --progress
-go run ./cmd/telegram-harvest daily --date 2026-06-04 --download-media=false
-go run ./cmd/telegram-harvest daily --date 2026-06-04 --transcribe=false
-go run ./cmd/telegram-harvest daily --date 2026-06-04 --retain-days 0
-go run ./cmd/telegram-harvest daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --progress
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --retain-days 0
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
 Daily retention по умолчанию хранит 14 дней state-артефактов. `--retain-days 0` отключает pruning для конкретного запуска.
@@ -143,7 +136,7 @@ Daily retention по умолчанию хранит 14 дней state-арте�
 Если файл выше лимита, JSONL сохраняет `download_error` и `download_hint`, а Markdown остается чистым пользовательским отчетом. Ручное скачивание делается отдельной командой и лимиты не применяет:
 
 ```bash
-go run ./cmd/telegram-harvest daily-download-media \
+go run ./cmd/telegram-harvest --profile main daily-download-media \
   --chat 1234567890 \
   --message-id 777 \
   --index 1 \
@@ -213,7 +206,7 @@ Daily пропускает per-chat history/search для чатов, где п�
 Сначала посмотреть доступные чаты:
 
 ```bash
-make chats QUERY=вшэ
+make chats PROFILE=study QUERY=вшэ
 ```
 
 Если `TG_HARVEST_STUDY_ALLOWED_CHATS` задан, `chats`, `topics`, `dump` и `sync` работают только в этом scope.
@@ -221,7 +214,7 @@ make chats QUERY=вшэ
 Полная выгрузка:
 
 ```bash
-go run ./cmd/telegram-harvest sync \
+go run ./cmd/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --all \
@@ -234,7 +227,7 @@ go run ./cmd/telegram-harvest sync \
 Resume после interruption:
 
 ```bash
-go run ./cmd/telegram-harvest sync \
+go run ./cmd/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --all \
@@ -245,7 +238,7 @@ go run ./cmd/telegram-harvest sync \
 Обычный incremental sync:
 
 ```bash
-go run ./cmd/telegram-harvest sync \
+go run ./cmd/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --merged-out messages.jsonl
@@ -269,9 +262,9 @@ Study `dump`/`sync` не транскрибируют audio/video. Они сох
 JSONL - canonical lossless source. Markdown/TOON - производные представления, их можно пересобрать:
 
 ```bash
-go run ./cmd/telegram-harvest agent-view --in messages.jsonl --out-dir agent-view
-go run ./cmd/telegram-harvest compact --in messages.jsonl --out messages.toon
-make refresh-agent-view
+go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view
+go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon
+make refresh-agent-view PROFILE=study
 ```
 
 Обычный путь чтения для агента:
@@ -290,7 +283,7 @@ make fmt
 make test
 make vosk-transcribe
 go run ./cmd/telegram-harvest --help
-go run ./cmd/telegram-harvest daily --help
+go run ./cmd/telegram-harvest --profile main daily --help
 ```
 
 ## Структура

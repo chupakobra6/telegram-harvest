@@ -46,13 +46,18 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 0
 	}
 	command := args[0]
+	if !knownCommand(command) {
+		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
+		printUsage(stderr)
+		return 2
+	}
+	if strings.TrimSpace(profile) == "" {
+		return printError(stderr, 2, fmt.Errorf("--profile main|study is required"))
+	}
 	includeDailyRuntime := command == "daily"
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
 		return printError(stderr, 1, err)
-	}
-	if profile == "" {
-		profile = defaultProfileForCommand(command)
 	}
 	cfg, err := loadProfileConfig(profile)
 	if err != nil {
@@ -132,6 +137,16 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	}
 }
 
+func knownCommand(command string) bool {
+	switch command {
+	case "print-config", "doctor", "login", "daily", "daily-download-media",
+		"me", "chats", "topics", "dump", "download-media", "sync", "compact", "agent-view":
+		return true
+	default:
+		return false
+	}
+}
+
 func extractProfileArg(args []string) (string, []string, error) {
 	result := make([]string, 0, len(args))
 	profile := ""
@@ -168,26 +183,11 @@ func loadProfileConfig(profile string) (config.Config, error) {
 	return config.LoadProfile(profile)
 }
 
-func isDailyCommand(command string) bool {
-	return command == "daily" || command == "daily-download-media"
-}
-
-func defaultProfileForCommand(command string) string {
-	if isDailyCommand(command) {
-		return "main"
-	}
-	switch command {
-	case "login", "me", "doctor", "print-config":
-		return "main"
-	}
-	return "study"
-}
-
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-harvest [--profile main|study] <help|doctor|print-config|login|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest --profile main|study <doctor|print-config|login|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
-	fmt.Fprintln(out, "  --profile main|study  # account profile; defaults to main for account/daily commands, study for study commands")
+	fmt.Fprintln(out, "  --profile main|study  # required account profile")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
