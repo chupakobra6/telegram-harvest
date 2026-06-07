@@ -79,6 +79,7 @@ Makefile повторяет эту модель: команды, которые 
 make doctor PROFILE=main
 make doctor PROFILE=study
 make daily PROFILE=main DATE=2026-06-04
+make daily-catchup PROFILE=main
 make sync CHAT=1234567890 NAME=study-main PROFILE=study
 ```
 
@@ -116,11 +117,21 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --progress
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --retain-days 0
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
-Daily pruning по умолчанию выключен, чтобы исторические отчеты не удалялись неожиданно. Для явной чистки передай `--retain-days N` в конкретном запуске.
+Актуализировать отчеты одной командой:
+
+```bash
+make daily-catchup PROFILE=main
+go run ./cmd/telegram-harvest --profile main daily-catchup
+```
+
+`daily-catchup` смотрит последние Markdown-отчеты в `reports/daily`, берет день после самого свежего `YYYY-MM-DD.md` и строит все недостающие отчеты до текущей даты не включительно. Если сегодня 2026-06-07, а последний отчет 2026-06-02, команда построит 2026-06-03 ... 2026-06-06. Существующие Markdown-отчеты не перезаписываются. Для первого catch-up без предыдущих отчетов передай явный старт:
+
+```bash
+go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
+```
 
 ## Telegram pacing
 
@@ -131,7 +142,6 @@ Daily pruning по умолчанию выключен, чтобы истори�
 | RPC spacing | 700 ms | Перенесено из Telegram E2E Test Tool как рабочий read-only pacing. |
 | History batch size | 100 | Кодовый cap для одного Telegram history/search request. |
 | Default history limit | 100 | Обычный `dump`/incremental `sync` читает один batch; полный backfill делается через `--all`. |
-| Daily retention | 0 | Auto-prune выключен; чистка только через явный `--retain-days N`. |
 
 `FLOOD_WAIT` обрабатывается внутри MTProto слоя: инструмент записывает flood event, ждёт Telegram delay, сдвигает следующий RPC слот и ретраит ограниченное число раз.
 
@@ -294,6 +304,7 @@ make test
 make vosk-transcribe
 go run ./cmd/telegram-harvest --help
 go run ./cmd/telegram-harvest --profile main daily --help
+go run ./cmd/telegram-harvest --profile main daily-catchup --help
 ```
 
 ## Структура
@@ -304,7 +315,7 @@ go run ./cmd/telegram-harvest --profile main daily --help
 | `cmd/vosk-transcribe` | Go/cgo Vosk helper с one-shot и session режимами. |
 | `internal/config` | `.env`, профили, defaults, allowlist и runtime paths. |
 | `internal/mtproto` | Telegram transport, login, dialogs/history/topics/daily reads. |
-| `internal/harvest` | JSONL model, sync state, daily Markdown, media retention, compact и agent views. |
+| `internal/harvest` | JSONL model, sync state, daily Markdown, compact и agent views. |
 | `internal/transcribe` | ffmpeg conversion, Vosk session runner, custom command hook. |
 | `internal/runlock` | Per-session lock, чтобы не запускать два MTProto процесса на одну session file. |
 | `reports/daily` | Локальные Markdown-отчеты для пользователя, ignored by git. |

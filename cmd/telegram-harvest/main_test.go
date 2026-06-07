@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/config"
 )
 
 func TestRunHelpPrintsCommands(t *testing.T) {
@@ -17,6 +19,7 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"agent-view",
 		"compact",
 		"download-media --chat",
+		"daily-catchup",
 		"daily-download-media --chat",
 		"--profile main|study",
 		"required account profile",
@@ -212,6 +215,81 @@ func TestParseDailyDateSupportsRelativeDays(t *testing.T) {
 	if end.Sub(start) != 24*time.Hour {
 		t.Fatalf("end-start=%s", end.Sub(start))
 	}
+}
+
+func TestBuildDailyCatchupPlanStartsAfterLatestReportAndSkipsToday(t *testing.T) {
+	root := t.TempDir()
+	reportDir := filepath.Join(root, "reports", "daily")
+	mustWriteCLIFile(t, filepath.Join(reportDir, "2026-06-02.md"), "done")
+	mustWriteCLIFile(t, filepath.Join(reportDir, "2026-06-07.md"), "today partial")
+	cfg := configForCatchup(root)
+
+	plan, err := buildDailyCatchupPlan(cfg, reportDir, "", time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.LastReport != "2026-06-02" || plan.Today != "2026-06-07" {
+		t.Fatalf("unexpected plan labels: %+v", plan)
+	}
+	got := dailyJobDates(plan.Jobs)
+	want := []string{"2026-06-03", "2026-06-04", "2026-06-05", "2026-06-06"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("jobs=%v want=%v", got, want)
+	}
+	for _, job := range plan.Jobs {
+		if job.MarkdownPath != filepath.Join(reportDir, job.Date+".md") {
+			t.Fatalf("markdown path for %s = %s", job.Date, job.MarkdownPath)
+		}
+		if !strings.HasSuffix(job.OutputPath, filepath.Join(".state", "daily", "jsonl", job.Date+".jsonl")) {
+			t.Fatalf("jsonl path for %s = %s", job.Date, job.OutputPath)
+		}
+	}
+}
+
+func TestBuildDailyCatchupPlanSkipsExistingReportsFromManualStart(t *testing.T) {
+	root := t.TempDir()
+	reportDir := filepath.Join(root, "reports", "daily")
+	mustWriteCLIFile(t, filepath.Join(reportDir, "2026-06-04.md"), "done")
+	cfg := configForCatchup(root)
+
+	plan, err := buildDailyCatchupPlan(cfg, reportDir, "2026-06-03", time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dailyJobDates(plan.Jobs)
+	want := []string{"2026-06-03", "2026-06-05", "2026-06-06"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("jobs=%v want=%v", got, want)
+	}
+	if strings.Join(plan.Skipped, ",") != "2026-06-04" {
+		t.Fatalf("skipped=%v", plan.Skipped)
+	}
+}
+
+func TestBuildDailyCatchupPlanRequiresManualStartWithoutReports(t *testing.T) {
+	root := t.TempDir()
+	cfg := configForCatchup(root)
+	_, err := buildDailyCatchupPlan(cfg, filepath.Join(root, "reports", "daily"), "", time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected missing report error")
+	}
+	if !strings.Contains(err.Error(), "--from YYYY-MM-DD") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func configForCatchup(root string) config.Config {
+	return config.Config{
+		StateDir: filepath.Join(root, ".state", "daily"),
+	}
+}
+
+func dailyJobDates(jobs []dailyJob) []string {
+	dates := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		dates = append(dates, job.Date)
+	}
+	return dates
 }
 
 func runCommand(t *testing.T, args []string, env map[string]string) (int, string, string) {

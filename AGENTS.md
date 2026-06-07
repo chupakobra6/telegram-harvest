@@ -20,6 +20,7 @@
 - Doctor: `go run ./cmd/telegram-harvest --profile <main|study> doctor`
 - Login: `go run ./cmd/telegram-harvest --profile <main|study> login`
 - Daily outgoing harvest: `go run ./cmd/telegram-harvest --profile main daily --date yesterday`
+- Daily catch-up through yesterday: `go run ./cmd/telegram-harvest --profile main daily-catchup`
 - List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
 - List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
 - Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out .state/chat.jsonl`

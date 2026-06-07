@@ -10,7 +10,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt test vosk-transcribe doctor login daily daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup fmt test vosk-transcribe doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -21,6 +21,7 @@ help:
 	@printf "  make doctor PROFILE=main|study # show config/session status\\n"
 	@printf "  make login PROFILE=main|study  # create MTProto user session\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # export outgoing/self messages\\n"
+	@printf "  make daily-catchup PROFILE=main # generate missing reports through yesterday\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make chats PROFILE=study # list dialogs; pass QUERY='вшэ' to filter\\n"
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
@@ -54,7 +55,11 @@ login:
 
 daily:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) daily --date "$(or $(DATE),today)" $(if $(strip $(OUT)),--out "$(OUT)",) $(if $(strip $(MARKDOWN_OUT)),--markdown-out "$(MARKDOWN_OUT)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(RETAIN_DAYS)),--retain-days "$(RETAIN_DAYS)",) $(if $(strip $(PROGRESS)),--progress,)
+	$(CLI) $(PROFILE_ARG) daily --date "$(or $(DATE),today)" $(if $(strip $(OUT)),--out "$(OUT)",) $(if $(strip $(MARKDOWN_OUT)),--markdown-out "$(MARKDOWN_OUT)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(PROGRESS)),--progress,)
+
+daily-catchup:
+	$(REQUIRE_PROFILE)
+	$(CLI) $(PROFILE_ARG) daily-catchup $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(REPORT_DIR)),--report-dir "$(REPORT_DIR)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(PROGRESS)),--progress,)
 
 daily-download-media:
 	$(REQUIRE_PROFILE)
