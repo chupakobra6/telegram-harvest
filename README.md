@@ -120,7 +120,20 @@ go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --retain-da
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
-Daily retention по умолчанию хранит 14 дней state-артефактов. `--retain-days 0` отключает pruning для конкретного запуска.
+Daily pruning по умолчанию выключен, чтобы исторические отчеты не удалялись неожиданно. Для явной чистки передай `--retain-days N` в конкретном запуске.
+
+## Telegram pacing
+
+Ограничения чтения Telegram не настраиваются через `.env`. Они живут в коде:
+
+| Параметр | Значение | Причина |
+| --- | ---: | --- |
+| RPC spacing | 700 ms | Перенесено из Telegram E2E Test Tool как рабочий read-only pacing. |
+| History batch size | 100 | Кодовый cap для одного Telegram history/search request. |
+| Default history limit | 100 | Обычный `dump`/incremental `sync` читает один batch; полный backfill делается через `--all`. |
+| Daily retention | 0 | Auto-prune выключен; чистка только через явный `--retain-days N`. |
+
+`FLOOD_WAIT` обрабатывается внутри MTProto слоя: инструмент записывает flood event, ждёт Telegram delay, сдвигает следующий RPC слот и ретраит ограниченное число раз.
 
 ## Медиа и лимиты
 
@@ -176,7 +189,6 @@ vosk-transcribe --session <model-dir> [grammar-json-path]
 
 ```dotenv
 TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH=
-TG_HARVEST_DAILY_RETENTION_DAYS=14
 ```
 
 Кастомный ASR hook можно задать явно:
@@ -220,7 +232,6 @@ go run ./cmd/telegram-harvest --profile study sync \
   --all \
   --reset \
   --reset-merged \
-  --batch-size 100 \
   --merged-out messages.jsonl
 ```
 
@@ -231,7 +242,6 @@ go run ./cmd/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --all \
-  --batch-size 100 \
   --merged-out messages.jsonl
 ```
 

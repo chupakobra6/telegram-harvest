@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const DefaultDailyRetentionDays = 14
+const DefaultDailyRetentionDays = 0
 
 type DailyRetentionOptions struct {
 	StateDir   string

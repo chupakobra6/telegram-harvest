@@ -55,15 +55,25 @@ type AuthStatus struct {
 	Authorized bool
 }
 
+type FloodEvent struct {
+	At        time.Time     `json:"at"`
+	Operation string        `json:"operation"`
+	Kind      string        `json:"kind"`
+	Delay     time.Duration `json:"delay,omitempty"`
+	Error     string        `json:"error,omitempty"`
+}
+
 type Session struct {
 	client     *telegram.Client
 	raw        *tg.Client
 	rpcSpacing time.Duration
 
-	mu          sync.Mutex
-	nextRPCAt   time.Time
-	floodWaits  int
-	dialogCache map[string]resolvedTarget
+	mu              sync.Mutex
+	nextRPCAt       time.Time
+	floodWaits      int
+	transportFloods int
+	floodEvents     []FloodEvent
+	dialogCache     map[string]resolvedTarget
 }
 
 type DownloadMediaOptions struct {
@@ -85,6 +95,10 @@ type resolvedTarget struct {
 
 func New(cfg config.Config) *Client {
 	return &Client{cfg: cfg}
+}
+
+func DefaultDailyDialogLimit() int {
+	return defaultDailyDialogLimit
 }
 
 func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
@@ -764,8 +778,8 @@ func normalizeHistoryOptions(opts harvest.HistoryOptions) harvest.HistoryOptions
 	if opts.BatchSize > 100 {
 		opts.BatchSize = 100
 	}
-	if opts.MaxBatches <= 0 && !opts.All {
-		opts.MaxBatches = config.DefaultMaxBatches
+	if opts.MaxBatches < 0 {
+		opts.MaxBatches = 0
 	}
 	return opts
 }
@@ -781,7 +795,7 @@ func normalizeOutgoingDayOptions(opts harvest.OutgoingDayOptions) harvest.Outgoi
 		opts.History.BatchSize = 100
 	}
 	if opts.History.MaxBatches < 0 {
-		opts.History.MaxBatches = config.DefaultMaxBatches
+		opts.History.MaxBatches = 0
 	}
 	return opts
 }
@@ -1135,28 +1149,14 @@ func (s *Session) performRPC(ctx context.Context, operation string, fn func(cont
 		defer cancel()
 		return fn(callCtx)
 	}
-	var lastErr error
-	for attemptNo := 0; attemptNo < maxFloodWaitRetries; attemptNo++ {
-		if attemptNo > 0 {
-			delay, ok := floodWaitDelay(lastErr)
-			if !ok {
-				break
-			}
-			s.noteFloodWait()
-			if err := sleepContext(ctx, delay+s.rpcSpacing); err != nil {
-				return err
-			}
-		}
-		if err := attempt(); err != nil {
-			lastErr = err
-			if _, ok := floodWaitDelay(err); ok && attemptNo < maxFloodWaitRetries-1 {
-				continue
-			}
-			return err
-		}
-		return nil
+	err := withFloodWaitRetrySleep(ctx, func(ctx context.Context, delay time.Duration) error {
+		s.noteFloodWait(operation, delay)
+		return sleepContext(ctx, delay)
+	}, attempt)
+	if isTransportFlood(err) {
+		s.noteTransportFlood(operation, err)
 	}
-	return lastErr
+	return err
 }
 
 func rpcTimeoutForOperation(operation string) time.Duration {
@@ -1192,16 +1192,88 @@ func (s *Session) reserveRPCSlot(now time.Time) time.Duration {
 	return delay
 }
 
-func (s *Session) noteFloodWait() {
+func (s *Session) noteFloodWait(operation string, delay time.Duration) {
+	if delay <= 0 {
+		delay = time.Second
+	}
+	now := time.Now()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.floodWaits++
+	s.appendFloodEventLocked(FloodEvent{
+		At:        now.UTC(),
+		Operation: operation,
+		Kind:      "flood_wait",
+		Delay:     delay,
+	})
+
+	nextRPCAt := now.Add(delay + s.rpcSpacing)
+	if nextRPCAt.After(s.nextRPCAt) {
+		s.nextRPCAt = nextRPCAt
+	}
 }
 
 func (s *Session) FloodWaits() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.floodWaits
+}
+
+func (s *Session) TransportFloods() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.transportFloods
+}
+
+func (s *Session) FloodEvents() []FloodEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	events := make([]FloodEvent, len(s.floodEvents))
+	copy(events, s.floodEvents)
+	return events
+}
+
+func (s *Session) noteTransportFlood(operation string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.transportFloods++
+	s.appendFloodEventLocked(FloodEvent{
+		At:        time.Now().UTC(),
+		Operation: operation,
+		Kind:      "transport_flood",
+		Error:     err.Error(),
+	})
+}
+
+func (s *Session) appendFloodEventLocked(event FloodEvent) {
+	s.floodEvents = append(s.floodEvents, event)
+	if len(s.floodEvents) > 128 {
+		s.floodEvents = append([]FloodEvent(nil), s.floodEvents[len(s.floodEvents)-128:]...)
+	}
+}
+
+func withFloodWaitRetrySleep(ctx context.Context, sleeper func(context.Context, time.Duration) error, fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt < maxFloodWaitRetries; attempt++ {
+		if attempt > 0 {
+			if delay, ok := floodWaitDelay(lastErr); ok {
+				if err := sleeper(ctx, delay); err != nil {
+					return err
+				}
+			}
+		}
+		if err := fn(); err != nil {
+			lastErr = err
+			if _, ok := floodWaitDelay(err); ok && attempt < maxFloodWaitRetries-1 {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func floodWaitDelay(err error) (time.Duration, bool) {
@@ -1213,6 +1285,13 @@ func floodWaitDelay(err error) (time.Duration, bool) {
 		return time.Second, true
 	}
 	return delay, true
+}
+
+func isTransportFlood(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "transport flood")
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {

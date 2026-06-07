@@ -14,10 +14,12 @@ const (
 	DefaultStateDir        = ".state"
 	DefaultMainSessionPath = ".sessions/main.json"
 	DefaultMainStateDir    = ".state/daily"
-	DefaultRPCSpacingMS    = 1500
-	DefaultBatchSize       = 80
-	DefaultHistoryLimit    = 500
-	DefaultMaxBatches      = 20
+	// Matches the read-only RPC pacing proven in Telegram E2E Test Tool.
+	DefaultRPCSpacingMS = 700
+	// Project cap for Telegram history/search requests.
+	DefaultBatchSize = 100
+	// One full history batch for non-backfill reads; use --all for exhaustive scans.
+	DefaultHistoryLimit = 100
 )
 
 type Config struct {
@@ -30,9 +32,6 @@ type Config struct {
 	StateDir     string
 	AllowedChats []string
 	RPCSpacing   time.Duration
-	BatchSize    int
-	HistoryLimit int
-	MaxBatches   int
 }
 
 type Mode string
@@ -43,7 +42,7 @@ const (
 )
 
 func Load() (Config, error) {
-	return LoadStudy()
+	return Config{}, fmt.Errorf("profile is required; use main or study")
 }
 
 func LoadStudy() (Config, error) {
@@ -69,10 +68,12 @@ func LoadProfile(profile string) (Config, error) {
 
 func ProfileMode(profile string) (Mode, error) {
 	switch strings.ToLower(strings.TrimSpace(profile)) {
-	case "", "study":
+	case "study":
 		return ModeStudy, nil
 	case "main":
 		return ModeMain, nil
+	case "":
+		return "", fmt.Errorf("profile is required; use main or study")
 	default:
 		return "", fmt.Errorf("unknown profile %q; use main or study", profile)
 	}
@@ -92,23 +93,6 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 	if err != nil {
 		return Config{}, err
 	}
-	rpcSpacingMS, err := intFromEnvAny(envKeys(mode, "RPC_SPACING_MS"), DefaultRPCSpacingMS)
-	if err != nil {
-		return Config{}, err
-	}
-	batchSize, err := intFromEnvAny(envKeys(mode, "HISTORY_BATCH_SIZE"), DefaultBatchSize)
-	if err != nil {
-		return Config{}, err
-	}
-	historyLimit, err := intFromEnvAny(envKeys(mode, "HISTORY_LIMIT"), DefaultHistoryLimit)
-	if err != nil {
-		return Config{}, err
-	}
-	maxBatches, err := intFromEnvAny(envKeys(mode, "MAX_BATCHES"), DefaultMaxBatches)
-	if err != nil {
-		return Config{}, err
-	}
-
 	return Config{
 		Mode:         mode,
 		AppID:        appID,
@@ -118,10 +102,7 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 		SessionPath:  defaultString(firstEnv(envKeys(mode, "SESSION_PATH")...), defaultSessionPath),
 		StateDir:     defaultString(firstEnv(envKeys(mode, "STATE_DIR")...), defaultStateDir),
 		AllowedChats: splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...)),
-		RPCSpacing:   time.Duration(rpcSpacingMS) * time.Millisecond,
-		BatchSize:    batchSize,
-		HistoryLimit: historyLimit,
-		MaxBatches:   maxBatches,
+		RPCSpacing:   time.Duration(DefaultRPCSpacingMS) * time.Millisecond,
 	}, nil
 }
 
@@ -189,15 +170,6 @@ func (c Config) ValidateRuntime() error {
 	if c.RPCSpacing <= 0 {
 		return fmt.Errorf("rpc spacing must be > 0")
 	}
-	if c.BatchSize <= 0 || c.BatchSize > 100 {
-		return fmt.Errorf("history batch size must be between 1 and 100")
-	}
-	if c.HistoryLimit <= 0 {
-		return fmt.Errorf("history limit must be > 0")
-	}
-	if c.MaxBatches <= 0 {
-		return fmt.Errorf("max batches must be > 0")
-	}
 	return nil
 }
 
@@ -220,9 +192,6 @@ func (c Config) EnvNames(suffix string) string {
 }
 
 func (c Config) LoginCommand() string {
-	if c.Mode == ModeMain {
-		return "telegram-harvest login"
-	}
 	return "telegram-harvest --profile " + ProfileName(c.Mode) + " login"
 }
 

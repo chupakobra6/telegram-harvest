@@ -23,7 +23,7 @@
 - List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
 - List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
 - Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out .state/chat.jsonl`
-- Start full sync: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset --batch-size 100`
+- Start full sync: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
 - Incremental sync after full sync completion: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
 - Compact agent view: `go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
@@ -40,6 +40,7 @@
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
 - Main profile uses `TG_HARVEST_DAILY_*`. Study profile uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
 - CLI commands must receive `--profile main|study`; do not add command-based profile defaults or profile env fallbacks.
+- Telegram pacing/history defaults are code-owned; do not add env knobs for RPC spacing, history batch size, history limit, max batches, or dialog limit.
 - Both profiles use explicit Telegram API credentials and CLI `login`; do not read or import Telegram Desktop `tdata`.
 - Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.

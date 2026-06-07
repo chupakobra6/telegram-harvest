@@ -12,9 +12,8 @@ func TestLoadUsesStudyEnv(t *testing.T) {
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "hash")
 	t.Setenv("TG_HARVEST_STUDY_PHONE", "+100")
-	t.Setenv("TG_HARVEST_STUDY_RPC_SPACING_MS", "2500")
 
-	cfg, err := Load()
+	cfg, err := LoadStudy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +26,25 @@ func TestLoadUsesStudyEnv(t *testing.T) {
 	if cfg.Phone != "+100" {
 		t.Fatalf("Phone = %q", cfg.Phone)
 	}
-	if cfg.RPCSpacing != 2500*time.Millisecond {
+	if cfg.RPCSpacing != time.Duration(DefaultRPCSpacingMS)*time.Millisecond {
+		t.Fatalf("RPCSpacing = %s", cfg.RPCSpacing)
+	}
+}
+
+func TestLoadIgnoresPacingAndHistoryEnv(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
+	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "hash")
+	t.Setenv("TG_HARVEST_STUDY_RPC_SPACING_MS", "2500")
+	t.Setenv("TG_HARVEST_STUDY_HISTORY_BATCH_SIZE", "many")
+	t.Setenv("TG_HARVEST_STUDY_HISTORY_LIMIT", "many")
+	t.Setenv("TG_HARVEST_STUDY_MAX_BATCHES", "many")
+
+	cfg, err := LoadStudy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RPCSpacing != time.Duration(DefaultRPCSpacingMS)*time.Millisecond {
 		t.Fatalf("RPCSpacing = %s", cfg.RPCSpacing)
 	}
 }
@@ -101,8 +118,28 @@ func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
 	if _, err := LoadProfile("daily"); err == nil {
 		t.Fatalf("expected daily profile to be rejected")
 	}
+	if _, err := LoadProfile(""); err == nil {
+		t.Fatalf("expected empty profile to be rejected")
+	}
 	if _, err := LoadProfile("unknown"); err == nil {
 		t.Fatalf("expected unknown profile error")
+	}
+}
+
+func TestLoadRequiresExplicitProfile(t *testing.T) {
+	if _, err := Load(); err == nil {
+		t.Fatalf("expected Load to reject implicit profile")
+	}
+}
+
+func TestLoginCommandAlwaysIncludesProfile(t *testing.T) {
+	main := Config{Mode: ModeMain}
+	if got := main.LoginCommand(); got != "telegram-harvest --profile main login" {
+		t.Fatalf("main login command = %q", got)
+	}
+	study := Config{Mode: ModeStudy}
+	if got := study.LoginCommand(); got != "telegram-harvest --profile study login" {
+		t.Fatalf("study login command = %q", got)
 	}
 }
 
@@ -128,7 +165,7 @@ func TestLoadAllowedChats(t *testing.T) {
 	clearTelegramConfigEnv(t)
 	t.Setenv("TG_HARVEST_STUDY_ALLOWED_CHATS", "1234567890, @study_chat 1234567890")
 
-	cfg, err := Load()
+	cfg, err := LoadStudy()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +185,8 @@ func TestLoadAllowedChats(t *testing.T) {
 
 func TestLoadRejectsInvalidIntegerEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("TG_HARVEST_STUDY_HISTORY_BATCH_SIZE", "many")
-	_, err := Load()
+	t.Setenv("TG_HARVEST_STUDY_APP_ID", "many")
+	_, err := LoadStudy()
 	if err == nil {
 		t.Fatalf("expected invalid integer error")
 	}
@@ -157,14 +194,11 @@ func TestLoadRejectsInvalidIntegerEnv(t *testing.T) {
 
 func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 	valid := Config{
-		AppID:        1,
-		AppHash:      "hash",
-		SessionPath:  ".sessions/study.json",
-		StateDir:     ".state",
-		RPCSpacing:   time.Second,
-		BatchSize:    80,
-		HistoryLimit: 500,
-		MaxBatches:   20,
+		AppID:       1,
+		AppHash:     "hash",
+		SessionPath: ".sessions/study.json",
+		StateDir:    ".state",
+		RPCSpacing:  time.Second,
 	}
 	if err := valid.ValidateRuntime(); err != nil {
 		t.Fatalf("valid runtime rejected: %v", err)
@@ -178,10 +212,6 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 		{"missing session", func(c *Config) { c.SessionPath = "" }},
 		{"missing state dir", func(c *Config) { c.StateDir = "" }},
 		{"bad spacing", func(c *Config) { c.RPCSpacing = 0 }},
-		{"bad batch low", func(c *Config) { c.BatchSize = 0 }},
-		{"bad batch high", func(c *Config) { c.BatchSize = 101 }},
-		{"bad history limit", func(c *Config) { c.HistoryLimit = 0 }},
-		{"bad max batches", func(c *Config) { c.MaxBatches = 0 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,14 +226,11 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 
 func TestValidateLoginAllowsInteractivePhone(t *testing.T) {
 	cfg := Config{
-		AppID:        1,
-		AppHash:      "hash",
-		SessionPath:  ".sessions/study.json",
-		StateDir:     ".state",
-		RPCSpacing:   time.Second,
-		BatchSize:    80,
-		HistoryLimit: 500,
-		MaxBatches:   20,
+		AppID:       1,
+		AppHash:     "hash",
+		SessionPath: ".sessions/study.json",
+		StateDir:    ".state",
+		RPCSpacing:  time.Second,
 	}
 	if err := cfg.ValidateLogin(); err != nil {
 		t.Fatalf("login config without phone rejected: %v", err)
@@ -252,10 +279,6 @@ func clearTelegramConfigEnv(t *testing.T) {
 		"SESSION_PATH",
 		"STATE_DIR",
 		"ALLOWED_CHATS",
-		"RPC_SPACING_MS",
-		"HISTORY_BATCH_SIZE",
-		"HISTORY_LIMIT",
-		"MAX_BATCHES",
 	}
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {

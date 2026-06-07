@@ -57,7 +57,6 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 		"TG_HARVEST_STUDY_STATE_DIR":     filepath.Join(dir, "state"),
 		"TG_HARVEST_STUDY_SESSION_PATH":  filepath.Join(dir, "sessions", "study.json"),
 		"TG_HARVEST_STUDY_ALLOWED_CHATS": "12345,@study",
-		"TG_HARVEST_STUDY_HISTORY_LIMIT": "25",
 	}
 	code, stdout, stderr := runCommand(t, []string{"print-config", "--profile", "study"}, env)
 	if code != 0 {
@@ -68,7 +67,6 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 		"state_dir=" + filepath.Join(dir, "state"),
 		"session=" + filepath.Join(dir, "sessions", "study.json"),
 		"allowed_chats=2",
-		"history_limit=25",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("print-config missing %q:\n%s", want, stdout)
@@ -85,7 +83,6 @@ func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 		"TG_HARVEST_DAILY_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
 		"TG_HARVEST_DAILY_VOSK_COMMAND":    "/tmp/vosk-transcribe",
 		"TG_HARVEST_DAILY_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
-		"TG_HARVEST_DAILY_RETENTION_DAYS":  "10",
 	}
 	code, stdout, stderr := runCommand(t, []string{"print-config", "--profile", "main"}, env)
 	if code != 0 {
@@ -254,18 +251,12 @@ func clearCommandEnv(t *testing.T) {
 		"SESSION_PATH",
 		"STATE_DIR",
 		"ALLOWED_CHATS",
-		"RPC_SPACING_MS",
-		"HISTORY_BATCH_SIZE",
-		"HISTORY_LIMIT",
-		"MAX_BATCHES",
-		"DIALOG_LIMIT",
 		"TRANSCRIBE_CMD",
 		"VOSK_COMMAND",
 		"VOSK_MODEL_PATH",
 		"VOSK_GRAMMAR_PATH",
 		"VOSK_LIBRARY_PATH",
 		"FFMPEG_COMMAND",
-		"RETENTION_DAYS",
 	}
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {

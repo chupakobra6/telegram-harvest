@@ -2,13 +2,16 @@ package mtproto
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 func TestNumericPeerCandidatesSupportsTelegramChannelIDs(t *testing.T) {
@@ -26,28 +29,87 @@ func TestNumericPeerCandidatesSupportsTelegramChannelIDs(t *testing.T) {
 
 func TestNormalizeHistoryOptionsAndBatchLimits(t *testing.T) {
 	opts := normalizeHistoryOptions(harvest.HistoryOptions{BatchSize: 500})
-	if opts.Limit != 500 || opts.BatchSize != 100 || opts.MaxBatches != 20 {
+	if opts.Limit != 100 || opts.BatchSize != 100 || opts.MaxBatches != 0 {
 		t.Fatalf("unexpected normalized opts: %+v", opts)
 	}
-	if got := initialHistoryCapacity(opts); got != 500 {
+	if got := initialHistoryCapacity(opts); got != 100 {
 		t.Fatalf("initial capacity = %d", got)
 	}
-	if !shouldContinueHistory(opts, 499, 19) {
+	if !shouldContinueHistory(opts, 99, 200) {
 		t.Fatalf("expected history to continue before limits")
 	}
-	if shouldContinueHistory(opts, 500, 19) {
+	if shouldContinueHistory(opts, 100, 0) {
 		t.Fatalf("expected history to stop at record limit")
 	}
-	if shouldContinueHistory(opts, 10, 20) {
+	capped := normalizeHistoryOptions(harvest.HistoryOptions{Limit: 1000, BatchSize: 100, MaxBatches: 2})
+	if shouldContinueHistory(capped, 10, 2) {
 		t.Fatalf("expected history to stop at batch limit")
 	}
-	if got := nextBatchLimit(opts, 460); got != 40 {
+	if got := nextBatchLimit(opts, 60); got != 40 {
 		t.Fatalf("next batch limit = %d", got)
 	}
 
 	all := normalizeHistoryOptions(harvest.HistoryOptions{All: true})
-	if all.Limit != 0 || all.MaxBatches != 0 || all.BatchSize != 80 {
+	if all.Limit != 0 || all.MaxBatches != 0 || all.BatchSize != 100 {
 		t.Fatalf("unexpected all-history opts: %+v", all)
+	}
+}
+
+func TestWithFloodWaitRetrySleepRetries(t *testing.T) {
+	ctx := context.Background()
+	attempts := 0
+	sleeps := 0
+
+	err := withFloodWaitRetrySleep(ctx, func(_ context.Context, delay time.Duration) error {
+		sleeps++
+		if delay != 2*time.Second {
+			t.Fatalf("sleep delay = %s, want 2s", delay)
+		}
+		return nil
+	}, func() error {
+		attempts++
+		if attempts == 1 {
+			return tgerr.New(420, "FLOOD_WAIT_2")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if sleeps != 1 {
+		t.Fatalf("sleeps = %d, want 1", sleeps)
+	}
+}
+
+func TestNoteFloodWaitPushesFutureRPCSlot(t *testing.T) {
+	s := &Session{rpcSpacing: 700 * time.Millisecond}
+	s.noteFloodWait("get_history", 5*time.Second)
+
+	now := time.Now()
+	if remaining := s.nextRPCAt.Sub(now); remaining < 5*time.Second {
+		t.Fatalf("rpc cooldown = %s, want at least 5s", remaining)
+	}
+	if s.FloodWaits() != 1 {
+		t.Fatalf("FloodWaits = %d, want 1", s.FloodWaits())
+	}
+	events := s.FloodEvents()
+	if len(events) != 1 {
+		t.Fatalf("len(FloodEvents) = %d, want 1", len(events))
+	}
+	if events[0].Operation != "get_history" || events[0].Kind != "flood_wait" {
+		t.Fatalf("unexpected flood event: %+v", events[0])
+	}
+}
+
+func TestIsTransportFlood(t *testing.T) {
+	if !isTransportFlood(errors.New("rpc failed: transport flood")) {
+		t.Fatal("expected transport flood to be detected")
+	}
+	if isTransportFlood(errors.New("boom")) {
+		t.Fatal("did not expect generic error to be treated as transport flood")
 	}
 }
 

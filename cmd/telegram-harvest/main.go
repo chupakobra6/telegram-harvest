@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -215,9 +214,6 @@ func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
 	fmt.Fprintf(out, "state_dir=%s\n", cfg.StateDir)
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
 	fmt.Fprintf(out, "rpc_spacing=%s\n", cfg.RPCSpacing)
-	fmt.Fprintf(out, "history_batch_size=%d\n", cfg.BatchSize)
-	fmt.Fprintf(out, "history_limit=%d\n", cfg.HistoryLimit)
-	fmt.Fprintf(out, "max_batches=%d\n", cfg.MaxBatches)
 	if includeDailyRuntime {
 		printDailyRuntimeConfig(out, false)
 	}
@@ -449,9 +445,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	fs.SetOutput(out)
 	chat := fs.String("chat", "", "chat id or @username")
 	output := fs.String("out", "", "JSONL output path")
-	limit := fs.Int("limit", cfg.HistoryLimit, "maximum records")
-	batchSize := fs.Int("batch-size", cfg.BatchSize, "messages.getHistory batch size, max 100")
-	maxBatches := fs.Int("max-batches", cfg.MaxBatches, "maximum getHistory batches")
+	limit := fs.Int("limit", config.DefaultHistoryLimit, "maximum records")
 	sinceID := fs.Int("since-id", 0, "only export messages with id greater than this")
 	all := fs.Bool("all", false, "export all available history")
 	topicID := fs.Int("topic", 0, "forum topic id to export via replies")
@@ -474,8 +468,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	outputPath := resolveOutputPath(cfg.StateDir, *output)
 	history := harvest.HistoryOptions{
 		Limit:      *limit,
-		BatchSize:  *batchSize,
-		MaxBatches: *maxBatches,
+		BatchSize:  config.DefaultBatchSize,
 		MinID:      *sinceID,
 		All:        *all,
 		TopicID:    *topicID,
@@ -489,9 +482,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	}
 	if *all {
 		history.Limit = 0
-		if !flagWasSet(fs, "max-batches") {
-			history.MaxBatches = 0
-		}
+		history.MaxBatches = 0
 	}
 	return withRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
@@ -524,9 +515,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	fs.SetOutput(out)
 	chat := fs.String("chat", "", "chat id or @username")
 	name := fs.String("name", "", "local stream name")
-	limit := fs.Int("limit", cfg.HistoryLimit, "maximum new records")
-	batchSize := fs.Int("batch-size", cfg.BatchSize, "messages.getHistory batch size, max 100")
-	maxBatches := fs.Int("max-batches", cfg.MaxBatches, "maximum getHistory batches")
+	limit := fs.Int("limit", config.DefaultHistoryLimit, "maximum new records")
 	mergedOut := fs.String("merged-out", "", "optional append-only merged JSONL output")
 	all := fs.Bool("all", false, "sync all available history")
 	reset := fs.Bool("reset", false, "truncate this stream and reset its state before syncing")
@@ -556,8 +545,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	}
 	history := harvest.HistoryOptions{
 		Limit:      *limit,
-		BatchSize:  *batchSize,
-		MaxBatches: *maxBatches,
+		BatchSize:  config.DefaultBatchSize,
 		All:        *all,
 		TopicID:    *topicID,
 		TopicTitle: *topicTitle,
@@ -570,9 +558,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	}
 	if *all {
 		history.Limit = 0
-		if !flagWasSet(fs, "max-batches") {
-			history.MaxBatches = 0
-		}
+		history.MaxBatches = 0
 	}
 	return withRuntimeLock(cfg, func() error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -643,8 +629,6 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	markdownOut := fs.String("markdown-out", defaultMarkdown, "Markdown report output path; default writes to visible reports/daily")
 	dialogLimit := fs.Int("dialog-limit", dailyDialogLimitDefault(), "maximum dialogs to scan")
 	limit := fs.Int("limit", 0, "maximum newest records to write after filtering; 0 means all")
-	batchSize := fs.Int("batch-size", cfg.BatchSize, "Telegram history/search batch size, max 100")
-	maxBatches := fs.Int("max-batches", cfg.MaxBatches, "maximum batches per dialog; 0 disables the per-dialog cap")
 	includeService := fs.Bool("include-service", false, "include Telegram service messages")
 	downloadMedia := fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
@@ -680,8 +664,8 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	}
 	history := harvest.HistoryOptions{
 		Limit:             *limit,
-		BatchSize:         *batchSize,
-		MaxBatches:        *maxBatches,
+		BatchSize:         config.DefaultBatchSize,
+		MaxBatches:        0,
 		DownloadMedia:     *downloadMedia,
 		TranscribeMedia:   *transcribeMedia,
 		TranscribeCommand: *transcribeCommand,
@@ -1086,10 +1070,7 @@ func parseDailyDate(value string, now time.Time) (string, time.Time, time.Time, 
 }
 
 func dailyDialogLimitDefault() int {
-	if value, ok := intEnvValue("TG_HARVEST_DAILY_DIALOG_LIMIT"); ok && value > 0 {
-		return value
-	}
-	return 500
+	return mtproto.DefaultDailyDialogLimit()
 }
 
 func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
@@ -1132,10 +1113,6 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 	if ffmpegCommand == "" {
 		ffmpegCommand = transcribe.DefaultFFmpegCommand
 	}
-	retainDays := harvest.DefaultDailyRetentionDays
-	if value, ok := intEnvValue("TG_HARVEST_DAILY_RETENTION_DAYS"); ok {
-		retainDays = value
-	}
 	return dailyRuntimeConfig{
 		TranscribeMedia:   strings.TrimSpace(transcribeCommand) != "" || (strings.TrimSpace(voskCommand) != "" && strings.TrimSpace(voskModelPath) != ""),
 		TranscribeCommand: transcribeCommand,
@@ -1143,7 +1120,7 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 		VoskModelPath:     voskModelPath,
 		VoskGrammarPath:   firstEnvValue("TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH"),
 		FFmpegCommand:     ffmpegCommand,
-		RetainDays:        retainDays,
+		RetainDays:        harvest.DefaultDailyRetentionDays,
 	}
 }
 
@@ -1169,21 +1146,6 @@ func defaultLocalVoskModelPath() string {
 		return candidate
 	}
 	return ""
-}
-
-func intEnvValue(keys ...string) (int, bool) {
-	for _, key := range keys {
-		raw := strings.TrimSpace(os.Getenv(key))
-		if raw == "" {
-			continue
-		}
-		value, err := strconv.Atoi(raw)
-		if err != nil {
-			return 0, false
-		}
-		return value, true
-	}
-	return 0, false
 }
 
 func firstEnvValue(keys ...string) string {
