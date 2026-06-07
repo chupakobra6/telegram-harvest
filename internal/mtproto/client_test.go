@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
@@ -49,22 +48,6 @@ func TestNormalizeHistoryOptionsAndBatchLimits(t *testing.T) {
 	all := normalizeHistoryOptions(harvest.HistoryOptions{All: true})
 	if all.Limit != 0 || all.MaxBatches != 0 || all.BatchSize != 80 {
 		t.Fatalf("unexpected all-history opts: %+v", all)
-	}
-}
-
-func TestShouldStopDailyDialogLoadRespectsPinnedAndBoundary(t *testing.T) {
-	start := time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC)
-	if shouldStopDailyDialogLoad(harvest.Chat{Pinned: true, LastMessageAt: start.Add(-time.Minute)}, start) {
-		t.Fatalf("pinned old dialogs must not stop daily dialog loading")
-	}
-	if shouldStopDailyDialogLoad(harvest.Chat{LastMessageAt: start}, start) {
-		t.Fatalf("dialog exactly at start boundary must not stop daily dialog loading")
-	}
-	if !shouldStopDailyDialogLoad(harvest.Chat{LastMessageAt: start.Add(-time.Minute)}, start) {
-		t.Fatalf("ordinary dialog before start should stop daily dialog loading")
-	}
-	if shouldStopDailyDialogLoad(harvest.Chat{LastMessageAt: start.Add(time.Hour)}, start) {
-		t.Fatalf("newer dialog must not stop daily dialog loading")
 	}
 }
 

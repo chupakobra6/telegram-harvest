@@ -516,7 +516,7 @@ func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayO
 	if opts.End.IsZero() || !opts.End.After(opts.Start) {
 		return harvest.OutgoingDayStats{}, fmt.Errorf("end time must be after start time")
 	}
-	dialogs, err := s.loadDialogsUntil(ctx, opts.DialogLimit, opts.Start)
+	dialogs, err := s.loadDialogs(ctx, opts.DialogLimit)
 	if err != nil {
 		return harvest.OutgoingDayStats{}, err
 	}
@@ -987,10 +987,6 @@ func nextBatchLimit(opts harvest.HistoryOptions, records int) int {
 }
 
 func (s *Session) loadDialogs(ctx context.Context, limit int) ([]harvest.Chat, error) {
-	return s.loadDialogsUntil(ctx, limit, time.Time{})
-}
-
-func (s *Session) loadDialogsUntil(ctx context.Context, limit int, stopBefore time.Time) ([]harvest.Chat, error) {
 	all := make([]harvest.Chat, 0, limit)
 	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
 	offsetID := 0
@@ -1032,9 +1028,6 @@ func (s *Session) loadDialogsUntil(ctx context.Context, limit int, stopBefore ti
 			}
 			all = append(all, chat)
 			s.cacheTarget(chat, inputPeer)
-			if shouldStopDailyDialogLoad(chat, stopBefore) {
-				return all, nil
-			}
 		}
 		messages := modified.GetMessages()
 		if len(messages) == 0 || len(messages) < batchLimit {
@@ -1053,13 +1046,6 @@ func (s *Session) loadDialogsUntil(ctx context.Context, limit int, stopBefore ti
 		}
 	}
 	return all, nil
-}
-
-func shouldStopDailyDialogLoad(chat harvest.Chat, start time.Time) bool {
-	return !start.IsZero() &&
-		!chat.Pinned &&
-		!chat.LastMessageAt.IsZero() &&
-		chat.LastMessageAt.Before(start)
 }
 
 func (s *Session) resolveTarget(ctx context.Context, raw string) (resolvedTarget, error) {
