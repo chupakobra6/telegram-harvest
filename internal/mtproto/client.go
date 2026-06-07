@@ -96,7 +96,11 @@ func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
 	}
 	client := c.newTelegramClient()
 	reader := bufio.NewReader(in)
-	_, _ = fmt.Fprintf(out, "starting read-only MTProto login for %s\n", maskPhone(c.cfg.Phone))
+	if strings.TrimSpace(c.cfg.Phone) == "" {
+		_, _ = fmt.Fprintln(out, "starting read-only MTProto login")
+	} else {
+		_, _ = fmt.Fprintf(out, "starting read-only MTProto login for %s\n", maskPhone(c.cfg.Phone))
+	}
 	_, _ = fmt.Fprintln(out, "connecting to Telegram...")
 	return client.Run(ctx, func(runCtx context.Context) error {
 		status, err := client.Auth().Status(runCtx)
@@ -108,9 +112,21 @@ func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
 			return nil
 		}
 
-		_, _ = fmt.Fprintf(out, "connected, authenticating as %s\n", maskPhone(c.cfg.Phone))
+		phone := strings.TrimSpace(c.cfg.Phone)
+		if phone == "" {
+			phone, err = promptLine(out, reader, "phone: ")
+			if err != nil {
+				return fmt.Errorf("read phone: %w", err)
+			}
+			phone = strings.TrimSpace(phone)
+			if phone == "" {
+				return fmt.Errorf("phone is required for login")
+			}
+		}
+
+		_, _ = fmt.Fprintf(out, "connected, authenticating as %s\n", maskPhone(phone))
 		_, _ = fmt.Fprintln(out, "requesting login code...")
-		sentCodeClass, err := client.Auth().SendCode(runCtx, c.cfg.Phone, auth.SendCodeOptions{})
+		sentCodeClass, err := client.Auth().SendCode(runCtx, phone, auth.SendCodeOptions{})
 		if err != nil {
 			return fmt.Errorf("send code: %w", err)
 		}
@@ -130,7 +146,7 @@ func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
 			return fmt.Errorf("read code: %w", err)
 		}
 
-		if _, err := client.Auth().SignIn(runCtx, c.cfg.Phone, code, sentCode.PhoneCodeHash); err != nil {
+		if _, err := client.Auth().SignIn(runCtx, phone, code, sentCode.PhoneCodeHash); err != nil {
 			if !errors.Is(err, auth.ErrPasswordAuthNeeded) {
 				return fmt.Errorf("sign in: %w", err)
 			}

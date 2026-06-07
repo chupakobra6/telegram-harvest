@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/gotd/td/telegram"
 )
 
 const (
@@ -151,24 +149,8 @@ func displayEnvKeys(mode Mode, suffix string) []string {
 	}
 }
 
-func (c Config) WithTelegramDesktopDefaults() Config {
-	if c.AppID == 0 {
-		c.AppID = telegram.TestAppID
-	}
-	if strings.TrimSpace(c.AppHash) == "" {
-		c.AppHash = telegram.TestAppHash
-	}
-	return c
-}
-
 func (c Config) ValidateLogin() error {
-	if err := c.ValidateRuntime(); err != nil {
-		return err
-	}
-	if strings.TrimSpace(c.Phone) == "" {
-		return fmt.Errorf("%s is required for login", c.EnvName("PHONE"))
-	}
-	return nil
+	return c.ValidateRuntime()
 }
 
 func (c Config) ChatAllowed(chat string) bool {

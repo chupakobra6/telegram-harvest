@@ -25,6 +25,19 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 			t.Fatalf("help missing %q:\n%s", want, stdout)
 		}
 	}
+	if strings.Contains(stdout, "import-tdesktop") {
+		t.Fatalf("help must not expose Telegram Desktop import:\n%s", stdout)
+	}
+}
+
+func TestRunRejectsTelegramDesktopImportCommand(t *testing.T) {
+	code, _, stderr := runCommand(t, []string{"import-tdesktop"}, nil)
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "unknown command: import-tdesktop") {
+		t.Fatalf("missing unknown command error: %s", stderr)
+	}
 }
 
 func TestDefaultProfileRouting(t *testing.T) {

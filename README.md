@@ -12,7 +12,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 
 | Область | Поведение |
 | --- | --- |
-| Авторизация | MTProto user session через `login`; для study можно импортировать локальный Telegram Desktop `tdata`. |
+| Авторизация | MTProto user session через `login` и явные API credentials для каждого профиля. |
 | Профили | `main` читает `TG_HARVEST_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей нет. |
 | Daily | Сканирует диалоги за один московский день и пишет только outgoing/self сообщения авторизованного аккаунта. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
@@ -36,12 +36,13 @@ make test
 ```dotenv
 TG_HARVEST_APP_ID=12345678
 TG_HARVEST_APP_HASH=main_account_app_hash
-TG_HARVEST_PHONE=+10000000000
+# Опционально: если не задано, `login` спросит номер интерактивно.
+# TG_HARVEST_PHONE=+10000000000
 
-# Опционально для учебного аккаунта:
+# Учебный аккаунт:
 TG_HARVEST_STUDY_APP_ID=12345678
 TG_HARVEST_STUDY_APP_HASH=study_account_app_hash
-TG_HARVEST_STUDY_PHONE=+10000000000
+# TG_HARVEST_STUDY_PHONE=+10000000000
 TG_HARVEST_STUDY_ALLOWED_CHATS=1234567890,@study_chat
 ```
 
@@ -63,13 +64,6 @@ make doctor PROFILE=study
 go run ./cmd/telegram-harvest --profile study me
 ```
 
-Если для учебного аккаунта используется локальный Telegram Desktop fallback:
-
-```bash
-go run ./cmd/telegram-harvest --profile study import-tdesktop --account-index 1
-go run ./cmd/telegram-harvest --profile study me
-```
-
 ## Профили и дефолты
 
 Глобальный флаг:
@@ -85,7 +79,7 @@ go run ./cmd/telegram-harvest --profile study <command>
 | --- | --- |
 | `login`, `doctor`, `print-config`, `me` | `main` |
 | `daily`, `daily-download-media` | `main` |
-| `chats`, `topics`, `dump`, `sync`, `download-media`, `compact`, `agent-view`, `import-tdesktop` | `study` |
+| `chats`, `topics`, `dump`, `sync`, `download-media`, `compact`, `agent-view` | `study` |
 
 Makefile повторяет эту модель: `make daily`, `make login`, `make chats` используют CLI-дефолты. Для явного выбора добавляй один и тот же параметр:
 
@@ -306,7 +300,7 @@ go run ./cmd/telegram-harvest daily --help
 | `cmd/telegram-harvest` | CLI entrypoint и wiring команд. |
 | `cmd/vosk-transcribe` | Go/cgo Vosk helper с one-shot и session режимами. |
 | `internal/config` | `.env`, профили, defaults, allowlist и runtime paths. |
-| `internal/mtproto` | Telegram transport, login, tdesktop import, dialogs/history/topics/daily reads. |
+| `internal/mtproto` | Telegram transport, login, dialogs/history/topics/daily reads. |
 | `internal/harvest` | JSONL model, sync state, daily Markdown, media retention, compact и agent views. |
 | `internal/transcribe` | ffmpeg conversion, Vosk session runner, custom command hook. |
 | `internal/runlock` | Per-session lock, чтобы не запускать два MTProto процесса на одну session file. |

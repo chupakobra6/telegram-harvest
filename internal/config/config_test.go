@@ -175,6 +175,22 @@ func TestValidateRuntimeChecksRequiredAndBounds(t *testing.T) {
 	}
 }
 
+func TestValidateLoginAllowsInteractivePhone(t *testing.T) {
+	cfg := Config{
+		AppID:        1,
+		AppHash:      "hash",
+		SessionPath:  ".sessions/study.json",
+		StateDir:     ".state",
+		RPCSpacing:   time.Second,
+		BatchSize:    80,
+		HistoryLimit: 500,
+		MaxBatches:   20,
+	}
+	if err := cfg.ValidateLogin(); err != nil {
+		t.Fatalf("login config without phone rejected: %v", err)
+	}
+}
+
 func TestWithRootAndRuntimeLockPath(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{

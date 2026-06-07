@@ -62,9 +62,6 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return printError(stderr, 1, err)
 	}
 	cfg = cfg.WithRoot(projectRoot)
-	if shouldUseTelegramDesktopDefaults(command, cfg.Mode) {
-		cfg = cfg.WithTelegramDesktopDefaults()
-	}
 	client := mtproto.New(cfg)
 
 	switch command {
@@ -88,11 +85,6 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 0
 	case "daily-download-media":
 		if err := runDownloadMedia(cfg, client, args[1:], stdout); err != nil {
-			return printError(stderr, 1, err)
-		}
-		return 0
-	case "import-tdesktop":
-		if err := runImportTDesktop(cfg, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
 		return 0
@@ -194,16 +186,11 @@ func defaultProfileForCommand(command string) string {
 	return "study"
 }
 
-func shouldUseTelegramDesktopDefaults(command string, profile config.Mode) bool {
-	return command != "login" && profile == config.ModeStudy
-}
-
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-harvest [--profile main|study] <help|doctor|print-config|login|import-tdesktop|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest [--profile main|study] <help|doctor|print-config|login|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-download-media> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
 	fmt.Fprintln(out, "  --profile main|study  # account profile; defaults to main for account/daily commands, study for study commands")
-	fmt.Fprintln(out, "  import-tdesktop --tdata ~/Library/Application\\ Support/Telegram\\ Desktop/tdata")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
@@ -411,37 +398,6 @@ func runTopics(cfg config.Config, client *mtproto.Client, args []string, out io.
 			return nil
 		})
 	})
-}
-
-func runImportTDesktop(cfg config.Config, args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("import-tdesktop", flag.ContinueOnError)
-	fs.SetOutput(out)
-	tdata := fs.String("tdata", defaultTDataPath(), "Telegram Desktop tdata directory")
-	accountIndex := fs.Int("account-index", 0, "Telegram Desktop account index")
-	passcodeEnv := fs.String("passcode-env", "", "optional env var containing local Telegram Desktop passcode")
-	jsonOut := fs.Bool("json", false, "print JSON")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	passcode := []byte(nil)
-	if strings.TrimSpace(*passcodeEnv) != "" {
-		passcode = []byte(os.Getenv(*passcodeEnv))
-	}
-	result, err := mtproto.ImportTDesktopSession(context.Background(), *tdata, *accountIndex, cfg.SessionPath, passcode)
-	if err != nil {
-		return err
-	}
-	if *jsonOut {
-		encoder := json.NewEncoder(out)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(result)
-	}
-	fmt.Fprintf(out, "imported_tdesktop_session=true\n")
-	fmt.Fprintf(out, "accounts_found=%d\n", result.AccountCount)
-	fmt.Fprintf(out, "account_index=%d\n", result.AccountIndex)
-	fmt.Fprintf(out, "session_path=%s\n", result.SessionPath)
-	fmt.Fprintf(out, "dc=%d\n", result.DC)
-	return nil
 }
 
 func runMe(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
@@ -1254,14 +1210,6 @@ func resolveCommand(command string) (string, bool) {
 		return command, true
 	}
 	return "", false
-}
-
-func defaultTDataPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, "Library", "Application Support", "Telegram Desktop", "tdata")
 }
 
 func oneLine(value string) string {
