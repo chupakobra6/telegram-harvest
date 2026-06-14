@@ -676,6 +676,10 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	dailyOpts := dailyFlags.values()
+	if err := validateDailyOptions(dailyOpts); err != nil {
+		return err
+	}
 
 	reportDir := resolveReportDirPath(*reportDirRaw)
 	plan, err := buildDailyCatchupPlan(cfg, reportDir, *fromRaw, time.Now())
@@ -704,7 +708,7 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 		len(plan.Jobs),
 		len(plan.Skipped),
 	)
-	if err := runDailyJobs(cfg, client, plan.Jobs, dailyFlags.values(), out); err != nil {
+	if err := runDailyJobs(cfg, client, plan.Jobs, dailyOpts, out); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "catchup complete=true generated=%d skipped=%d\n", len(plan.Jobs), len(plan.Skipped))

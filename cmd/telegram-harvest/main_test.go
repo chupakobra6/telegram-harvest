@@ -288,6 +288,56 @@ func TestValidateDailyOptionsRejectsInvalidVideoTranscribeMode(t *testing.T) {
 	}
 }
 
+func TestRunDailyCatchupRejectsInvalidVideoTranscribeModeBeforeRuntimeAccess(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions", "main.json")
+	env := map[string]string{
+		"TG_HARVEST_DAILY_APP_ID":       "77",
+		"TG_HARVEST_DAILY_APP_HASH":     "main-hash",
+		"TG_HARVEST_DAILY_STATE_DIR":    filepath.Join(dir, "state"),
+		"TG_HARVEST_DAILY_SESSION_PATH": sessionPath,
+	}
+
+	code, _, stderr := runCommand(t, []string{"--profile", "main", "daily-catchup", "--transcribe-video", "cinema"}, env)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "--transcribe-video must be one of: phone, all, off") {
+		t.Fatalf("missing video mode validation error: %s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(sessionPath), "runtime.lock")); !os.IsNotExist(err) {
+		t.Fatalf("daily-catchup should not acquire runtime lock, stat err=%v", err)
+	}
+}
+
+func TestAtomicOutputPublishReplacesFinalOnlyOnPublish(t *testing.T) {
+	finalPath := filepath.Join(t.TempDir(), "daily.jsonl")
+	mustWriteCLIFile(t, finalPath, "old\n")
+
+	tempPath, file, err := createAtomicOutput(finalPath)
+	if err != nil {
+		t.Fatalf("create atomic output: %v", err)
+	}
+	if _, err := file.WriteString("new\n"); err != nil {
+		t.Fatalf("write temp output: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close temp output: %v", err)
+	}
+	if got := readCLIFile(t, finalPath); got != "old\n" {
+		t.Fatalf("final changed before publish: %q", got)
+	}
+	if err := publishAtomicOutput(tempPath, finalPath); err != nil {
+		t.Fatalf("publish atomic output: %v", err)
+	}
+	if got := readCLIFile(t, finalPath); got != "new\n" {
+		t.Fatalf("final after publish = %q", got)
+	}
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("temp file should be renamed away, stat err=%v", err)
+	}
+}
+
 func configForCatchup(root string) config.Config {
 	return config.Config{
 		StateDir: filepath.Join(root, ".state", "daily"),
