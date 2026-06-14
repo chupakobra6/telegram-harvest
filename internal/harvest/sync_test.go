@@ -145,6 +145,56 @@ func TestRunSyncIncrementalUsesSavedLastID(t *testing.T) {
 	}
 }
 
+func TestRunSyncIncrementalRecoversStaleCheckpointRange(t *testing.T) {
+	dir := t.TempDir()
+	streamPath := filepath.Join(dir, "chat.jsonl")
+	statePath := filepath.Join(dir, "chat.state.json")
+	mergedPath := filepath.Join(dir, "messages.jsonl")
+	mustWriteFile(t, streamPath, []byte(`{"message_id":407584}`+"\n"))
+	if err := SaveSyncState(statePath, SyncState{
+		Chat:    Chat{ID: 1, Type: "basic_group", Display: "Study", TopMessageID: 11001},
+		LastID:  407584,
+		Records: 3428,
+		Backfill: &Backfill{
+			Complete: true,
+			LatestID: 10763,
+			OldestID: 6960,
+			Records:  3428,
+		},
+	}); err != nil {
+		t.Fatalf("save stale state: %v", err)
+	}
+
+	source := &fakeHistorySource{
+		chat: Chat{ID: 1, Type: "basic_group", Display: "Study", TopMessageID: 11001},
+		records: []MessageRecord{
+			record(10763, nil),
+			record(10764, nil),
+			record(10800, nil),
+			record(11001, nil),
+		},
+	}
+	result, err := RunSync(context.Background(), source, SyncOptions{
+		Chat:       "study",
+		StreamPath: streamPath,
+		StatePath:  statePath,
+		MergedPath: mergedPath,
+		History:    HistoryOptions{Limit: 100, BatchSize: 50},
+	})
+	if err != nil {
+		t.Fatalf("run sync: %v", err)
+	}
+	if got := source.seen[0].MinID; got != 10763 {
+		t.Fatalf("expected recovery MinID from completed backfill, got %d", got)
+	}
+	if result.State.LastID != 11001 || result.State.Records != 3431 {
+		t.Fatalf("unexpected recovered state: %+v", result.State)
+	}
+	if records := readRecords(t, mergedPath); len(records) != 3 || records[0].MessageID != 10764 || records[2].MessageID != 11001 {
+		t.Fatalf("unexpected recovered merged records: %+v", records)
+	}
+}
+
 func TestRunSyncAllResumesIncompleteBackfill(t *testing.T) {
 	dir := t.TempDir()
 	streamPath := filepath.Join(dir, "chat.jsonl")

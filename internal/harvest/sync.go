@@ -57,6 +57,7 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 	}
 
 	state := SyncState{}
+	staleIncrementalCheckpoint := false
 	loaded, err := LoadSyncState(opts.StatePath)
 	if err != nil {
 		return SyncResult{}, err
@@ -74,7 +75,8 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 			if state.Backfill != nil && state.Backfill.Active {
 				return SyncResult{}, fmt.Errorf("incremental sync is blocked by an incomplete full backfill; resume with --all or restart with --all --reset")
 			}
-			opts.History.MinID = state.LastID
+			staleIncrementalCheckpoint = hasStaleIncrementalCheckpoint(state)
+			opts.History.MinID = incrementalMinID(state, staleIncrementalCheckpoint)
 		}
 	}
 	if opts.History.All && opts.ResetMerged && !opts.Reset {
@@ -175,7 +177,9 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 			state.LastID = state.Backfill.LatestID
 		}
 	} else {
-		if stats.LastID > state.LastID || opts.Reset {
+		if staleIncrementalCheckpoint {
+			state.LastID = recoveredIncrementalLastID(stats, chat, opts.History.MinID)
+		} else if stats.LastID > state.LastID || opts.Reset {
 			state.LastID = stats.LastID
 		}
 		if opts.Reset {
@@ -196,6 +200,30 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 		StatePath:  opts.StatePath,
 		MergedPath: opts.MergedPath,
 	}, nil
+}
+
+func hasStaleIncrementalCheckpoint(state SyncState) bool {
+	return state.LastID > 0 && state.Chat.TopMessageID > 0 && state.LastID > state.Chat.TopMessageID
+}
+
+func incrementalMinID(state SyncState, staleCheckpoint bool) int {
+	if !staleCheckpoint {
+		return state.LastID
+	}
+	if state.Backfill != nil && state.Backfill.Complete && state.Backfill.LatestID > 0 && state.Backfill.LatestID <= state.Chat.TopMessageID {
+		return state.Backfill.LatestID
+	}
+	return 0
+}
+
+func recoveredIncrementalLastID(stats HistoryStats, chat Chat, minID int) int {
+	if stats.LastID > 0 {
+		return stats.LastID
+	}
+	if chat.TopMessageID > 0 {
+		return chat.TopMessageID
+	}
+	return minID
 }
 
 func initBackfillState(state SyncState, history HistoryOptions, reset bool, now time.Time) SyncState {
