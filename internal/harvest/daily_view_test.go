@@ -116,6 +116,9 @@ func TestDailyDefaultOutputPathsSplitsMarkdownAndJSONL(t *testing.T) {
 	if markdown != filepath.Join("/repo", "reports", "daily", "2026-06-05.md") {
 		t.Fatalf("markdown path = %s", markdown)
 	}
+	if asrLog := DailyDefaultASRLogPath(stateDir, "2026-06-05"); asrLog != filepath.Join("/repo", ".state", "daily", "asr", "2026-06-05.jsonl") {
+		t.Fatalf("asr log path = %s", asrLog)
+	}
 }
 
 func TestDailyDefaultReportRootFallsBackInsideCustomStateDir(t *testing.T) {

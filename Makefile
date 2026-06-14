@@ -55,11 +55,11 @@ login:
 
 daily:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) daily --date "$(or $(DATE),today)" $(if $(strip $(OUT)),--out "$(OUT)",) $(if $(strip $(MARKDOWN_OUT)),--markdown-out "$(MARKDOWN_OUT)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(PROGRESS)),--progress,)
+	$(CLI) $(PROFILE_ARG) daily --date "$(or $(DATE),today)" $(if $(strip $(OUT)),--out "$(OUT)",) $(if $(strip $(MARKDOWN_OUT)),--markdown-out "$(MARKDOWN_OUT)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) $(if $(strip $(PROGRESS)),--progress,)
 
 daily-catchup:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) daily-catchup $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(REPORT_DIR)),--report-dir "$(REPORT_DIR)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(PROGRESS)),--progress,)
+	$(CLI) $(PROFILE_ARG) daily-catchup $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(REPORT_DIR)),--report-dir "$(REPORT_DIR)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) $(if $(strip $(PROGRESS)),--progress,)
 
 daily-download-media:
 	$(REQUIRE_PROFILE)

@@ -200,8 +200,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
-	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false]")
-	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false]")
+	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
+	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 }
 
@@ -659,6 +659,7 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		End:          end,
 		OutputPath:   outputPath,
 		MarkdownPath: markdownPath,
+		ASRLogPath:   harvest.DailyDefaultASRLogPath(cfg.StateDir, dateLabel),
 	}
 	return runDailyJobs(cfg, client, []dailyJob{job}, dailyFlags.values(), out)
 }
@@ -718,6 +719,7 @@ type dailyOptionFlags struct {
 	mediaDir          *string
 	mediaLimits       mediaLimitFlags
 	transcribeMedia   *bool
+	transcribeVideo   *string
 	transcribeCommand *string
 	voskCommand       *string
 	voskModelPath     *string
@@ -735,6 +737,7 @@ func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOpt
 		downloadMedia:   fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription"),
 		mediaDir:        fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute"),
 		transcribeMedia: fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download"),
+		transcribeVideo: fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off"),
 		transcribeCommand: fs.String("transcribe-cmd", defaults.TranscribeCommand,
 			"custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}"),
 		voskCommand:     fs.String("vosk-command", defaults.VoskCommand, "Vosk session worker command, called as: command --session <model> [grammar]"),
@@ -750,44 +753,48 @@ func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOpt
 
 func (f dailyOptionFlags) values() dailyOptions {
 	return dailyOptions{
-		DialogLimit:       *f.dialogLimit,
-		Limit:             *f.limit,
-		IncludeService:    *f.includeService,
-		DownloadMedia:     *f.downloadMedia,
-		MediaDir:          *f.mediaDir,
-		MaxPhotoBytes:     *f.mediaLimits.photo,
-		MaxDocumentBytes:  *f.mediaLimits.document,
-		MaxAudioBytes:     *f.mediaLimits.audio,
-		MaxVideoBytes:     *f.mediaLimits.video,
-		TranscribeMedia:   *f.transcribeMedia,
-		TranscribeCommand: *f.transcribeCommand,
-		VoskCommand:       *f.voskCommand,
-		VoskModelPath:     *f.voskModelPath,
-		VoskGrammarPath:   *f.voskGrammarPath,
-		FFmpegCommand:     *f.ffmpegCommand,
-		TranscriptDir:     *f.transcriptDir,
-		Progress:          *f.progress,
+		DialogLimit:          *f.dialogLimit,
+		Limit:                *f.limit,
+		IncludeService:       *f.includeService,
+		DownloadMedia:        *f.downloadMedia,
+		MediaDir:             *f.mediaDir,
+		MaxPhotoBytes:        *f.mediaLimits.photo,
+		MaxDocumentBytes:     *f.mediaLimits.document,
+		MaxAudioBytes:        *f.mediaLimits.audio,
+		MaxVideoBytes:        *f.mediaLimits.video,
+		MaxGenericVideoBytes: harvest.DefaultMaxGenericVideoBytes,
+		TranscribeMedia:      *f.transcribeMedia,
+		VideoTranscribeMode:  *f.transcribeVideo,
+		TranscribeCommand:    *f.transcribeCommand,
+		VoskCommand:          *f.voskCommand,
+		VoskModelPath:        *f.voskModelPath,
+		VoskGrammarPath:      *f.voskGrammarPath,
+		FFmpegCommand:        *f.ffmpegCommand,
+		TranscriptDir:        *f.transcriptDir,
+		Progress:             *f.progress,
 	}
 }
 
 type dailyOptions struct {
-	DialogLimit       int
-	Limit             int
-	IncludeService    bool
-	DownloadMedia     bool
-	MediaDir          string
-	MaxPhotoBytes     int64
-	MaxDocumentBytes  int64
-	MaxAudioBytes     int64
-	MaxVideoBytes     int64
-	TranscribeMedia   bool
-	TranscribeCommand string
-	VoskCommand       string
-	VoskModelPath     string
-	VoskGrammarPath   string
-	FFmpegCommand     string
-	TranscriptDir     string
-	Progress          bool
+	DialogLimit          int
+	Limit                int
+	IncludeService       bool
+	DownloadMedia        bool
+	MediaDir             string
+	MaxPhotoBytes        int64
+	MaxDocumentBytes     int64
+	MaxAudioBytes        int64
+	MaxVideoBytes        int64
+	MaxGenericVideoBytes int64
+	TranscribeMedia      bool
+	VideoTranscribeMode  string
+	TranscribeCommand    string
+	VoskCommand          string
+	VoskModelPath        string
+	VoskGrammarPath      string
+	FFmpegCommand        string
+	TranscriptDir        string
+	Progress             bool
 }
 
 type dailyJob struct {
@@ -796,6 +803,7 @@ type dailyJob struct {
 	End          time.Time
 	OutputPath   string
 	MarkdownPath string
+	ASRLogPath   string
 }
 
 type dailyCatchupPlan struct {
@@ -808,6 +816,9 @@ type dailyCatchupPlan struct {
 func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, opts dailyOptions, out io.Writer) error {
 	if len(jobs) == 0 {
 		return nil
+	}
+	if err := validateDailyOptions(opts); err != nil {
+		return err
 	}
 	history := dailyHistoryOptions(cfg, opts)
 	var managedTranscriber transcribe.ManagedRunner
@@ -841,22 +852,33 @@ func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, op
 	return err
 }
 
+func validateDailyOptions(opts dailyOptions) error {
+	switch strings.TrimSpace(opts.VideoTranscribeMode) {
+	case "", harvest.VideoTranscribePhone, harvest.VideoTranscribeAll, harvest.VideoTranscribeOff:
+		return nil
+	default:
+		return fmt.Errorf("--transcribe-video must be one of: %s, %s, %s", harvest.VideoTranscribePhone, harvest.VideoTranscribeAll, harvest.VideoTranscribeOff)
+	}
+}
+
 func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOptions {
 	history := harvest.HistoryOptions{
-		Limit:             opts.Limit,
-		BatchSize:         config.DefaultBatchSize,
-		MaxBatches:        0,
-		DownloadMedia:     opts.DownloadMedia,
-		TranscribeMedia:   opts.TranscribeMedia,
-		TranscribeCommand: opts.TranscribeCommand,
-		VoskCommand:       opts.VoskCommand,
-		VoskModelPath:     opts.VoskModelPath,
-		VoskGrammarPath:   opts.VoskGrammarPath,
-		FFmpegCommand:     opts.FFmpegCommand,
-		MaxPhotoBytes:     opts.MaxPhotoBytes,
-		MaxDocumentBytes:  opts.MaxDocumentBytes,
-		MaxAudioBytes:     opts.MaxAudioBytes,
-		MaxVideoBytes:     opts.MaxVideoBytes,
+		Limit:                opts.Limit,
+		BatchSize:            config.DefaultBatchSize,
+		MaxBatches:           0,
+		DownloadMedia:        opts.DownloadMedia,
+		TranscribeMedia:      opts.TranscribeMedia,
+		TranscribeCommand:    opts.TranscribeCommand,
+		VoskCommand:          opts.VoskCommand,
+		VoskModelPath:        opts.VoskModelPath,
+		VoskGrammarPath:      opts.VoskGrammarPath,
+		FFmpegCommand:        opts.FFmpegCommand,
+		MaxPhotoBytes:        opts.MaxPhotoBytes,
+		MaxDocumentBytes:     opts.MaxDocumentBytes,
+		MaxAudioBytes:        opts.MaxAudioBytes,
+		MaxVideoBytes:        opts.MaxVideoBytes,
+		MaxGenericVideoBytes: opts.MaxGenericVideoBytes,
+		VideoTranscribeMode:  opts.VideoTranscribeMode,
 	}
 	history.ManualDownloadCommand = "telegram-harvest daily-download-media"
 	if opts.DownloadMedia {
@@ -870,11 +892,31 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 
 func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.HistoryOptions, opts dailyOptions, job dailyJob, out io.Writer) error {
 	records := make([]harvest.MessageRecord, 0)
-	encoder, file, err := harvest.OpenJSONL(job.OutputPath, false)
+	jsonlTempPath, file, err := createAtomicOutput(job.OutputPath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	publishedJSONL := false
+	defer func() {
+		_ = file.Close()
+		if !publishedJSONL {
+			_ = os.Remove(jsonlTempPath)
+		}
+	}()
+	encoder := json.NewEncoder(file)
+	jobHistory := history
+	var asrLogFile *os.File
+	if strings.TrimSpace(job.ASRLogPath) != "" {
+		asrEncoder, file, err := harvest.OpenJSONL(job.ASRLogPath, false)
+		if err != nil {
+			return err
+		}
+		asrLogFile = file
+		jobHistory.ASRLog = func(event harvest.ASRLogEvent) error {
+			return asrEncoder.Encode(event)
+		}
+		defer asrLogFile.Close()
+	}
 	progress := func(progress harvest.OutgoingDayProgress) error {
 		if !opts.Progress {
 			return nil
@@ -895,7 +937,7 @@ func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.
 		End:            job.End,
 		DialogLimit:    opts.DialogLimit,
 		IncludeService: opts.IncludeService,
-		History:        history,
+		History:        jobHistory,
 		Progress:       progress,
 	}, func(record harvest.MessageRecord) error {
 		records = append(records, record)
@@ -904,9 +946,46 @@ func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.
 	if err != nil {
 		return err
 	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if !stats.Complete {
+		for _, dialogErr := range stats.DialogErrors {
+			fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
+		}
+		fmt.Fprintf(out, "date=%s wrote=%d dialogs=%d dialogs_with_records=%d attachments=%d transcripts=%d out=%s",
+			job.Date,
+			stats.Records,
+			stats.DialogsScanned,
+			stats.DialogsWithRecords,
+			stats.Attachments,
+			stats.Transcripts,
+			job.OutputPath,
+		)
+		if job.MarkdownPath != "" {
+			fmt.Fprintf(out, " markdown=%s", job.MarkdownPath)
+		}
+		if job.ASRLogPath != "" {
+			fmt.Fprintf(out, " asr_log=%s", job.ASRLogPath)
+		}
+		fmt.Fprintf(out, " flood_waits=%d complete=false published=false\n", stats.FloodWaits)
+		return fmt.Errorf("daily job %s incomplete; final report was not published", job.Date)
+	}
+	markdownTempPath := ""
+	publishedMarkdown := false
 	if job.MarkdownPath != "" {
+		var err error
+		markdownTempPath, err = createAtomicTextPath(job.MarkdownPath)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if !publishedMarkdown {
+				_ = os.Remove(markdownTempPath)
+			}
+		}()
 		if err := harvest.WriteDailyMarkdown(harvest.DailyMarkdownOptions{
-			OutputPath: job.MarkdownPath,
+			OutputPath: markdownTempPath,
 			Date:       job.Date,
 			Start:      job.Start,
 			End:        job.End,
@@ -915,6 +994,16 @@ func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.
 		}); err != nil {
 			return err
 		}
+	}
+	if err := publishAtomicOutput(jsonlTempPath, job.OutputPath); err != nil {
+		return err
+	}
+	publishedJSONL = true
+	if markdownTempPath != "" {
+		if err := publishAtomicOutput(markdownTempPath, job.MarkdownPath); err != nil {
+			return err
+		}
+		publishedMarkdown = true
 	}
 	for _, dialogErr := range stats.DialogErrors {
 		fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
@@ -931,10 +1020,49 @@ func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.
 	if job.MarkdownPath != "" {
 		fmt.Fprintf(out, " markdown=%s", job.MarkdownPath)
 	}
+	if job.ASRLogPath != "" {
+		fmt.Fprintf(out, " asr_log=%s", job.ASRLogPath)
+	}
 	fmt.Fprintf(out, " flood_waits=%d complete=%t\n",
 		stats.FloodWaits,
 		stats.Complete,
 	)
+	return nil
+}
+
+func createAtomicOutput(path string) (string, *os.File, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil, fmt.Errorf("output path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", nil, fmt.Errorf("prepare output dir: %w", err)
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp output: %w", err)
+	}
+	return file.Name(), file, nil
+}
+
+func createAtomicTextPath(path string) (string, error) {
+	tempPath, file, err := createAtomicOutput(path)
+	if err != nil {
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return "", err
+	}
+	return tempPath, nil
+}
+
+func publishAtomicOutput(tempPath string, finalPath string) error {
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
+		return fmt.Errorf("prepare output dir: %w", err)
+	}
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		return fmt.Errorf("publish %s: %w", finalPath, err)
+	}
 	return nil
 }
 
@@ -1285,6 +1413,7 @@ func buildDailyCatchupPlan(cfg config.Config, reportDir string, fromRaw string, 
 			End:          day.AddDate(0, 0, 1),
 			OutputPath:   jsonlPath,
 			MarkdownPath: markdownPath,
+			ASRLogPath:   harvest.DailyDefaultASRLogPath(cfg.StateDir, date),
 		})
 	}
 	return plan, nil

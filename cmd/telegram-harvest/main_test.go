@@ -278,6 +278,16 @@ func TestBuildDailyCatchupPlanRequiresManualStartWithoutReports(t *testing.T) {
 	}
 }
 
+func TestValidateDailyOptionsRejectsInvalidVideoTranscribeMode(t *testing.T) {
+	if err := validateDailyOptions(dailyOptions{VideoTranscribeMode: "phone"}); err != nil {
+		t.Fatalf("phone mode rejected: %v", err)
+	}
+	err := validateDailyOptions(dailyOptions{VideoTranscribeMode: "cinema"})
+	if err == nil || !strings.Contains(err.Error(), "--transcribe-video") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func configForCatchup(root string) config.Config {
 	return config.Config{
 		StateDir: filepath.Join(root, ".state", "daily"),

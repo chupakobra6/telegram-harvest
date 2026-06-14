@@ -148,6 +148,80 @@ func TestTranscriptErrorMessageClassifiesNoAudioStream(t *testing.T) {
 	}
 }
 
+func TestGenericVideoTranscriptPolicyKeepsOnlyShortVerticalPhoneVideo(t *testing.T) {
+	base := harvest.Attachment{
+		Kind:            "video",
+		FileName:        "phone.mp4",
+		Size:            20 * 1024 * 1024,
+		DurationSeconds: 120,
+		Width:           1080,
+		Height:          1920,
+	}
+	if ok, reason := genericVideoTranscriptAllowed(base, harvest.HistoryOptions{}); !ok {
+		t.Fatalf("phone video rejected: %s", reason)
+	}
+
+	cases := []struct {
+		name       string
+		attachment harvest.Attachment
+		wantReason string
+	}{
+		{
+			name:       "horizontal",
+			attachment: withVideoShape(base, 1920, 1080, 120, 20*1024*1024),
+			wantReason: "not vertical",
+		},
+		{
+			name:       "too long",
+			attachment: withVideoShape(base, 1080, 1920, 361, 20*1024*1024),
+			wantReason: "duration",
+		},
+		{
+			name:       "too large",
+			attachment: withVideoShape(base, 1080, 1920, 120, harvest.DefaultMaxGenericVideoBytes+1),
+			wantReason: "size",
+		},
+		{
+			name:       "too high resolution",
+			attachment: withVideoShape(base, 1440, 2560, 120, 20*1024*1024),
+			wantReason: "resolution",
+		},
+		{
+			name:       "missing metadata",
+			attachment: withVideoShape(base, 0, 0, 0, 20*1024*1024),
+			wantReason: "duration",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, reason := genericVideoTranscriptAllowed(tc.attachment, harvest.HistoryOptions{})
+			if ok {
+				t.Fatalf("expected video to be rejected")
+			}
+			if !strings.Contains(reason, tc.wantReason) {
+				t.Fatalf("reason = %q, want contains %q", reason, tc.wantReason)
+			}
+		})
+	}
+
+	if ok, reason := genericVideoTranscriptAllowed(withVideoShape(base, 1920, 1080, 1000, 500*1024*1024), harvest.HistoryOptions{
+		VideoTranscribeMode: harvest.VideoTranscribeAll,
+	}); !ok {
+		t.Fatalf("all mode rejected generic video: %s", reason)
+	}
+	if ok, _ := genericVideoTranscriptAllowed(base, harvest.HistoryOptions{VideoTranscribeMode: harvest.VideoTranscribeOff}); ok {
+		t.Fatalf("off mode should reject generic video")
+	}
+}
+
+func withVideoShape(base harvest.Attachment, width int, height int, duration float64, size int64) harvest.Attachment {
+	base.Width = width
+	base.Height = height
+	base.DurationSeconds = duration
+	base.Size = size
+	return base
+}
+
 func TestExtractLinksFindsTextAndEntityURLsDedupingTelegramShortLinks(t *testing.T) {
 	got := extractLinks(
 		"open https://example.com/task, then t.me/group/10 and https://example.com/task",
@@ -240,6 +314,31 @@ func TestMediaLinksAndAttachmentsKeepAcademicMaterialsOnly(t *testing.T) {
 
 	if photoAttachments := extractAttachments(&tg.MessageMediaPhoto{}); len(photoAttachments) != 1 || photoAttachments[0].Kind != "photo" {
 		t.Fatalf("photo attachments=%#v", photoAttachments)
+	}
+}
+
+func TestDailyDocumentAttachmentAddsVideoMetadata(t *testing.T) {
+	media := &tg.MessageMediaDocument{Video: true}
+	media.SetDocument(&tg.Document{
+		ID:       42,
+		MimeType: "video/mp4",
+		Size:     12345,
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: "clip.mp4"},
+			&tg.DocumentAttributeVideo{Duration: 12.5, W: 720, H: 1280},
+		},
+	})
+
+	attachment, ok := dailyDocumentAttachment(media, 99)
+	if !ok {
+		t.Fatalf("expected daily video attachment")
+	}
+	if attachment.MediaID != "document:42" ||
+		attachment.FileName != "clip.mp4" ||
+		attachment.DurationSeconds != 12.5 ||
+		attachment.Width != 720 ||
+		attachment.Height != 1280 {
+		t.Fatalf("unexpected attachment metadata: %+v", attachment)
 	}
 }
 

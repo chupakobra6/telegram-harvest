@@ -1693,6 +1693,7 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 				attachment.MIMEType = doc.MimeType
 				attachment.Size = doc.Size
 				attachment.FileName = documentFileName(doc)
+				applyDocumentMetadata(&attachment, doc)
 			}
 		}
 		return []harvest.Attachment{attachment}
@@ -1749,6 +1750,7 @@ func dailyDocumentAttachment(media *tg.MessageMediaDocument, messageID int) (har
 			attachment.MIMEType = doc.MimeType
 			attachment.Size = doc.Size
 			attachment.FileName = documentFileName(doc)
+			applyDocumentMetadata(&attachment, doc)
 			if strings.TrimSpace(attachment.FileName) == "" {
 				attachment.FileName = fallbackFileName(kind, messageID, doc.MimeType)
 			}
@@ -1788,11 +1790,14 @@ func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attac
 			fileName = fallbackFileName(kind, messageID, doc.MimeType)
 		}
 		return harvest.Attachment{
-			Kind:     kind,
-			MediaID:  documentMediaID(doc),
-			MIMEType: doc.MimeType,
-			Size:     doc.Size,
-			FileName: fileName,
+			Kind:            kind,
+			MediaID:         documentMediaID(doc),
+			MIMEType:        doc.MimeType,
+			Size:            doc.Size,
+			DurationSeconds: documentDurationSeconds(doc),
+			Width:           documentVideoWidth(doc),
+			Height:          documentVideoHeight(doc),
+			FileName:        fileName,
 		}, doc.AsInputDocumentFileLocation(), fileName, true
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
@@ -1849,6 +1854,7 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 		record.Attachments[0].MIMEType = doc.MimeType
 		record.Attachments[0].Size = doc.Size
 		record.Attachments[0].FileName = fileName
+		applyDocumentMetadata(&record.Attachments[0], doc)
 		s.downloadAttachment(ctx, record, 0, doc.AsInputDocumentFileLocation(), fileName, opts)
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
@@ -1949,57 +1955,122 @@ func (s *Session) transcribeAttachmentMedia(
 		attachment.Transcript = transcript
 		attachment.TranscriptCached = true
 		touchTranscriptFile(transcriptPath)
+		emitASRLog(opts, asrLogEvent("cache_hit", "", "", *record, index, *attachment))
 		return
 	}
 	if !opts.TranscribeMedia {
 		attachment.TranscriptError = "skipped: transcription disabled for audio/video media"
+		emitASRLog(opts, asrLogEvent("skip", "policy", attachment.TranscriptError, *record, index, *attachment))
+		return
+	}
+	if ok, reason := genericVideoTranscriptAllowed(*attachment, opts); !ok {
+		attachment.TranscriptError = reason
+		emitASRLog(opts, asrLogEvent("skip", "policy", reason, *record, index, *attachment))
 		return
 	}
 	if mediaSizeLimitExceeded(record, index, opts) {
+		emitASRLog(opts, asrLogEvent("skip", "size", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
 	transcribeOpts := transcribeOptions(opts)
 	if opts.Transcriber == nil && !transcribeOpts.Configured() {
 		attachment.TranscriptError = "transcription is not configured"
+		emitASRLog(opts, asrLogEvent("skip", "config", attachment.TranscriptError, *record, index, *attachment))
 		return
 	}
 	tempPath, err := createTemporaryMediaPath(opts.MediaDir, fileName)
 	if err != nil {
 		attachment.DownloadError = fmt.Sprintf("prepare temporary media: %v", err)
+		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
 	defer os.Remove(tempPath)
+	emitASRLog(opts, asrLogEvent("download_start", "download", "", *record, index, *attachment))
 	if err := s.beforeRPC(ctx); err != nil {
 		attachment.DownloadError = err.Error()
+		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
 	downloadCtx, cancelDownload := context.WithTimeout(ctx, defaultDownloadTimeout)
 	defer cancelDownload()
+	downloadStart := time.Now()
 	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, tempPath); err != nil {
 		attachment.DownloadError = err.Error()
+		event := asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment)
+		event.DownloadSeconds = secondsSince(downloadStart)
+		emitASRLog(opts, event)
 		return
 	}
+	downloadSeconds := secondsSince(downloadStart)
 
 	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
 	defer cancel()
-	transcript, err := runTranscriber(transcribeCtx, opts.Transcriber, transcribeOpts, tempPath, transcriptPath)
+	transcribeStart := time.Now()
+	startEvent := asrLogEvent("transcribe_start", "transcribe", "", *record, index, *attachment)
+	startEvent.DownloadSeconds = downloadSeconds
+	startEvent.Engine = transcribeOpts.EngineName()
+	startEvent.InputBytes = localFileSize(tempPath)
+	emitASRLog(opts, startEvent)
+	result, err := runTranscriberDetailed(transcribeCtx, opts.Transcriber, transcribeOpts, tempPath, transcriptPath)
 	if err != nil {
 		attachment.TranscriptError = transcriptErrorMessage(err)
+		event := asrLogEvent("error", "transcribe", attachment.TranscriptError, *record, index, *attachment)
+		event.DownloadSeconds = downloadSeconds
+		event.Engine = transcribeOpts.EngineName()
+		event.InputBytes = localFileSize(tempPath)
+		event.TotalSeconds = time.Since(transcribeStart).Seconds() + downloadSeconds
+		emitASRLog(opts, event)
 		return
 	}
+	transcript := result.Text
 	if strings.TrimSpace(transcript) == "" {
 		if fromFile, readErr := readTranscriptFile(transcriptPath); readErr == nil {
 			transcript = fromFile
 		}
 	}
 	attachment.Transcript = transcript
+	event := asrLogEvent("transcribed", "transcribe", "", *record, index, *attachment)
+	event.DownloadSeconds = downloadSeconds
+	event.Engine = result.Engine
+	event.FFmpegSeconds = result.FFmpegDuration.Seconds()
+	event.ASRSeconds = result.ASRDuration.Seconds()
+	event.TotalSeconds = result.TotalDuration.Seconds() + downloadSeconds
+	event.InputBytes = result.InputBytes
+	event.WAVBytes = result.WAVBytes
+	event.WAVDurationSeconds = result.WAVDurationSeconds
+	event.TranscriptBytes = result.TranscriptBytes
+	if result.WAVDurationSeconds > 0 && result.ASRDuration > 0 {
+		event.RealTimeFactor = result.ASRDuration.Seconds() / result.WAVDurationSeconds
+	}
+	emitASRLog(opts, event)
 }
 
 func runTranscriber(ctx context.Context, runner harvest.Transcriber, opts transcribe.Options, inputPath string, outputPath string) (string, error) {
-	if runner != nil {
-		return runner.Run(ctx, inputPath, outputPath)
+	result, err := runTranscriberDetailed(ctx, runner, opts, inputPath, outputPath)
+	if err != nil {
+		return "", err
 	}
-	return transcribe.Run(ctx, opts, inputPath, outputPath)
+	return result.Text, nil
+}
+
+func runTranscriberDetailed(ctx context.Context, runner harvest.Transcriber, opts transcribe.Options, inputPath string, outputPath string) (transcribe.Result, error) {
+	if runner != nil {
+		if detailed, ok := runner.(interface {
+			RunDetailed(context.Context, string, string) (transcribe.Result, error)
+		}); ok {
+			return detailed.RunDetailed(ctx, inputPath, outputPath)
+		}
+		text, err := runner.Run(ctx, inputPath, outputPath)
+		if err != nil {
+			return transcribe.Result{}, err
+		}
+		return transcribe.Result{
+			Text:            text,
+			Engine:          "custom",
+			TranscriptBytes: int64(len([]byte(text))),
+		}, nil
+	}
+	return transcribe.RunDetailed(ctx, opts, inputPath, outputPath)
 }
 
 func transcriptErrorMessage(err error) string {
@@ -2023,6 +2094,105 @@ func transcriptMediaKind(kind string) bool {
 	default:
 		return false
 	}
+}
+
+func genericVideoTranscriptAllowed(attachment harvest.Attachment, opts harvest.HistoryOptions) (bool, string) {
+	if attachment.Kind != "video" {
+		return true, ""
+	}
+	mode := strings.TrimSpace(opts.VideoTranscribeMode)
+	if mode == "" {
+		mode = harvest.VideoTranscribePhone
+	}
+	switch mode {
+	case harvest.VideoTranscribeOff:
+		return false, "skipped: generic video transcription disabled"
+	case harvest.VideoTranscribeAll:
+		return true, ""
+	case harvest.VideoTranscribePhone:
+	default:
+		return false, fmt.Sprintf("skipped: invalid video transcribe mode %q", mode)
+	}
+	if attachment.DurationSeconds <= 0 {
+		return false, "skipped: generic video metadata is missing duration"
+	}
+	if attachment.DurationSeconds > harvest.DefaultMaxGenericVideoSeconds {
+		return false, fmt.Sprintf("skipped: generic video duration %.1fs exceeds cap %ds", attachment.DurationSeconds, harvest.DefaultMaxGenericVideoSeconds)
+	}
+	if attachment.Width <= 0 || attachment.Height <= 0 {
+		return false, "skipped: generic video metadata is missing resolution"
+	}
+	if attachment.Width >= attachment.Height {
+		return false, fmt.Sprintf("skipped: generic video is not vertical phone video (%dx%d)", attachment.Width, attachment.Height)
+	}
+	shortSide := min(attachment.Width, attachment.Height)
+	longSide := max(attachment.Width, attachment.Height)
+	if shortSide > harvest.DefaultMaxGenericVideoShortSide || longSide > harvest.DefaultMaxGenericVideoLongSide {
+		return false, fmt.Sprintf("skipped: generic video resolution %dx%d exceeds phone cap %dx%d", attachment.Width, attachment.Height, harvest.DefaultMaxGenericVideoShortSide, harvest.DefaultMaxGenericVideoLongSide)
+	}
+	maxBytes := opts.MaxGenericVideoBytes
+	if maxBytes <= 0 {
+		maxBytes = harvest.DefaultMaxGenericVideoBytes
+	}
+	if maxBytes > 0 && attachment.Size > maxBytes {
+		return false, fmt.Sprintf("skipped: generic video size %s exceeds phone video cap %s", formatBytes(attachment.Size), formatBytes(maxBytes))
+	}
+	return true, ""
+}
+
+func asrLogEvent(action string, stage string, reason string, record harvest.MessageRecord, index int, attachment harvest.Attachment) harvest.ASRLogEvent {
+	event := harvest.ASRLogEvent{
+		At:                  time.Now().UTC(),
+		Action:              action,
+		Stage:               stage,
+		Reason:              reason,
+		Date:                record.Date,
+		Chat:                record.Chat,
+		MessageID:           record.MessageID,
+		AttachmentIndex:     index + 1,
+		Kind:                attachment.Kind,
+		MediaID:             attachment.MediaID,
+		FileName:            attachment.FileName,
+		MIMEType:            attachment.MIMEType,
+		Size:                attachment.Size,
+		DurationSeconds:     attachment.DurationSeconds,
+		Width:               attachment.Width,
+		Height:              attachment.Height,
+		TranscriptPath:      attachment.TranscriptPath,
+		TranscriptCached:    attachment.TranscriptCached,
+		VideoTranscribeMode: harvest.VideoTranscribePhone,
+	}
+	if action == "error" {
+		event.Error = reason
+	}
+	return event
+}
+
+func emitASRLog(opts harvest.HistoryOptions, event harvest.ASRLogEvent) {
+	if opts.ASRLog == nil {
+		return
+	}
+	mode := strings.TrimSpace(opts.VideoTranscribeMode)
+	if mode == "" {
+		mode = harvest.VideoTranscribePhone
+	}
+	event.VideoTranscribeMode = mode
+	_ = opts.ASRLog(event)
+}
+
+func secondsSince(start time.Time) float64 {
+	if start.IsZero() {
+		return 0
+	}
+	return time.Since(start).Seconds()
+}
+
+func localFileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 func readTranscriptFile(path string) (string, error) {
@@ -2383,6 +2553,58 @@ func documentKind(media *tg.MessageMediaDocument) string {
 		}
 	}
 	return "document"
+}
+
+func applyDocumentMetadata(attachment *harvest.Attachment, doc *tg.Document) {
+	if attachment == nil || doc == nil {
+		return
+	}
+	attachment.DurationSeconds = documentDurationSeconds(doc)
+	attachment.Width = documentVideoWidth(doc)
+	attachment.Height = documentVideoHeight(doc)
+}
+
+func documentDurationSeconds(doc *tg.Document) float64 {
+	if doc == nil {
+		return 0
+	}
+	for _, attr := range doc.Attributes {
+		switch typed := attr.(type) {
+		case *tg.DocumentAttributeAudio:
+			if typed.Duration > 0 {
+				return float64(typed.Duration)
+			}
+		case *tg.DocumentAttributeVideo:
+			if typed.Duration > 0 {
+				return typed.Duration
+			}
+		}
+	}
+	return 0
+}
+
+func documentVideoWidth(doc *tg.Document) int {
+	if doc == nil {
+		return 0
+	}
+	for _, attr := range doc.Attributes {
+		if typed, ok := attr.(*tg.DocumentAttributeVideo); ok {
+			return typed.W
+		}
+	}
+	return 0
+}
+
+func documentVideoHeight(doc *tg.Document) int {
+	if doc == nil {
+		return 0
+	}
+	for _, attr := range doc.Attributes {
+		if typed, ok := attr.(*tg.DocumentAttributeVideo); ok {
+			return typed.H
+		}
+	}
+	return 0
 }
 
 func documentMediaID(doc *tg.Document) string {

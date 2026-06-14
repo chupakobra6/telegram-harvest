@@ -3,7 +3,7 @@
 Локальный read-only CLI для сбора Telegram-данных через MTProto user authorization.
 Проект рассчитан на два практических сценария:
 
-- **daily reports** - личные исходящие сообщения за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/video через Vosk;
+- **daily reports** - личные исходящие сообщения за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через Vosk;
 - **study harvest** - выгрузка, синк и агентские Markdown-представления для учебных чатов из allowlist.
 
 CLI один и тот же для всех сценариев. Аккаунт выбирается профилем `main` или `study`, а не отдельными account-specific командами.
@@ -16,7 +16,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей/env нет. |
 | Daily | Сканирует диалоги за один московский день и пишет только outgoing/self сообщения авторизованного аккаунта. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
-| Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации. |
+| Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
 | Vosk | Go helper `bin/vosk-transcribe` работает как session worker: модель грузится один раз на запуск `daily`. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
@@ -103,6 +103,7 @@ go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04
 ```text
 reports/daily/YYYY-MM-DD.md
 .state/daily/jsonl/YYYY-MM-DD.jsonl
+.state/daily/asr/YYYY-MM-DD.jsonl
 .state/daily/media/...
 .state/daily/transcripts/cache/...
 ```
@@ -111,12 +112,17 @@ Markdown в `reports/daily` - основной человекочитаемый 
 
 JSONL в `.state/daily/jsonl` - технический audit/source layer. Он хранит raw-поля вроде `media_id`, `local_path`, `transcript_path`, `download_hint` и нужен для отладки, пересборки и анализа, но не является пользовательским отчетом.
 
+ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Он пишется даже для прерванных прогонов.
+
+Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
+
 Полезные флаги:
 
 ```bash
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --progress
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe-video=phone
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
@@ -154,7 +160,8 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 | Photo / image document | 10 MiB | Сохраняется под `.state/.../media`. |
 | Generic document | 10 MiB | Сохраняется под `.state/.../media`. |
 | Voice / audio | 50 MiB | Временно скачивается для транскрибации. |
-| Video / round video | 200 MiB | Временно скачивается для транскрибации. |
+| Round video | 200 MiB | Временно скачивается для транскрибации. |
+| Generic video | 80 MiB phone prefilter, then 200 MiB media cap | По умолчанию транскрибируются только vertical phone videos до 6 минут и не выше 1080x1920. |
 
 Если файл выше лимита, JSONL сохраняет `download_error` и `download_hint`, а Markdown остается чистым пользовательским отчетом. Ручное скачивание делается отдельной командой и лимиты не применяет:
 
@@ -193,7 +200,15 @@ vosk-transcribe --session <model-dir> [grammar-json-path]
 {"id":1,"text":"recognized text"}
 ```
 
-Это гибридный режим: постоянного демона нет, но внутри одного `daily`-запуска модель грузится один раз и переиспользуется для всех voice/audio/video cache misses. Если все транскрипты уже есть в кэше, Vosk process не стартует.
+Это гибридный режим: постоянного демона нет, но внутри одного `daily`-запуска модель грузится один раз и переиспользуется для всех voice/audio/round-video/generic-video cache misses. Если все транскрипты уже есть в кэше, Vosk process не стартует.
+
+Generic `video` по умолчанию идет через preflight `--transcribe-video=phone`: только вертикальные телефонные видео с Telegram metadata, длительностью до 360 секунд, размером до 80 MiB и разрешением не выше 1080x1920. Горизонтальные фильмы/длинные ролики скипаются до скачивания и попадают в ASR log со skip reason. Режимы:
+
+```bash
+--transcribe-video=phone # default: only short vertical phone videos
+--transcribe-video=all   # transcribe generic video too, still subject to media byte caps
+--transcribe-video=off   # never transcribe generic video
+```
 
 Поддерживаемые настройки:
 
@@ -209,6 +224,8 @@ TG_HARVEST_DAILY_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --outp
 
 Такой hook запускается per attachment и не использует Vosk session protocol.
 
+Текущий Vosk helper использует `libvosk`/Kaldi на CPU. Он не использует Apple Metal; для Metal-ускорения нужен отдельный Whisper/whisper.cpp backend или session helper.
+
 ## Производительность daily
 
 На текущем диапазоне 2026-05-17 ... 2026-06-04 полный main-прогон с Vosk занял около часа. Практические ориентиры:
@@ -217,10 +234,10 @@ TG_HARVEST_DAILY_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --outp
 | --- | ---: |
 | Почти без ASR | 1.5-2 минуты |
 | Обычный день с voice/round-video | 2.5-6 минут |
-| Тяжелый день с десятками media/ASR | 6-8 минут |
+| Тяжелый день с десятками voice/round-video/phone-video ASR | 6-8 минут |
 | 19 дней с локальным Vosk CPU | около 1 часа |
 
-Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
+Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в CPU ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
 Daily пропускает per-chat history/search для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.
 
 ## Study sync

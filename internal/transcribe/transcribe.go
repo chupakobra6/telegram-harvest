@@ -28,7 +28,20 @@ type Options struct {
 
 type ManagedRunner interface {
 	Run(ctx context.Context, inputPath string, outputPath string) (string, error)
+	RunDetailed(ctx context.Context, inputPath string, outputPath string) (Result, error)
 	Close() error
+}
+
+type Result struct {
+	Text               string
+	Engine             string
+	FFmpegDuration     time.Duration
+	ASRDuration        time.Duration
+	TotalDuration      time.Duration
+	InputBytes         int64
+	WAVBytes           int64
+	WAVDurationSeconds float64
+	TranscriptBytes    int64
 }
 
 func NewManagedRunner(opts Options) ManagedRunner {
@@ -56,19 +69,45 @@ func (o Options) EngineName() string {
 }
 
 func Run(ctx context.Context, opts Options, inputPath string, outputPath string) (string, error) {
+	result, err := RunDetailed(ctx, opts, inputPath, outputPath)
+	if err != nil {
+		return "", err
+	}
+	return result.Text, nil
+}
+
+func RunDetailed(ctx context.Context, opts Options, inputPath string, outputPath string) (Result, error) {
+	start := time.Now()
 	if strings.TrimSpace(inputPath) == "" {
-		return "", fmt.Errorf("input path is empty")
+		return Result{}, fmt.Errorf("input path is empty")
 	}
 	if strings.TrimSpace(outputPath) == "" {
-		return "", fmt.Errorf("output path is empty")
+		return Result{}, fmt.Errorf("output path is empty")
 	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
-		return "", fmt.Errorf("prepare transcript dir: %w", err)
+		return Result{}, fmt.Errorf("prepare transcript dir: %w", err)
 	}
+	inputBytes := fileSize(inputPath)
 	if strings.TrimSpace(opts.CommandTemplate) != "" {
-		return runCommandTemplate(ctx, opts.CommandTemplate, inputPath, outputPath)
+		text, err := runCommandTemplate(ctx, opts.CommandTemplate, inputPath, outputPath)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{
+			Text:            text,
+			Engine:          opts.EngineName(),
+			TotalDuration:   time.Since(start),
+			InputBytes:      inputBytes,
+			TranscriptBytes: int64(len([]byte(text))),
+		}, nil
 	}
-	return runVosk(ctx, opts, inputPath, outputPath)
+	result, err := runVoskDetailed(ctx, opts, inputPath, outputPath)
+	if err != nil {
+		return Result{}, err
+	}
+	result.TotalDuration = time.Since(start)
+	result.InputBytes = inputBytes
+	return result, nil
 }
 
 type standaloneRunner struct {
@@ -77,6 +116,10 @@ type standaloneRunner struct {
 
 func (r standaloneRunner) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
 	return Run(ctx, r.opts, inputPath, outputPath)
+}
+
+func (r standaloneRunner) RunDetailed(ctx context.Context, inputPath string, outputPath string) (Result, error) {
+	return RunDetailed(ctx, r.opts, inputPath, outputPath)
 }
 
 func (r standaloneRunner) Close() error {
@@ -108,56 +151,80 @@ type voskSessionResponse struct {
 }
 
 func (r *VoskSessionRunner) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
-	if strings.TrimSpace(inputPath) == "" {
-		return "", fmt.Errorf("input path is empty")
-	}
-	if strings.TrimSpace(outputPath) == "" {
-		return "", fmt.Errorf("output path is empty")
-	}
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
-		return "", fmt.Errorf("prepare transcript dir: %w", err)
-	}
-
-	wavPath, cleanup, err := convertToVoskWAV(ctx, r.opts, inputPath, outputPath)
+	result, err := r.RunDetailed(ctx, inputPath, outputPath)
 	if err != nil {
 		return "", err
 	}
+	return result.Text, nil
+}
+
+func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, outputPath string) (Result, error) {
+	start := time.Now()
+	if strings.TrimSpace(inputPath) == "" {
+		return Result{}, fmt.Errorf("input path is empty")
+	}
+	if strings.TrimSpace(outputPath) == "" {
+		return Result{}, fmt.Errorf("output path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+		return Result{}, fmt.Errorf("prepare transcript dir: %w", err)
+	}
+
+	ffmpegStart := time.Now()
+	wavPath, cleanup, err := convertToVoskWAV(ctx, r.opts, inputPath, outputPath)
+	if err != nil {
+		return Result{}, err
+	}
+	ffmpegDuration := time.Since(ffmpegStart)
 	defer cleanup()
+	wavBytes := fileSize(wavPath)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return "", fmt.Errorf("vosk session is closed")
+		return Result{}, fmt.Errorf("vosk session is closed")
 	}
 	if err := r.startLocked(); err != nil {
-		return "", err
+		return Result{}, err
 	}
 	r.nextID++
 	requestID := r.nextID
+	asrStart := time.Now()
 	if err := json.NewEncoder(r.stdin).Encode(voskSessionRequest{
 		ID:      requestID,
 		WAVPath: wavPath,
 	}); err != nil {
 		r.stopProcessLocked(true)
-		return "", fmt.Errorf("write vosk session request: %w%s", err, r.processDetailLocked())
+		return Result{}, fmt.Errorf("write vosk session request: %w%s", err, r.processDetailLocked())
 	}
 
 	response, err := r.readResponseLocked(ctx)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
+	asrDuration := time.Since(asrStart)
 	if response.ID != requestID {
 		r.stopProcessLocked(true)
-		return "", fmt.Errorf("vosk session response id = %d, want %d", response.ID, requestID)
+		return Result{}, fmt.Errorf("vosk session response id = %d, want %d", response.ID, requestID)
 	}
 	if detail := strings.TrimSpace(response.Error); detail != "" {
-		return "", fmt.Errorf("vosk session: %s", detail)
+		return Result{}, fmt.Errorf("vosk session: %s", detail)
 	}
 	text := strings.TrimSpace(response.Text)
 	if err := os.WriteFile(outputPath, []byte(text), 0o600); err != nil {
-		return "", fmt.Errorf("write transcript: %w", err)
+		return Result{}, fmt.Errorf("write transcript: %w", err)
 	}
-	return text, nil
+	return Result{
+		Text:               text,
+		Engine:             r.opts.EngineName(),
+		FFmpegDuration:     ffmpegDuration,
+		ASRDuration:        asrDuration,
+		TotalDuration:      time.Since(start),
+		InputBytes:         fileSize(inputPath),
+		WAVBytes:           wavBytes,
+		WAVDurationSeconds: wavPCM16MonoDuration(wavBytes),
+		TranscriptBytes:    int64(len([]byte(text))),
+	}, nil
 }
 
 func (r *VoskSessionRunner) Close() error {
@@ -168,20 +235,32 @@ func (r *VoskSessionRunner) Close() error {
 }
 
 func runVosk(ctx context.Context, opts Options, inputPath string, outputPath string) (string, error) {
-	voskCommand := strings.TrimSpace(opts.VoskCommand)
-	if voskCommand == "" {
-		return "", fmt.Errorf("vosk command is empty")
-	}
-	modelPath := strings.TrimSpace(opts.VoskModelPath)
-	if modelPath == "" {
-		return "", fmt.Errorf("vosk model path is empty")
-	}
-
-	wavPath, cleanup, err := convertToVoskWAV(ctx, opts, inputPath, outputPath)
+	result, err := runVoskDetailed(ctx, opts, inputPath, outputPath)
 	if err != nil {
 		return "", err
 	}
+	return result.Text, nil
+}
+
+func runVoskDetailed(ctx context.Context, opts Options, inputPath string, outputPath string) (Result, error) {
+	start := time.Now()
+	voskCommand := strings.TrimSpace(opts.VoskCommand)
+	if voskCommand == "" {
+		return Result{}, fmt.Errorf("vosk command is empty")
+	}
+	modelPath := strings.TrimSpace(opts.VoskModelPath)
+	if modelPath == "" {
+		return Result{}, fmt.Errorf("vosk model path is empty")
+	}
+
+	ffmpegStart := time.Now()
+	wavPath, cleanup, err := convertToVoskWAV(ctx, opts, inputPath, outputPath)
+	if err != nil {
+		return Result{}, err
+	}
+	ffmpegDuration := time.Since(ffmpegStart)
 	defer cleanup()
+	wavBytes := fileSize(wavPath)
 
 	voskArgs := []string{modelPath, wavPath}
 	if grammarPath := strings.TrimSpace(opts.VoskGrammarPath); grammarPath != "" {
@@ -192,14 +271,26 @@ func runVosk(ctx context.Context, opts Options, inputPath string, outputPath str
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	asrStart := time.Now()
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("vosk: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return Result{}, fmt.Errorf("vosk: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
+	asrDuration := time.Since(asrStart)
 	text := strings.TrimSpace(stdout.String())
 	if err := os.WriteFile(outputPath, []byte(text), 0o600); err != nil {
-		return "", fmt.Errorf("write transcript: %w", err)
+		return Result{}, fmt.Errorf("write transcript: %w", err)
 	}
-	return text, nil
+	return Result{
+		Text:               text,
+		Engine:             opts.EngineName(),
+		FFmpegDuration:     ffmpegDuration,
+		ASRDuration:        asrDuration,
+		TotalDuration:      time.Since(start),
+		InputBytes:         fileSize(inputPath),
+		WAVBytes:           wavBytes,
+		WAVDurationSeconds: wavPCM16MonoDuration(wavBytes),
+		TranscriptBytes:    int64(len([]byte(text))),
+	}, nil
 }
 
 func (r *VoskSessionRunner) startLocked() error {
@@ -415,4 +506,21 @@ func trimDetail(value string) string {
 		return value
 	}
 	return value[:500] + "..."
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func wavPCM16MonoDuration(size int64) float64 {
+	const wavHeaderBytes = 44
+	const bytesPerSecond = 16000 * 2
+	if size <= wavHeaderBytes {
+		return 0
+	}
+	return float64(size-wavHeaderBytes) / bytesPerSecond
 }

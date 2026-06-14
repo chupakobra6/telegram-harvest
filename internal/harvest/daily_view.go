@@ -194,6 +194,10 @@ func DailyDefaultOutputPaths(stateDir string, date string) (string, string) {
 		filepath.Join(reportRoot, date+".md")
 }
 
+func DailyDefaultASRLogPath(stateDir string, date string) string {
+	return filepath.Join(stateDir, "asr", date+".jsonl")
+}
+
 func DailyDefaultReportRoot(stateDir string) string {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
