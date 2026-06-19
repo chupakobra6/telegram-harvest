@@ -196,15 +196,15 @@ func (c Config) LoginCommand() string {
 }
 
 func (c Config) RuntimeLockPath() string {
-	sessionPath := c.SessionPath
+	sessionPath := strings.TrimSpace(c.SessionPath)
 	if sessionPath == "" {
-		sessionPath = DefaultSessionPath
+		if c.Mode == ModeMain {
+			sessionPath = DefaultMainSessionPath
+		} else {
+			sessionPath = DefaultSessionPath
+		}
 	}
-	dir := filepath.Dir(sessionPath)
-	if dir == "." || dir == "" {
-		return "runtime.lock"
-	}
-	return filepath.Join(dir, "runtime.lock")
+	return sessionPath + ".runtime.lock"
 }
 
 func defaultString(value string, fallback string) string {

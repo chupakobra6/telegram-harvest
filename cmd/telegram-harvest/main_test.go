@@ -178,7 +178,7 @@ func TestRunReadCommandsRefuseChatsOutsideAllowlistBeforeRuntimeAccess(t *testin
 		if !strings.Contains(stderr, "outside TG_HARVEST_STUDY_ALLOWED_CHATS") {
 			t.Fatalf("%v missing allowlist error: %s", args, stderr)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "sessions", "runtime.lock")); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, "sessions", "study.json.runtime.lock")); !os.IsNotExist(err) {
 			t.Fatalf("%v should not acquire runtime lock, stat err=%v", args, err)
 		}
 	}
@@ -305,7 +305,7 @@ func TestRunDailyCatchupRejectsInvalidVideoTranscribeModeBeforeRuntimeAccess(t *
 	if !strings.Contains(stderr, "--transcribe-video must be one of: phone, all, off") {
 		t.Fatalf("missing video mode validation error: %s", stderr)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(sessionPath), "runtime.lock")); !os.IsNotExist(err) {
+	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
 		t.Fatalf("daily-catchup should not acquire runtime lock, stat err=%v", err)
 	}
 }

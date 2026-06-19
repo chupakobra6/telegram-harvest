@@ -334,7 +334,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --help
 | `internal/mtproto` | Telegram transport, login, dialogs/history/topics/daily reads. |
 | `internal/harvest` | JSONL model, sync state, daily Markdown, compact и agent views. |
 | `internal/transcribe` | ffmpeg conversion, Vosk session runner, custom command hook. |
-| `internal/runlock` | Per-session lock, чтобы не запускать два MTProto процесса на одну session file. |
+| `internal/runlock` | Per-session lock по файлу вида `.sessions/<session>.json.runtime.lock`, чтобы не запускать два MTProto процесса на одну session file и не блокировать другой аккаунт. |
 | `reports/daily` | Локальные Markdown-отчеты для пользователя, ignored by git. |
 
 ## Safety model

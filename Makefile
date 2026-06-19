@@ -98,4 +98,4 @@ refresh-agent-view: agent-view compact
 clean:
 	rm -rf .state artifacts telegram-harvest agent-view media media-refresh bin
 	rm -f messages.jsonl messages.toon *.log
-	rm -f .sessions/runtime.lock
+	rm -f .sessions/*.runtime.lock

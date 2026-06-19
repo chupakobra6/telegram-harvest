@@ -249,8 +249,24 @@ func TestWithRootAndRuntimeLockPath(t *testing.T) {
 	if cfg.StateDir != filepath.Join(root, ".state") {
 		t.Fatalf("unexpected state dir: %s", cfg.StateDir)
 	}
-	if got := cfg.RuntimeLockPath(); got != filepath.Join(root, ".sessions", "runtime.lock") {
+	if got := cfg.RuntimeLockPath(); got != filepath.Join(root, ".sessions", "study.json.runtime.lock") {
 		t.Fatalf("runtime lock = %s", got)
+	}
+}
+
+func TestRuntimeLockPathIsPerSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	study := Config{SessionPath: filepath.Join(dir, "sessions", "study.json")}
+	main := Config{SessionPath: filepath.Join(dir, "sessions", "main.json")}
+
+	if study.RuntimeLockPath() == main.RuntimeLockPath() {
+		t.Fatalf("runtime locks should differ: %s", study.RuntimeLockPath())
+	}
+	if got := study.RuntimeLockPath(); got != filepath.Join(dir, "sessions", "study.json.runtime.lock") {
+		t.Fatalf("study runtime lock = %s", got)
+	}
+	if got := main.RuntimeLockPath(); got != filepath.Join(dir, "sessions", "main.json.runtime.lock") {
+		t.Fatalf("main runtime lock = %s", got)
 	}
 }
 
