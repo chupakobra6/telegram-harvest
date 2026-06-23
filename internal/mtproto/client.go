@@ -1810,7 +1810,11 @@ func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attac
 }
 
 func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
-	if !opts.DownloadMedia || record == nil || len(record.Attachments) == 0 {
+	if !opts.DownloadMedia || record == nil {
+		return
+	}
+	ensureDailyAttachments(msgClass, record)
+	if len(record.Attachments) == 0 {
 		return
 	}
 	msg, ok := msgClass.(*tg.Message)

@@ -342,6 +342,33 @@ func TestDailyDocumentAttachmentAddsVideoMetadata(t *testing.T) {
 	}
 }
 
+func TestDownloadRecordMediaEnsuresTranscriptAttachmentMetadata(t *testing.T) {
+	media := &tg.MessageMediaDocument{Voice: true}
+	media.SetDocument(&tg.Document{
+		ID:       84,
+		MimeType: "audio/ogg",
+		Size:     1234,
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeAudio{Voice: true, Duration: 3},
+		},
+	})
+	record := harvest.MessageRecord{MessageID: 55, Kind: "voice"}
+
+	session := &Session{}
+	session.downloadRecordMedia(context.Background(), &tg.Message{ID: 55, Media: media}, &record, harvest.HistoryOptions{DownloadMedia: true})
+
+	if len(record.Attachments) != 1 {
+		t.Fatalf("attachments len = %d, want 1", len(record.Attachments))
+	}
+	attachment := record.Attachments[0]
+	if attachment.Kind != "voice" ||
+		attachment.MediaID != "document:84" ||
+		attachment.FileName != "voice-55.oga" ||
+		attachment.DurationSeconds != 3 {
+		t.Fatalf("unexpected attachment metadata: %+v", attachment)
+	}
+}
+
 func TestMediaSizeLimitExceededWritesActionableHint(t *testing.T) {
 	record := harvest.MessageRecord{
 		Chat:      harvest.Chat{ID: 123, Display: "Study"},
