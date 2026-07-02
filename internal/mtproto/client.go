@@ -34,7 +34,7 @@ const (
 	defaultRPCTimeout        = 30 * time.Second
 	defaultDialogTimeout     = 45 * time.Second
 	defaultHistoryTimeout    = 45 * time.Second
-	defaultDownloadTimeout   = 2 * time.Minute
+	defaultDownloadTimeout   = 30 * time.Minute
 	defaultTranscribeTimeout = 10 * time.Minute
 	maxFloodWaitRetries      = 3
 	defaultDialogBatchSize   = 100
@@ -514,8 +514,14 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 }
 
 func (s *Session) fetchMessageByID(ctx context.Context, target resolvedTarget, messageID int) (tg.MessageClass, peer.Entities, error) {
+	msgClass, entities, err := s.fetchMessageByIDDirect(ctx, target, messageID)
+	if err == nil {
+		return msgClass, entities, nil
+	}
+	directErr := err
+
 	var result tg.MessagesMessagesClass
-	err := s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
+	err = s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
 		var callErr error
 		result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
 			Peer:  target.InputPeer,
@@ -529,13 +535,51 @@ func (s *Session) fetchMessageByID(ctx context.Context, target resolvedTarget, m
 	if err != nil {
 		return nil, peer.Entities{}, err
 	}
+	entities = historyEntities(result)
+	for _, msg := range historyMessages(result) {
+		if typed, ok := msg.(*tg.Message); ok && typed.ID == messageID {
+			return msg, entities, nil
+		}
+	}
+	if directErr != nil {
+		return nil, entities, fmt.Errorf("message %d not found: %w", messageID, directErr)
+	}
+	return nil, entities, fmt.Errorf("message %d not found", messageID)
+}
+
+func (s *Session) fetchMessageByIDDirect(ctx context.Context, target resolvedTarget, messageID int) (tg.MessageClass, peer.Entities, error) {
+	inputID := []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}}
+	var result tg.MessagesMessagesClass
+	switch inputPeer := target.InputPeer.(type) {
+	case *tg.InputPeerChannel:
+		err := s.performRPC(ctx, "channels_get_messages", func(callCtx context.Context) error {
+			var callErr error
+			result, callErr = s.raw.ChannelsGetMessages(callCtx, &tg.ChannelsGetMessagesRequest{
+				Channel: &tg.InputChannel{ChannelID: inputPeer.ChannelID, AccessHash: inputPeer.AccessHash},
+				ID:      inputID,
+			})
+			return callErr
+		})
+		if err != nil {
+			return nil, peer.Entities{}, err
+		}
+	default:
+		err := s.performRPC(ctx, "messages_get_messages", func(callCtx context.Context) error {
+			var callErr error
+			result, callErr = s.raw.MessagesGetMessages(callCtx, inputID)
+			return callErr
+		})
+		if err != nil {
+			return nil, peer.Entities{}, err
+		}
+	}
 	entities := historyEntities(result)
 	for _, msg := range historyMessages(result) {
 		if typed, ok := msg.(*tg.Message); ok && typed.ID == messageID {
 			return msg, entities, nil
 		}
 	}
-	return nil, entities, fmt.Errorf("message %d not found", messageID)
+	return nil, entities, fmt.Errorf("direct message lookup returned no message %d", messageID)
 }
 
 func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingDayStats, error) {
