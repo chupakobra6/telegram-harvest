@@ -421,7 +421,14 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 		mergeTopicMap(topicByID, historyTopics(result), messages)
 
 		minSeenID := 0
+		reachedStart := false
 		for _, msgClass := range messages {
+			if id := messageID(msgClass); id > 0 && (minSeenID == 0 || id < minSeenID) {
+				minSeenID = id
+			}
+			if historyMessageBeforeStart(msgClass, opts) {
+				reachedStart = true
+			}
 			record, ok := normalizeRecord(msgClass, target.Chat, entities)
 			if !ok {
 				continue
@@ -430,13 +437,13 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 			if opts.MinID > 0 && record.MessageID <= opts.MinID {
 				continue
 			}
+			if !historyRecordInTimeRange(record, opts) {
+				continue
+			}
 			s.downloadRecordMedia(ctx, msgClass, &record, opts)
 			records = append(records, record)
-			if minSeenID == 0 || record.MessageID < minSeenID {
-				minSeenID = record.MessageID
-			}
 		}
-		if minSeenID == 0 || len(messages) < batchLimit {
+		if reachedStart || minSeenID == 0 || len(messages) < batchLimit {
 			break
 		}
 		offsetID = minSeenID
@@ -749,9 +756,13 @@ func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarge
 
 		batchRecords := make([]harvest.MessageRecord, 0, len(messages))
 		minMessageID := 0
+		reachedStart := false
 		for _, msgClass := range messages {
 			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
 				minMessageID = id
+			}
+			if historyMessageBeforeStart(msgClass, opts) {
+				reachedStart = true
 			}
 			record, ok := normalizeRecord(msgClass, target.Chat, entities)
 			if !ok {
@@ -759,6 +770,9 @@ func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarge
 			}
 			annotateRecordTopic(&record, opts, topicByID)
 			if opts.MinID > 0 && record.MessageID <= opts.MinID {
+				continue
+			}
+			if !historyRecordInTimeRange(record, opts) {
 				continue
 			}
 			s.downloadRecordMedia(ctx, msgClass, &record, opts)
@@ -780,7 +794,7 @@ func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarge
 				stats.LastID = record.MessageID
 			}
 		}
-		done := minMessageID == 0 || len(messages) < batchLimit
+		done := reachedStart || minMessageID == 0 || len(messages) < batchLimit
 		if done {
 			stats.Complete = true
 		}
@@ -950,6 +964,24 @@ func (s *Session) collectOutgoingDay(
 func messageAtOrBefore(msg tg.MessageClass, boundary time.Time) bool {
 	date := messageDate(msg)
 	return date > 0 && !time.Unix(int64(date), 0).UTC().After(boundary)
+}
+
+func historyMessageBeforeStart(msg tg.MessageClass, opts harvest.HistoryOptions) bool {
+	if opts.Start.IsZero() {
+		return false
+	}
+	date := messageDate(msg)
+	return date > 0 && time.Unix(int64(date), 0).UTC().Before(opts.Start)
+}
+
+func historyRecordInTimeRange(record harvest.MessageRecord, opts harvest.HistoryOptions) bool {
+	if !opts.Start.IsZero() && record.Date.Before(opts.Start) {
+		return false
+	}
+	if !opts.End.IsZero() && !record.Date.Before(opts.End) {
+		return false
+	}
+	return true
 }
 
 func finalizeHistoryStats(stats *harvest.HistoryStats, records []harvest.MessageRecord, floodWaits int) {

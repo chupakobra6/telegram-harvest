@@ -130,6 +130,8 @@ type HistoryOptions struct {
 	MaxBatches            int
 	MinID                 int
 	StartOffsetID         int
+	Start                 time.Time
+	End                   time.Time
 	All                   bool
 	TopicID               int
 	TopicTitle            string

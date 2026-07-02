@@ -195,7 +195,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
-	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --limit 500 --out hse-main.jsonl [--download-media --media-dir media]")
+	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
@@ -452,6 +452,8 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	output := fs.String("out", "", "JSONL output path")
 	limit := fs.Int("limit", config.DefaultHistoryLimit, "maximum records")
 	sinceID := fs.Int("since-id", 0, "only export messages with id greater than this")
+	fromRaw := fs.String("from", "", "inclusive lower date bound, YYYY-MM-DD or RFC3339")
+	toRaw := fs.String("to", "", "exclusive upper date bound, YYYY-MM-DD or RFC3339")
 	all := fs.Bool("all", false, "export all available history")
 	topicID := fs.Int("topic", 0, "forum topic id to export via replies")
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in output metadata")
@@ -470,11 +472,17 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if strings.TrimSpace(*output) == "" {
 		return fmt.Errorf("--out is required")
 	}
+	start, end, err := parseHistoryBounds(*fromRaw, *toRaw)
+	if err != nil {
+		return err
+	}
 	outputPath := resolveOutputPath(cfg.StateDir, *output)
 	history := harvest.HistoryOptions{
 		Limit:      *limit,
 		BatchSize:  config.DefaultBatchSize,
 		MinID:      *sinceID,
+		Start:      start,
+		End:        end,
 		All:        *all,
 		TopicID:    *topicID,
 		TopicTitle: *topicTitle,
@@ -1151,6 +1159,21 @@ func runDownloadMedia(cfg config.Config, client *mtproto.Client, args []string, 
 		result.Attachment.Size,
 	)
 	return nil
+}
+
+func parseHistoryBounds(fromRaw string, toRaw string) (time.Time, time.Time, error) {
+	start, err := parseCompactSince(fromRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--from: %w", err)
+	}
+	end, err := parseCompactSince(toRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--to: %w", err)
+	}
+	if !start.IsZero() && !end.IsZero() && !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("--to must be after --from")
+	}
+	return start, end, nil
 }
 
 func runCompact(cfg config.Config, args []string, out io.Writer) error {

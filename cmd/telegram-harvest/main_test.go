@@ -200,6 +200,26 @@ func TestParseCompactSinceUsesMoscowForDateOnly(t *testing.T) {
 	}
 }
 
+func TestRunDumpRejectsInvalidDateBoundsBeforeRuntimeAccess(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions", "study.json")
+	env := map[string]string{
+		"TG_HARVEST_STUDY_STATE_DIR":    filepath.Join(dir, "state"),
+		"TG_HARVEST_STUDY_SESSION_PATH": sessionPath,
+	}
+
+	code, _, stderr := runCommand(t, []string{"--profile", "study", "dump", "--chat", "12345", "--out", "x.jsonl", "--from", "bad-date"}, env)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "--from") {
+		t.Fatalf("missing --from validation error: %s", stderr)
+	}
+	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
+		t.Fatalf("dump should not acquire runtime lock, stat err=%v", err)
+	}
+}
+
 func TestParseDailyDateSupportsRelativeDays(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	date, start, end, err := parseDailyDate("yesterday", now)

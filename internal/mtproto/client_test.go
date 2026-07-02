@@ -55,6 +55,29 @@ func TestNormalizeHistoryOptionsAndBatchLimits(t *testing.T) {
 	}
 }
 
+func TestHistoryTimeBounds(t *testing.T) {
+	start := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC)
+	opts := harvest.HistoryOptions{Start: start, End: end}
+
+	before := tg.Message{Date: int(start.Add(-time.Second).Unix())}
+	if !historyMessageBeforeStart(&before, opts) {
+		t.Fatalf("expected message before start to stop history scan")
+	}
+	atStart := harvest.MessageRecord{Date: start}
+	if !historyRecordInTimeRange(atStart, opts) {
+		t.Fatalf("expected start boundary to be inclusive")
+	}
+	atEnd := harvest.MessageRecord{Date: end}
+	if historyRecordInTimeRange(atEnd, opts) {
+		t.Fatalf("expected end boundary to be exclusive")
+	}
+	inside := harvest.MessageRecord{Date: end.Add(-time.Second)}
+	if !historyRecordInTimeRange(inside, opts) {
+		t.Fatalf("expected record before end to be included")
+	}
+}
+
 func TestWithFloodWaitRetrySleepRetries(t *testing.T) {
 	ctx := context.Background()
 	attempts := 0
