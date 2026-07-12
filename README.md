@@ -139,6 +139,8 @@ go run ./cmd/telegram-harvest --profile main daily-catchup
 go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 ```
 
+Каноническое описание слова «catch-up», специальных full-chat/full-account выгрузок, медиа, ASR и проверок готовности находится в [`docs/catch-up.md`](docs/catch-up.md). Запрос без уточнений всегда означает обычный `main` daily catch-up; полные выгрузки других участников требуют явно заданных чата или аккаунта и периода.
+
 ## Telegram pacing
 
 Ограничения чтения Telegram не настраиваются через `.env`. Они живут в коде:

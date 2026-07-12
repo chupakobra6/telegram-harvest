@@ -30,6 +30,11 @@
 - Compact agent view: `go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
 - Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
 
+## Catch-up requests
+- Read `docs/catch-up.md` before handling a user request phrased as "catch-up" or "катчап". It is the canonical definition of the default daily catch-up, the explicit full-chat/full-account variants, output rules, media handling, and completion checks.
+- An unqualified catch-up means the standard `main` profile daily catch-up through yesterday. Do not silently widen it to other people's messages or a full-account export.
+- Full-chat and full-account catch-ups require an explicit scope and date range. They are special export workflows, not aliases for `daily-catchup`.
+
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.
 - Keep JSONL output stable and source-rich: every record should include chat, message id, date, sender, text/media metadata, and Telegram source pointer.
