@@ -75,7 +75,7 @@ topics:
 
 dump:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) dump --chat "$(CHAT)" --out "$(or $(OUT),chat.jsonl)" $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
+	$(CLI) $(PROFILE_ARG) dump --chat "$(CHAT)" --out "$(or $(OUT),chat.jsonl)" $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(TO)),--to "$(TO)",) $(if $(strip $(ALL)),--all,) $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) $(if $(strip $(TRANSCRIPT_DIR)),--transcript-dir "$(TRANSCRIPT_DIR)",) $(if $(strip $(ASR_LOG)),--asr-log "$(ASR_LOG)",)
 
 sync:
 	$(REQUIRE_PROFILE)

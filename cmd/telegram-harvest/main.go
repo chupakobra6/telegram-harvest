@@ -195,7 +195,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
-	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media]")
+	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media] [--transcribe --asr-log asr.jsonl]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
@@ -448,6 +448,7 @@ func maskCLIPhone(phone string) string {
 func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("dump", flag.ContinueOnError)
 	fs.SetOutput(out)
+	defaults := dailyRuntimeDefaults()
 	chat := fs.String("chat", "", "chat id or @username")
 	output := fs.String("out", "", "JSONL output path")
 	limit := fs.Int("limit", config.DefaultHistoryLimit, "maximum records")
@@ -459,6 +460,16 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in output metadata")
 	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while exporting")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
+	transcribeMedia := fs.Bool("transcribe", false, "transcribe voice/audio/video media; cached transcripts skip media download")
+	transcribeVideo := fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off")
+	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand,
+		"custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
+	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk session worker command, called as: command --session <model> [grammar]")
+	voskModelPath := fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory")
+	voskGrammarPath := fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path")
+	ffmpegCommand := fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion")
+	transcriptDir := fs.String("transcript-dir", "transcripts", "transcript output directory, relative to state dir unless absolute")
+	asrLogPath := fs.String("asr-log", "", "optional ASR event JSONL output path, relative to state dir unless absolute")
 	mediaLimits := addMediaLimitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -476,16 +487,29 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if err != nil {
 		return err
 	}
+	if err := validateDailyOptions(dailyOptions{VideoTranscribeMode: *transcribeVideo}); err != nil {
+		return err
+	}
+	if *transcribeMedia && cfg.Mode != config.ModeMain {
+		return fmt.Errorf("dump --transcribe is supported only for profile main")
+	}
 	outputPath := resolveOutputPath(cfg.StateDir, *output)
 	history := harvest.HistoryOptions{
-		Limit:      *limit,
-		BatchSize:  config.DefaultBatchSize,
-		MinID:      *sinceID,
-		Start:      start,
-		End:        end,
-		All:        *all,
-		TopicID:    *topicID,
-		TopicTitle: *topicTitle,
+		Limit:               *limit,
+		BatchSize:           config.DefaultBatchSize,
+		MinID:               *sinceID,
+		Start:               start,
+		End:                 end,
+		All:                 *all,
+		TopicID:             *topicID,
+		TopicTitle:          *topicTitle,
+		TranscribeMedia:     *transcribeMedia,
+		VideoTranscribeMode: *transcribeVideo,
+		TranscribeCommand:   *transcribeCommand,
+		VoskCommand:         *voskCommand,
+		VoskModelPath:       *voskModelPath,
+		VoskGrammarPath:     *voskGrammarPath,
+		FFmpegCommand:       *ffmpegCommand,
 	}
 	if *downloadMedia {
 		history.DownloadMedia = true
@@ -493,12 +517,37 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		applyMediaLimits(&history, mediaLimits)
 		history.ManualDownloadCommand = "telegram-harvest download-media"
 	}
+	if *transcribeMedia {
+		history.TranscriptDir = resolveOutputPath(cfg.StateDir, *transcriptDir)
+	}
 	if *all {
 		history.Limit = 0
 		history.MaxBatches = 0
 	}
-	return withRuntimeLock(cfg, func() error {
-		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
+	var managedTranscriber transcribe.ManagedRunner
+	if *transcribeMedia {
+		transcribeOpts := dailyTranscribeOptions(history)
+		if !transcribeOpts.Configured() {
+			return fmt.Errorf("--transcribe requires a configured transcriber")
+		}
+		managedTranscriber = transcribe.NewManagedRunner(transcribeOpts)
+		history.Transcriber = managedTranscriber
+	}
+	var asrLogFile *os.File
+	if strings.TrimSpace(*asrLogPath) != "" {
+		asrEncoder, file, err := harvest.OpenJSONL(resolveOutputPath(cfg.StateDir, *asrLogPath), false)
+		if err != nil {
+			return err
+		}
+		asrLogFile = file
+		history.ASRLog = func(event harvest.ASRLogEvent) error {
+			return asrEncoder.Encode(event)
+		}
+	}
+	runErr := withRuntimeLock(cfg, func() error {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
 			encoder, file, err := harvest.OpenJSONL(outputPath, false)
 			if err != nil {
 				return err
@@ -521,6 +570,17 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			return nil
 		})
 	})
+	if asrLogFile != nil {
+		if closeErr := asrLogFile.Close(); runErr == nil && closeErr != nil {
+			runErr = closeErr
+		}
+	}
+	if managedTranscriber != nil {
+		if closeErr := managedTranscriber.Close(); runErr == nil && closeErr != nil {
+			runErr = closeErr
+		}
+	}
+	return runErr
 }
 
 func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {

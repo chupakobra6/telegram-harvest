@@ -220,6 +220,46 @@ func TestRunDumpRejectsInvalidDateBoundsBeforeRuntimeAccess(t *testing.T) {
 	}
 }
 
+func TestRunDumpRejectsInvalidVideoTranscriptionModeBeforeRuntimeAccess(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions", "main.json")
+	env := map[string]string{
+		"TG_HARVEST_DAILY_STATE_DIR":    filepath.Join(dir, "state"),
+		"TG_HARVEST_DAILY_SESSION_PATH": sessionPath,
+	}
+
+	code, _, stderr := runCommand(t, []string{"--profile", "main", "dump", "--chat", "12345", "--out", "x.jsonl", "--transcribe-video", "cinema"}, env)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "--transcribe-video must be one of: phone, all, off") {
+		t.Fatalf("missing --transcribe-video validation error: %s", stderr)
+	}
+	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
+		t.Fatalf("dump should not acquire runtime lock, stat err=%v", err)
+	}
+}
+
+func TestRunDumpKeepsStudyTranscriptionDisabled(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions", "study.json")
+	env := map[string]string{
+		"TG_HARVEST_STUDY_STATE_DIR":    filepath.Join(dir, "state"),
+		"TG_HARVEST_STUDY_SESSION_PATH": sessionPath,
+	}
+
+	code, _, stderr := runCommand(t, []string{"--profile", "study", "dump", "--chat", "12345", "--out", "x.jsonl", "--transcribe"}, env)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "dump --transcribe is supported only for profile main") {
+		t.Fatalf("missing profile restriction error: %s", stderr)
+	}
+	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
+		t.Fatalf("dump should not acquire runtime lock, stat err=%v", err)
+	}
+}
+
 func TestParseDailyDateSupportsRelativeDays(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	date, start, end, err := parseDailyDate("yesterday", now)

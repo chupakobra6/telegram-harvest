@@ -296,6 +296,17 @@ agent-view/
 
 Study `dump`/`sync` не транскрибируют audio/video. Они сохраняют inspectable материалы вроде photos/images/documents при включенном `--download-media`.
 
+Для явно запрошенной полной выгрузки одного чата основного аккаунта bounded `dump` может подключить тот же Vosk session worker и phone-video policy, что и daily:
+
+```bash
+make dump PROFILE=main CHAT=1234567890 \
+  FROM=2026-07-01 TO=2026-07-14 ALL=1 \
+  OUT=chat.jsonl DOWNLOAD_MEDIA=1 MEDIA_DIR=media \
+  TRANSCRIBE=1 TRANSCRIPT_DIR=transcripts ASR_LOG=asr.jsonl
+```
+
+`FROM` включается, `TO` не включается. Транскрибация у `dump` требует явного `TRANSCRIBE=1` и доступна только профилю `main`; обычное поведение `study` не меняется.
+
 ## Agent views
 
 JSONL - canonical lossless source. Markdown/TOON - производные представления, их можно пересобрать:
