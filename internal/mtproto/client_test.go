@@ -284,7 +284,7 @@ func (f *fakeTranscriber) Run(ctx context.Context, inputPath string, outputPath 
 	return f.text, nil
 }
 
-func TestMediaLinksAndAttachmentsKeepAcademicMaterialsOnly(t *testing.T) {
+func TestMediaLinksAndAttachmentsKeepDocumentMetadata(t *testing.T) {
 	webpage := &tg.MessageMediaWebPage{
 		Webpage: &tg.WebPage{URL: "https://edu.hse.ru/mod/page/view.php?id=10", Title: "Task page"},
 	}
@@ -337,6 +337,26 @@ func TestMediaLinksAndAttachmentsKeepAcademicMaterialsOnly(t *testing.T) {
 
 	if photoAttachments := extractAttachments(&tg.MessageMediaPhoto{}); len(photoAttachments) != 1 || photoAttachments[0].Kind != "photo" {
 		t.Fatalf("photo attachments=%#v", photoAttachments)
+	}
+
+	video := &tg.MessageMediaDocument{Video: true}
+	video.SetDocument(&tg.Document{
+		ID:       42,
+		MimeType: "video/mp4",
+		Size:     12345,
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: "talk.mp4"},
+			&tg.DocumentAttributeVideo{Duration: 2701.5, W: 1920, H: 1080},
+		},
+	})
+	videoAttachments := extractAttachments(video)
+	if len(videoAttachments) != 1 ||
+		videoAttachments[0].Kind != "video" ||
+		videoAttachments[0].FileName != "talk.mp4" ||
+		videoAttachments[0].DurationSeconds != 2701.5 ||
+		videoAttachments[0].Width != 1920 ||
+		videoAttachments[0].Height != 1080 {
+		t.Fatalf("video attachments=%#v", videoAttachments)
 	}
 }
 
@@ -454,20 +474,6 @@ func TestExtractAttachmentsIgnoresNonAcademicTelegramMedia(t *testing.T) {
 		{
 			name:  "round video",
 			media: &tg.MessageMediaDocument{Round: true},
-		},
-		{
-			name: "audio document",
-			media: func() *tg.MessageMediaDocument {
-				media := &tg.MessageMediaDocument{}
-				media.SetDocument(&tg.Document{
-					MimeType: "audio/ogg",
-					Size:     100,
-					Attributes: []tg.DocumentAttributeClass{
-						&tg.DocumentAttributeAudio{Duration: 5},
-					},
-				})
-				return media
-			}(),
 		},
 		{
 			name:  "video",

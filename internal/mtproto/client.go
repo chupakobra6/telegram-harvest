@@ -1759,9 +1759,6 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 		return []harvest.Attachment{{Kind: "photo"}}
 	case *tg.MessageMediaDocument:
 		kind := documentKind(typed)
-		if kind != "document" && kind != "image" {
-			return nil
-		}
 		attachment := harvest.Attachment{Kind: kind}
 		if document, ok := typed.GetDocument(); ok {
 			if doc, ok := document.(*tg.Document); ok {
@@ -1770,7 +1767,11 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 				attachment.Size = doc.Size
 				attachment.FileName = documentFileName(doc)
 				applyDocumentMetadata(&attachment, doc)
+				return []harvest.Attachment{attachment}
 			}
+		}
+		if kind != "document" && kind != "image" {
+			return nil
 		}
 		return []harvest.Attachment{attachment}
 	case *tg.MessageMediaWebPage:
