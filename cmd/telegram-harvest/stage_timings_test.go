@@ -18,9 +18,11 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	first.Observe(stages.TelegramScan, 3*time.Second)
 	first.Observe(stages.Download, 2*time.Second)
 	first.Observe(stages.FFmpeg, time.Second)
+	first.Observe(stages.ModelColdStart, 2*time.Second)
 	first.Observe(stages.Vosk, 4*time.Second)
 	first.Observe(stages.Render, 500*time.Millisecond)
-	first.startedAt = time.Now().UTC().Add(-11 * time.Second)
+	first.ObserveAudioDuration(24)
+	first.startedAt = time.Now().UTC().Add(-13 * time.Second)
 
 	firstReport := first.Report(nil)
 	firstPath, err := writeDailyStageTimingReport(stateDir, firstReport)
@@ -49,8 +51,17 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	if err := json.Unmarshal(content, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Stages.TelegramScan != 3 || decoded.Stages.Download != 2 || decoded.Stages.FFmpeg != 1 || decoded.Stages.Vosk != 4 || decoded.Stages.Render != 0.5 {
+	if decoded.Stages.TelegramScan != 3 || decoded.Stages.Download != 2 || decoded.Stages.FFmpeg != 1 || decoded.Stages.ModelColdStart != 2 || decoded.Stages.Vosk != 4 || decoded.Stages.Render != 0.5 {
 		t.Fatalf("stages = %+v", decoded.Stages)
+	}
+	if decoded.AudioSeconds != 24 {
+		t.Fatalf("audio_seconds = %f, want 24", decoded.AudioSeconds)
+	}
+	if decoded.ASRSpeedX != 6 {
+		t.Fatalf("asr_speed_x = %f, want 6", decoded.ASRSpeedX)
+	}
+	if decoded.PipelineSpeedX != 24.0/7.0 {
+		t.Fatalf("pipeline_speed_x = %f, want %f", decoded.PipelineSpeedX, 24.0/7.0)
 	}
 	if decoded.UnaccountedSeconds <= 0 {
 		t.Fatalf("unaccounted = %f, want positive remainder", decoded.UnaccountedSeconds)
@@ -66,14 +77,14 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	}
 }
 
-func TestFinishDailyStageTimingsPrintsFiveStagesAndReportPath(t *testing.T) {
+func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 	stateDir := t.TempDir()
 	collector := newDailyStageTimingCollector("daily", "2026-07-29", "2026-07-29")
 	var output strings.Builder
 	if err := finishDailyStageTimings(stateDir, collector, nil, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"telegram_scan=", "download=", "ffmpeg=", "vosk=", "render=", "unaccounted=", "total=", "report="} {
+	for _, field := range []string{"telegram_scan=", "download=", "ffmpeg=", "model_cold_start=", "vosk=", "render=", "audio=", "asr_speed=", "pipeline_speed=", "unaccounted=", "total=", "report="} {
 		if !strings.Contains(output.String(), field) {
 			t.Fatalf("missing %q in %s", field, output.String())
 		}
@@ -84,5 +95,14 @@ func TestFinishDailyStageTimingsPrintsFiveStagesAndReportPath(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("timing report count = %d", len(entries))
+	}
+}
+
+func TestDailyStageTimingReportLeavesSpeedZeroWithoutProcessedAudio(t *testing.T) {
+	collector := newDailyStageTimingCollector("daily", "2026-07-29", "2026-07-29")
+	collector.Observe(stages.Vosk, 2*time.Second)
+	report := collector.Report(nil)
+	if report.AudioSeconds != 0 || report.ASRSpeedX != 0 || report.PipelineSpeedX != 0 {
+		t.Fatalf("unexpected empty-run ASR metrics: %+v", report)
 	}
 }

@@ -18,11 +18,12 @@ import (
 var dailyTimingRunSequence atomic.Uint64
 
 type dailyStageSeconds struct {
-	TelegramScan float64 `json:"telegram_scan"`
-	Download     float64 `json:"download"`
-	FFmpeg       float64 `json:"ffmpeg"`
-	Vosk         float64 `json:"vosk"`
-	Render       float64 `json:"render"`
+	TelegramScan   float64 `json:"telegram_scan"`
+	Download       float64 `json:"download"`
+	FFmpeg         float64 `json:"ffmpeg"`
+	ModelColdStart float64 `json:"model_cold_start"`
+	Vosk           float64 `json:"vosk"`
+	Render         float64 `json:"render"`
 }
 
 type dailyStageTimingReport struct {
@@ -35,19 +36,23 @@ type dailyStageTimingReport struct {
 	Success            bool              `json:"success"`
 	Error              string            `json:"error,omitempty"`
 	Stages             dailyStageSeconds `json:"stages_seconds"`
+	AudioSeconds       float64           `json:"audio_seconds"`
+	ASRSpeedX          float64           `json:"asr_speed_x"`
+	PipelineSpeedX     float64           `json:"pipeline_speed_x"`
 	AccountedSeconds   float64           `json:"accounted_seconds"`
 	UnaccountedSeconds float64           `json:"unaccounted_seconds"`
 	TotalSeconds       float64           `json:"total_seconds"`
 }
 
 type dailyStageTimingCollector struct {
-	mu        sync.Mutex
-	runID     string
-	command   string
-	startDate string
-	endDate   string
-	startedAt time.Time
-	durations map[stages.Name]time.Duration
+	mu           sync.Mutex
+	runID        string
+	command      string
+	startDate    string
+	endDate      string
+	startedAt    time.Time
+	durations    map[stages.Name]time.Duration
+	audioSeconds float64
 }
 
 func newDailyStageTimingCollector(command string, startDate string, endDate string) *dailyStageTimingCollector {
@@ -58,7 +63,7 @@ func newDailyStageTimingCollector(command string, startDate string, endDate stri
 		startDate: startDate,
 		endDate:   endDate,
 		startedAt: startedAt,
-		durations: make(map[stages.Name]time.Duration, 5),
+		durations: make(map[stages.Name]time.Duration, 6),
 	}
 }
 
@@ -71,6 +76,15 @@ func (c *dailyStageTimingCollector) Observe(stage stages.Name, duration time.Dur
 	c.durations[stage] += duration
 }
 
+func (c *dailyStageTimingCollector) ObserveAudioDuration(seconds float64) {
+	if c == nil || seconds <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.audioSeconds += seconds
+}
+
 func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport {
 	completedAt := time.Now().UTC()
 	if c == nil {
@@ -79,15 +93,18 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	stageSeconds := dailyStageSeconds{
-		TelegramScan: c.durations[stages.TelegramScan].Seconds(),
-		Download:     c.durations[stages.Download].Seconds(),
-		FFmpeg:       c.durations[stages.FFmpeg].Seconds(),
-		Vosk:         c.durations[stages.Vosk].Seconds(),
-		Render:       c.durations[stages.Render].Seconds(),
+		TelegramScan:   c.durations[stages.TelegramScan].Seconds(),
+		Download:       c.durations[stages.Download].Seconds(),
+		FFmpeg:         c.durations[stages.FFmpeg].Seconds(),
+		ModelColdStart: c.durations[stages.ModelColdStart].Seconds(),
+		Vosk:           c.durations[stages.Vosk].Seconds(),
+		Render:         c.durations[stages.Render].Seconds(),
 	}
-	accounted := stageSeconds.TelegramScan + stageSeconds.Download + stageSeconds.FFmpeg + stageSeconds.Vosk + stageSeconds.Render
+	accounted := stageSeconds.TelegramScan + stageSeconds.Download + stageSeconds.FFmpeg + stageSeconds.ModelColdStart + stageSeconds.Vosk + stageSeconds.Render
 	total := completedAt.Sub(c.startedAt).Seconds()
 	unaccounted := total - accounted
+	asrSpeedX := speedRatio(c.audioSeconds, stageSeconds.Vosk)
+	pipelineSpeedX := speedRatio(c.audioSeconds, stageSeconds.ModelColdStart+stageSeconds.FFmpeg+stageSeconds.Vosk)
 	report := dailyStageTimingReport{
 		RunID:              c.runID,
 		Command:            c.command,
@@ -97,6 +114,9 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		CompletedAt:        completedAt,
 		Success:            runErr == nil,
 		Stages:             stageSeconds,
+		AudioSeconds:       c.audioSeconds,
+		ASRSpeedX:          asrSpeedX,
+		PipelineSpeedX:     pipelineSpeedX,
 		AccountedSeconds:   accounted,
 		UnaccountedSeconds: unaccounted,
 		TotalSeconds:       total,
@@ -107,17 +127,28 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 	return report
 }
 
+func speedRatio(audioSeconds float64, workSeconds float64) float64 {
+	if audioSeconds <= 0 || workSeconds <= 0 {
+		return 0
+	}
+	return audioSeconds / workSeconds
+}
+
 func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollector, runErr error, out io.Writer) error {
 	report := collector.Report(runErr)
 	path, persistErr := writeDailyStageTimingReport(stateDir, report)
 	if persistErr == nil {
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs vosk=%.3fs render=%.3fs unaccounted=%.3fs total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs vosk=%.3fs render=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx unaccounted=%.3fs total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.Stages.FFmpeg,
+			report.Stages.ModelColdStart,
 			report.Stages.Vosk,
 			report.Stages.Render,
+			report.AudioSeconds,
+			report.ASRSpeedX,
+			report.PipelineSpeedX,
 			report.UnaccountedSeconds,
 			report.TotalSeconds,
 			path,

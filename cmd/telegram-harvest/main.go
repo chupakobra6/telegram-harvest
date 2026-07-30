@@ -972,6 +972,7 @@ func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, op
 	history := dailyHistoryOptions(cfg, opts)
 	if timings != nil {
 		history.StageTiming = timings.Observe
+		history.AudioDurationTiming = timings.ObserveAudioDuration
 	}
 	var managedTranscriber transcribe.ManagedRunner
 	if opts.TranscribeMedia {

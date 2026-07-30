@@ -142,7 +142,8 @@ type sessionRequest struct {
 }
 
 type sessionResponse struct {
-	ID    int    `json:"id"`
+	ID    int    `json:"id,omitempty"`
+	Ready bool   `json:"ready,omitempty"`
 	Text  string `json:"text,omitempty"`
 	Error string `json:"error,omitempty"`
 }
@@ -208,6 +209,9 @@ func runSession(modelDir, grammarPath string) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
 	encoder := json.NewEncoder(os.Stdout)
+	if err := encoder.Encode(sessionResponse{Ready: true}); err != nil {
+		return fmt.Errorf("write ready response: %w", err)
+	}
 	for scanner.Scan() {
 		var request sessionRequest
 		var response sessionResponse

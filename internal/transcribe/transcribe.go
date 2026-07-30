@@ -36,15 +36,16 @@ type ManagedRunner interface {
 }
 
 type Result struct {
-	Text               string
-	Engine             string
-	FFmpegDuration     time.Duration
-	ASRDuration        time.Duration
-	TotalDuration      time.Duration
-	InputBytes         int64
-	WAVBytes           int64
-	WAVDurationSeconds float64
-	TranscriptBytes    int64
+	Text                   string
+	Engine                 string
+	FFmpegDuration         time.Duration
+	ModelColdStartDuration time.Duration
+	ASRDuration            time.Duration
+	TotalDuration          time.Duration
+	InputBytes             int64
+	WAVBytes               int64
+	WAVDurationSeconds     float64
+	TranscriptBytes        int64
 }
 
 func NewManagedRunner(opts Options) ManagedRunner {
@@ -148,7 +149,8 @@ type voskSessionRequest struct {
 }
 
 type voskSessionResponse struct {
-	ID    int    `json:"id"`
+	ID    int    `json:"id,omitempty"`
+	Ready bool   `json:"ready,omitempty"`
 	Text  string `json:"text,omitempty"`
 	Error string `json:"error,omitempty"`
 }
@@ -185,17 +187,20 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	voskStart := time.Now()
-	defer stages.ObserveSince(r.opts.StageTiming, stages.Vosk, voskStart)
 	if r.closed {
 		return Result{}, fmt.Errorf("vosk session is closed")
 	}
-	if err := r.startLocked(); err != nil {
+	modelColdStartDuration, err := r.startLocked(ctx)
+	if modelColdStartDuration > 0 && r.opts.StageTiming != nil {
+		r.opts.StageTiming(stages.ModelColdStart, modelColdStartDuration)
+	}
+	if err != nil {
 		return Result{}, err
 	}
 	r.nextID++
 	requestID := r.nextID
 	asrStart := time.Now()
+	defer stages.ObserveSince(r.opts.StageTiming, stages.Vosk, asrStart)
 	if err := json.NewEncoder(r.stdin).Encode(voskSessionRequest{
 		ID:      requestID,
 		WAVPath: wavPath,
@@ -221,15 +226,16 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 		return Result{}, fmt.Errorf("write transcript: %w", err)
 	}
 	return Result{
-		Text:               text,
-		Engine:             r.opts.EngineName(),
-		FFmpegDuration:     ffmpegDuration,
-		ASRDuration:        asrDuration,
-		TotalDuration:      time.Since(start),
-		InputBytes:         fileSize(inputPath),
-		WAVBytes:           wavBytes,
-		WAVDurationSeconds: wavPCM16MonoDuration(wavBytes),
-		TranscriptBytes:    int64(len([]byte(text))),
+		Text:                   text,
+		Engine:                 r.opts.EngineName(),
+		FFmpegDuration:         ffmpegDuration,
+		ModelColdStartDuration: modelColdStartDuration,
+		ASRDuration:            asrDuration,
+		TotalDuration:          time.Since(start),
+		InputBytes:             fileSize(inputPath),
+		WAVBytes:               wavBytes,
+		WAVDurationSeconds:     wavPCM16MonoDuration(wavBytes),
+		TranscriptBytes:        int64(len([]byte(text))),
 	}, nil
 }
 
@@ -301,17 +307,18 @@ func runVoskDetailed(ctx context.Context, opts Options, inputPath string, output
 	}, nil
 }
 
-func (r *VoskSessionRunner) startLocked() error {
+func (r *VoskSessionRunner) startLocked(ctx context.Context) (time.Duration, error) {
 	if r.cmd != nil {
-		return nil
+		return 0, nil
 	}
+	startedAt := time.Now()
 	voskCommand := strings.TrimSpace(r.opts.VoskCommand)
 	if voskCommand == "" {
-		return fmt.Errorf("vosk command is empty")
+		return time.Since(startedAt), fmt.Errorf("vosk command is empty")
 	}
 	modelPath := strings.TrimSpace(r.opts.VoskModelPath)
 	if modelPath == "" {
-		return fmt.Errorf("vosk model path is empty")
+		return time.Since(startedAt), fmt.Errorf("vosk model path is empty")
 	}
 	args := []string{VoskSessionFlag, modelPath}
 	if grammarPath := strings.TrimSpace(r.opts.VoskGrammarPath); grammarPath != "" {
@@ -320,19 +327,19 @@ func (r *VoskSessionRunner) startLocked() error {
 	cmd := exec.Command(voskCommand, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("prepare vosk session stdin: %w", err)
+		return time.Since(startedAt), fmt.Errorf("prepare vosk session stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("prepare vosk session stdout: %w", err)
+		return time.Since(startedAt), fmt.Errorf("prepare vosk session stdout: %w", err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("prepare vosk session stderr: %w", err)
+		return time.Since(startedAt), fmt.Errorf("prepare vosk session stderr: %w", err)
 	}
 	stderr := &synchronizedBuffer{}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start vosk session: %w", err)
+		return time.Since(startedAt), fmt.Errorf("start vosk session: %w", err)
 	}
 	go func() {
 		_, _ = io.Copy(stderr, stderrPipe)
@@ -346,7 +353,16 @@ func (r *VoskSessionRunner) startLocked() error {
 	r.stdout = bufio.NewReader(stdout)
 	r.stderr = stderr
 	r.waitDone = waitDone
-	return nil
+	response, err := r.readResponseLocked(ctx)
+	coldStartDuration := time.Since(startedAt)
+	if err != nil {
+		return coldStartDuration, fmt.Errorf("wait for vosk session readiness: %w", err)
+	}
+	if !response.Ready {
+		r.stopProcessLocked(true)
+		return coldStartDuration, fmt.Errorf("vosk session did not report readiness")
+	}
+	return coldStartDuration, nil
 }
 
 func (r *VoskSessionRunner) readResponseLocked(ctx context.Context) (voskSessionResponse, error) {

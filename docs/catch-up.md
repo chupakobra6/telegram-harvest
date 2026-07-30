@@ -83,7 +83,7 @@ ZIP-архивы по умолчанию не создаются. В финал�
 5. Проверить созданные даты, `complete=true`, дневные Markdown, `00-latest-catchup.md` и отсутствие технических ошибок в человекочитаемом тексте.
 6. Проверить, что настроенные дополнительные отправители представлены в релевантных днях, но сообщения остальных участников их чатов не попали в daily.
 7. Проверить ASR-статистику: cache/transcribed/skip/error, нулевые временные файлы и отсутствие зависшего helper-процесса.
-8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, Vosk, render, total и unaccounted.
+8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, Vosk, render, audio seconds, ASR/pipeline speed, total и unaccounted.
 9. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports или кэш без явной причины.
 
 ## Критерий готовности

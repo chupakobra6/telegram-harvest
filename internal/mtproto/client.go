@@ -2193,6 +2193,7 @@ func (s *Session) transcribeAttachmentMedia(
 	event.DownloadSeconds = downloadSeconds
 	event.Engine = result.Engine
 	event.FFmpegSeconds = result.FFmpegDuration.Seconds()
+	event.ModelColdStartSeconds = result.ModelColdStartDuration.Seconds()
 	event.ASRSeconds = result.ASRDuration.Seconds()
 	event.TotalSeconds = result.TotalDuration.Seconds() + downloadSeconds
 	event.InputBytes = result.InputBytes
@@ -2202,6 +2203,11 @@ func (s *Session) transcribeAttachmentMedia(
 	if result.WAVDurationSeconds > 0 && result.ASRDuration > 0 {
 		event.RealTimeFactor = result.ASRDuration.Seconds() / result.WAVDurationSeconds
 	}
+	audioDurationSeconds := result.WAVDurationSeconds
+	if audioDurationSeconds <= 0 {
+		audioDurationSeconds = attachment.DurationSeconds
+	}
+	stages.ObserveAudioDuration(opts.AudioDurationTiming, audioDurationSeconds)
 	emitASRLog(opts, event)
 }
 

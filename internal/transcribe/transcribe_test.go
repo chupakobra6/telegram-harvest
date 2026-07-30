@@ -139,6 +139,8 @@ if [ "$1" != "--session" ]; then
   printf 'unexpected mode: %%s\n' "$1" >&2
   exit 2
 fi
+sleep 0.02
+printf '{"ready":true}\n'
 while IFS= read -r line; do
   id=$(printf '%%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   printf '{"id":%%s,"text":"текст %%s"}\n' "$id" "$id"
@@ -155,25 +157,41 @@ done
 		t.Fatal(err)
 	}
 
+	observed := map[stages.Name]time.Duration{}
 	runner := NewManagedRunner(Options{
 		VoskCommand:     voskPath,
 		VoskModelPath:   filepath.Join(dir, "model"),
 		VoskGrammarPath: filepath.Join(dir, "grammar.json"),
 		FFmpegCommand:   ffmpegPath,
+		StageTiming: func(stage stages.Name, duration time.Duration) {
+			observed[stage] += duration
+		},
 	})
-	textOne, err := runner.Run(context.Background(), inputOne, outputOne)
+	firstResult, err := runner.RunDetailed(context.Background(), inputOne, outputOne)
 	if err != nil {
 		t.Fatal(err)
 	}
-	textTwo, err := runner.Run(context.Background(), inputTwo, outputTwo)
+	secondResult, err := runner.RunDetailed(context.Background(), inputTwo, outputTwo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := runner.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if textOne != "текст 1" || textTwo != "текст 2" {
-		t.Fatalf("texts = %q, %q", textOne, textTwo)
+	if firstResult.Text != "текст 1" || secondResult.Text != "текст 2" {
+		t.Fatalf("texts = %q, %q", firstResult.Text, secondResult.Text)
+	}
+	if firstResult.ModelColdStartDuration <= 0 {
+		t.Fatalf("first cold start = %s", firstResult.ModelColdStartDuration)
+	}
+	if secondResult.ModelColdStartDuration != 0 {
+		t.Fatalf("second cold start = %s, want zero", secondResult.ModelColdStartDuration)
+	}
+	if observed[stages.ModelColdStart] != firstResult.ModelColdStartDuration {
+		t.Fatalf("observed cold start = %s, result = %s", observed[stages.ModelColdStart], firstResult.ModelColdStartDuration)
+	}
+	if observed[stages.Vosk] <= 0 {
+		t.Fatalf("vosk timing = %s", observed[stages.Vosk])
 	}
 	workerLines := readNonEmptyLines(t, workerLog)
 	if len(workerLines) != 1 {

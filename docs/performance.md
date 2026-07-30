@@ -35,13 +35,16 @@ Range-scan сохранил все 1 742 пары `(chat_id, message_id)` из b
 - `telegram_scan` — `get_dialogs`, разрешение target и последовательные history/search RPC вместе со штатным pacing; media transfer сюда не входит;
 - `download` — фактические попытки скачать пользовательское или временное ASR-медиа вместе с ожиданием download RPC slot; cache hits сюда не входят;
 - `ffmpeg` — подготовка WAV внутри transcriber, включая завершившиеся ошибкой попытки;
-- `vosk` — запуск/первичная загрузка Vosk worker и распознавание, включая завершившуюся ошибкой работу; при custom non-Vosk command поле честно остается нулевым;
+- `model_cold_start` — запуск Vosk session worker и ожидание его `ready` после загрузки модели и grammar; в одном запуске обычно появляется один раз;
+- `vosk` — только распознавание после готовности модели, включая завершившуюся ошибкой работу; при custom non-Vosk command поле честно остается нулевым;
 - `render` — запись и атомарная публикация дневных JSONL/Markdown плюс merged `00-latest-catchup.md`.
 
-Поля стадий не перекрываются. `total_seconds` — wall time измеряемой daily-операции, `accounted_seconds` — сумма пяти стадий, а `unaccounted_seconds` — оставшаяся локальная работа: нормализация сообщений, cache reads, partitioning, cleanup и orchestration. CLI печатает те же значения:
+`audio_seconds` — суммарная длительность WAV только для успешно распознанных cache misses. `asr_speed_x` считается как `audio_seconds / stages_seconds.vosk`, а `pipeline_speed_x` — как `audio_seconds / (stages_seconds.model_cold_start + stages_seconds.ffmpeg + stages_seconds.vosk)`. При прогретом transcript cache или отсутствии успешно обработанного аудио все три значения равны нулю.
+
+Поля стадий не перекрываются. `total_seconds` — wall time измеряемой daily-операции, `accounted_seconds` — сумма шести стадий, а `unaccounted_seconds` — оставшаяся локальная работа: нормализация сообщений, cache reads, partitioning, cleanup и orchestration. CLI печатает те же значения:
 
 ```text
-timings telegram_scan=...s download=...s ffmpeg=...s vosk=...s render=...s unaccounted=...s total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
+timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s vosk=...s render=...s audio=...s asr_speed=...x pipeline_speed=...x unaccounted=...s total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
 ```
 
 Live-проверка 2026-07-30 на том же восьмидневном диапазоне и прогретом media/transcript cache:

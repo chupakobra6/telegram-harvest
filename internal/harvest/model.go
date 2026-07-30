@@ -168,6 +168,7 @@ type HistoryOptions struct {
 	Progress              func(HistoryProgress) error
 	ASRLog                func(ASRLogEvent) error
 	StageTiming           stages.Observer
+	AudioDurationTiming   stages.AudioDurationObserver
 }
 
 type Transcriber interface {
@@ -236,34 +237,35 @@ type OutgoingProgress struct {
 }
 
 type ASRLogEvent struct {
-	At                  time.Time `json:"at"`
-	Action              string    `json:"action"`
-	Stage               string    `json:"stage,omitempty"`
-	Reason              string    `json:"reason,omitempty"`
-	Error               string    `json:"error,omitempty"`
-	Engine              string    `json:"engine,omitempty"`
-	Date                time.Time `json:"date,omitempty"`
-	Chat                Chat      `json:"chat"`
-	MessageID           int       `json:"message_id,omitempty"`
-	AttachmentIndex     int       `json:"attachment_index"`
-	Kind                string    `json:"kind,omitempty"`
-	MediaID             string    `json:"media_id,omitempty"`
-	FileName            string    `json:"file_name,omitempty"`
-	MIMEType            string    `json:"mime_type,omitempty"`
-	Size                int64     `json:"size,omitempty"`
-	DurationSeconds     float64   `json:"duration_seconds,omitempty"`
-	Width               int       `json:"width,omitempty"`
-	Height              int       `json:"height,omitempty"`
-	TranscriptPath      string    `json:"transcript_path,omitempty"`
-	TranscriptCached    bool      `json:"transcript_cached,omitempty"`
-	DownloadSeconds     float64   `json:"download_seconds,omitempty"`
-	FFmpegSeconds       float64   `json:"ffmpeg_seconds,omitempty"`
-	ASRSeconds          float64   `json:"asr_seconds,omitempty"`
-	TotalSeconds        float64   `json:"total_seconds,omitempty"`
-	InputBytes          int64     `json:"input_bytes,omitempty"`
-	WAVBytes            int64     `json:"wav_bytes,omitempty"`
-	WAVDurationSeconds  float64   `json:"wav_duration_seconds,omitempty"`
-	TranscriptBytes     int64     `json:"transcript_bytes,omitempty"`
-	RealTimeFactor      float64   `json:"real_time_factor,omitempty"`
-	VideoTranscribeMode string    `json:"video_transcribe_mode,omitempty"`
+	At                    time.Time `json:"at"`
+	Action                string    `json:"action"`
+	Stage                 string    `json:"stage,omitempty"`
+	Reason                string    `json:"reason,omitempty"`
+	Error                 string    `json:"error,omitempty"`
+	Engine                string    `json:"engine,omitempty"`
+	Date                  time.Time `json:"date,omitempty"`
+	Chat                  Chat      `json:"chat"`
+	MessageID             int       `json:"message_id,omitempty"`
+	AttachmentIndex       int       `json:"attachment_index"`
+	Kind                  string    `json:"kind,omitempty"`
+	MediaID               string    `json:"media_id,omitempty"`
+	FileName              string    `json:"file_name,omitempty"`
+	MIMEType              string    `json:"mime_type,omitempty"`
+	Size                  int64     `json:"size,omitempty"`
+	DurationSeconds       float64   `json:"duration_seconds,omitempty"`
+	Width                 int       `json:"width,omitempty"`
+	Height                int       `json:"height,omitempty"`
+	TranscriptPath        string    `json:"transcript_path,omitempty"`
+	TranscriptCached      bool      `json:"transcript_cached,omitempty"`
+	DownloadSeconds       float64   `json:"download_seconds,omitempty"`
+	FFmpegSeconds         float64   `json:"ffmpeg_seconds,omitempty"`
+	ModelColdStartSeconds float64   `json:"model_cold_start_seconds,omitempty"`
+	ASRSeconds            float64   `json:"asr_seconds,omitempty"`
+	TotalSeconds          float64   `json:"total_seconds,omitempty"`
+	InputBytes            int64     `json:"input_bytes,omitempty"`
+	WAVBytes              int64     `json:"wav_bytes,omitempty"`
+	WAVDurationSeconds    float64   `json:"wav_duration_seconds,omitempty"`
+	TranscriptBytes       int64     `json:"transcript_bytes,omitempty"`
+	RealTimeFactor        float64   `json:"real_time_factor,omitempty"`
+	VideoTranscribeMode   string    `json:"video_transcribe_mode,omitempty"`
 }
