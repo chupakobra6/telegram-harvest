@@ -2,6 +2,7 @@ package mtproto
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -128,6 +129,223 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 	}, target, entities, nil, opts); ok {
 		t.Fatal("other Haru participant should be excluded from daily")
 	}
+}
+
+func TestPlanDailyDialogScanSkipsOnlyProvenUnchangedDialogs(t *testing.T) {
+	checkpoint := harvest.DailyDialogCheckpointDecision{
+		Enabled: true,
+		Dialogs: map[string]harvest.DailyDialogHead{
+			harvest.DailyDialogHeadKey("user", 1): {
+				ChatID:            1,
+				ChatType:          "user",
+				TopMessageID:      10,
+				VerifiedMessageID: 10,
+				HeadFullyVerified: true,
+			},
+			harvest.DailyDialogHeadKey("supergroup", 2): {
+				ChatID:            2,
+				ChatType:          "supergroup",
+				TopMessageID:      20,
+				VerifiedMessageID: 20,
+				HeadFullyVerified: true,
+			},
+		},
+	}
+	unchanged := planDailyDialogScan(harvest.Chat{ID: 1, Type: "user", TopMessageID: 10}, checkpoint)
+	if unchanged.Kind != dailyDialogUnchanged || unchanged.MinID != 0 {
+		t.Fatalf("unchanged plan = %+v", unchanged)
+	}
+	changed := planDailyDialogScan(harvest.Chat{ID: 2, Type: "supergroup", TopMessageID: 25}, checkpoint)
+	if changed.Kind != dailyDialogChanged || changed.MinID != 20 {
+		t.Fatalf("changed plan = %+v", changed)
+	}
+	decreased := planDailyDialogScan(harvest.Chat{ID: 2, Type: "supergroup", TopMessageID: 19}, checkpoint)
+	if decreased.Kind != dailyDialogChanged || decreased.MinID != 0 {
+		t.Fatalf("decreased-head plan = %+v", decreased)
+	}
+	uncovered := checkpoint
+	uncovered.Dialogs = map[string]harvest.DailyDialogHead{
+		harvest.DailyDialogHeadKey("user", 1): {
+			ChatID:            1,
+			ChatType:          "user",
+			TopMessageID:      15,
+			VerifiedMessageID: 10,
+		},
+	}
+	sameUncoveredHead := planDailyDialogScan(harvest.Chat{ID: 1, Type: "user", TopMessageID: 15}, uncovered)
+	if sameUncoveredHead.Kind != dailyDialogChanged || sameUncoveredHead.MinID != 10 {
+		t.Fatalf("uncovered same-head plan = %+v", sameUncoveredHead)
+	}
+	newDialog := planDailyDialogScan(harvest.Chat{ID: 3, Type: "user", TopMessageID: 1}, checkpoint)
+	if newDialog.Kind != dailyDialogNew || newDialog.MinID != 0 {
+		t.Fatalf("new-dialog plan = %+v", newDialog)
+	}
+	full := planDailyDialogScan(harvest.Chat{ID: 1, Type: "user", TopMessageID: 10}, harvest.DailyDialogCheckpointDecision{})
+	if full.Kind != dailyDialogFull || full.MinID != 0 {
+		t.Fatalf("fallback plan = %+v", full)
+	}
+}
+
+func TestDailyDialogHeadDoesNotVerifyHeadBeyondRangeEnd(t *testing.T) {
+	end := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	covered := dailyDialogHead(harvest.Chat{
+		ID:            1,
+		Type:          "user",
+		TopMessageID:  10,
+		LastMessageAt: end.Add(-time.Second),
+	}, end)
+	if !covered.HeadFullyVerified || covered.VerifiedMessageID != 10 {
+		t.Fatalf("covered head = %+v", covered)
+	}
+	future := dailyDialogHead(harvest.Chat{
+		ID:            2,
+		Type:          "supergroup",
+		TopMessageID:  20,
+		LastMessageAt: end.Add(time.Second),
+	}, end)
+	if future.HeadFullyVerified || future.VerifiedMessageID != 0 {
+		t.Fatalf("future head was marked verified: %+v", future)
+	}
+	atBoundary := dailyDialogHead(harvest.Chat{
+		ID:            3,
+		Type:          "user",
+		TopMessageID:  30,
+		LastMessageAt: end,
+	}, end)
+	if atBoundary.HeadFullyVerified || atBoundary.VerifiedMessageID != 0 {
+		t.Fatalf("exclusive-end head was marked verified: %+v", atBoundary)
+	}
+}
+
+func TestChangedDialogMinIDIsSentToSearchAndHistoryRPCs(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{InputPeer: &tg.InputPeerUser{UserID: 1}}
+	opts := harvest.OutgoingRangeOptions{
+		Start:   start,
+		End:     start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{MinID: 123},
+	}
+	search := outgoingSearchRequest(target, opts, 200, 100)
+	if search.MinID != 123 || search.OffsetID != 200 || search.Limit != 100 {
+		t.Fatalf("search request = %+v", search)
+	}
+	history := outgoingHistoryRequest(target, opts, 200, 100)
+	if history.MinID != 123 || history.OffsetID != 200 || history.Limit != 100 {
+		t.Fatalf("history request = %+v", history)
+	}
+}
+
+func TestOutgoingSearchContinuesAfterSparsePage(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One"}}
+	opts := harvest.OutgoingRangeOptions{
+		Start:   start,
+		End:     start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{BatchSize: 100},
+	}
+	pages := []tg.MessagesMessagesClass{
+		&tg.MessagesMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 20, Date: int(start.Add(2 * time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "newer"},
+		}},
+		&tg.MessagesMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 10, Date: int(start.Add(time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "older"},
+		}},
+		&tg.MessagesMessages{},
+	}
+	calls := 0
+	load := func(_ context.Context, offsetID int, _ int) (tg.MessagesMessagesClass, error) {
+		if calls == 0 && offsetID != 0 {
+			t.Fatalf("first offset = %d, want 0", offsetID)
+		}
+		if calls == 1 && offsetID != 20 {
+			t.Fatalf("second offset = %d, want 20", offsetID)
+		}
+		if calls == 2 && offsetID != 10 {
+			t.Fatalf("third offset = %d, want 10", offsetID)
+		}
+		page := pages[calls]
+		calls++
+		return page, nil
+	}
+	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, false, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || !stats.Complete || stats.Batches != 3 {
+		t.Fatalf("calls=%d stats=%+v", calls, stats)
+	}
+	if len(records) != 2 || records[0].MessageID != 10 || records[1].MessageID != 20 {
+		t.Fatalf("records = %+v", records)
+	}
+}
+
+func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{
+		Chat: harvest.Chat{ID: 3740223926, Type: "supergroup", Display: "Haru 🌸"},
+	}
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   start.AddDate(0, 0, 1),
+		AdditionalSenderIDsByChat: map[int64][]int64{
+			3740223926: {8718303786},
+		},
+		History: harvest.HistoryOptions{
+			BatchSize: 100,
+			MinID:     10,
+		},
+	}
+	messages := []tg.MessageClass{
+		&tg.Message{ID: 13, Date: int(start.Add(3 * time.Hour).Unix()), Out: true, PeerID: &tg.PeerChannel{ChannelID: 3740223926}, Message: "self"},
+		&tg.Message{ID: 12, Date: int(start.Add(2 * time.Hour).Unix()), FromID: &tg.PeerUser{UserID: 8718303786}, PeerID: &tg.PeerChannel{ChannelID: 3740223926}, Message: "trackmate"},
+		&tg.Message{ID: 11, Date: int(start.Add(time.Hour).Unix()), FromID: &tg.PeerUser{UserID: 99}, PeerID: &tg.PeerChannel{ChannelID: 3740223926}, Message: "other"},
+		&tg.Message{ID: 10, Date: int(start.Add(-time.Hour).Unix()), Out: true, PeerID: &tg.PeerChannel{ChannelID: 3740223926}, Message: "already verified"},
+	}
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		return &tg.MessagesMessages{
+			Messages: messages,
+			Users: []tg.UserClass{
+				&tg.User{ID: 8718303786, FirstName: "Trackmate", Bot: true},
+				&tg.User{ID: 99, FirstName: "Other"},
+			},
+		}, nil
+	}
+	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, true, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.Complete {
+		t.Fatalf("stats incomplete: %+v", stats)
+	}
+	if len(records) != 2 || records[0].MessageID != 12 || records[1].MessageID != 13 {
+		t.Fatalf("checkpoint records = %+v", records)
+	}
+	if records[0].Sender.ID != 8718303786 || !records[0].Sender.Bot {
+		t.Fatalf("Trackmate record lost sender identity: %+v", records[0])
+	}
+	fullOpts := opts
+	fullOpts.History.MinID = 0
+	fullRecords, fullStats, err := (&Session{}).collectOutgoingDay(context.Background(), target, fullOpts, true, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointJSONL := messageRecordsJSONL(t, records)
+	fullJSONL := messageRecordsJSONL(t, fullRecords)
+	if !fullStats.Complete || checkpointJSONL != fullJSONL {
+		t.Fatalf("checkpoint JSONL differs from full JSONL:\ncheckpoint=%s\nfull=%s", checkpointJSONL, fullJSONL)
+	}
+}
+
+func messageRecordsJSONL(t *testing.T, records []harvest.MessageRecord) string {
+	t.Helper()
+	var output strings.Builder
+	encoder := json.NewEncoder(&output)
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return output.String()
 }
 
 func TestDailyRecordFilterRunsBeforeMediaProcessing(t *testing.T) {

@@ -169,6 +169,7 @@ type HistoryOptions struct {
 	ASRLog                func(ASRLogEvent) error
 	StageTiming           stages.Observer
 	AudioDurationTiming   stages.AudioDurationObserver
+	DialogCheckpoint      DailyDialogCheckpointDecision
 }
 
 type Transcriber interface {
@@ -211,19 +212,24 @@ type OutgoingRangeOptions struct {
 }
 
 type OutgoingStats struct {
-	Records            int       `json:"records"`
-	DialogsScanned     int       `json:"dialogs_scanned"`
-	DialogsWithRecords int       `json:"dialogs_with_records"`
-	DialogsSkipped     int       `json:"dialogs_skipped"`
-	DialogErrors       []string  `json:"dialog_errors,omitempty"`
-	Attachments        int       `json:"attachments"`
-	Transcripts        int       `json:"transcripts"`
-	Forwarded          int       `json:"forwarded"`
-	FirstAt            time.Time `json:"first_at,omitempty"`
-	LastAt             time.Time `json:"last_at,omitempty"`
-	Batches            int       `json:"batches"`
-	FloodWaits         int       `json:"flood_waits"`
-	Complete           bool      `json:"complete,omitempty"`
+	Records            int               `json:"records"`
+	DialogsScanned     int               `json:"dialogs_scanned"`
+	DialogsHistoryRPC  int               `json:"dialogs_history_rpc"`
+	DialogsWithRecords int               `json:"dialogs_with_records"`
+	DialogsSkipped     int               `json:"dialogs_skipped"`
+	DialogsUnchanged   int               `json:"dialogs_unchanged"`
+	DialogsChanged     int               `json:"dialogs_changed"`
+	DialogsNew         int               `json:"dialogs_new"`
+	DialogErrors       []string          `json:"dialog_errors,omitempty"`
+	Attachments        int               `json:"attachments"`
+	Transcripts        int               `json:"transcripts"`
+	Forwarded          int               `json:"forwarded"`
+	FirstAt            time.Time         `json:"first_at,omitempty"`
+	LastAt             time.Time         `json:"last_at,omitempty"`
+	Batches            int               `json:"batches"`
+	FloodWaits         int               `json:"flood_waits"`
+	Complete           bool              `json:"complete,omitempty"`
+	DialogHeads        []DailyDialogHead `json:"-"`
 }
 
 type OutgoingProgress struct {
@@ -232,6 +238,7 @@ type OutgoingProgress struct {
 	Total      int
 	Batches    int
 	Skipped    bool
+	SkipReason string
 	Error      string
 	FloodWaits int
 }

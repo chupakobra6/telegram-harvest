@@ -77,14 +77,15 @@ ZIP-архивы по умолчанию не создаются. В финал�
 ## Порядок выполнения
 
 1. Проверить `git status`, авторизацию нужного профиля через `doctor`, последнюю дату отчёта и свободное место.
-2. Для обычного запроса запустить `make daily-catchup PROFILE=main PROGRESS=1` без ручной начальной даты. Команда должна выполнить один Telegram range-scan всего нового диапазона и только затем разбить записи по дневным отчётам; отдельный полный scan для каждого дня не допускается.
+2. Для обычного запроса запустить `make daily-catchup PROFILE=main PROGRESS=1` без ручной начальной даты. Команда должна выполнить один Telegram range-scan всего нового диапазона и только затем разбить записи по дневным отчётам; отдельный полный scan для каждого дня не допускается. В непрерывном автоматическом запуске неизменившиеся dialog могут быть доказанно пропущены по checkpoint. Ручной `FROM`, исторический диапазон и любой checkpoint mismatch обязаны идти через полный fallback.
 3. Не запускать второй ASR/catch-up процесс, если первый ещё работает.
 4. Дождаться завершения процесса; не оставлять фоновую сессию без контроля.
 5. Проверить созданные даты, `complete=true`, дневные Markdown, `00-latest-catchup.md` и отсутствие технических ошибок в человекочитаемом тексте.
 6. Проверить, что настроенные дополнительные отправители представлены в релевантных днях, но сообщения остальных участников их чатов не попали в daily.
 7. Проверить ASR-статистику: cache/transcribed/skip/error, нулевые временные файлы и отсутствие зависшего helper-процесса.
-8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, Vosk, render, audio seconds, ASR/pipeline speed, total и unaccounted.
-9. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports или кэш без явной причины.
+8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, Vosk, render, audio seconds, ASR/pipeline speed, dialog checkpoint counters/fallback, total и unaccounted.
+9. Для успешного автоматического catch-up проверить `.state/daily/dialog-checkpoint.json`: `account_id`, `scope_fingerprint`, `verified_through`, `complete=true`, `top_message_id`, `verified_message_id` и `head_fully_verified`. Head из следующего, ещё не опубликованного дня не должен иметь `head_fully_verified=true`. `updated_at` не должен меняться после incomplete/error run или ошибки merged publish.
+10. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports, dialog checkpoint или кэш без явной причины.
 
 ## Критерий готовности
 

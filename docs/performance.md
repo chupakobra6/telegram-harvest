@@ -2,7 +2,9 @@
 
 ## Daily catch-up range scan
 
-`daily-catchup` читает весь новый диапазон одним последовательным Telegram range-scan и только после завершения разбивает записи по московским дням. Telegram RPC не параллелятся и сохраняют штатный pacing 700 ms.
+`daily-catchup` читает весь новый диапазон одним последовательным Telegram range-scan и только после завершения разбивает записи по московским дням. Telegram RPC не параллелятся и сохраняют штатный pacing 700 ms. Для следующего автоматического непрерывного диапазона dialog checkpoint сравнивает полученные из `get_dialogs` heads с последним полностью опубликованным запуском. Неизменившийся dialog не вызывает history/search RPC только при `head_fully_verified=true`. Иначе он сканируется с `verified_message_id` как безопасным `MinID`; новый dialog сканируется полностью.
+
+Разделение `top_message_id` и `verified_message_id` обязательно: catch-up за вчера запускается сегодня, поэтому `get_dialogs` уже может вернуть head сегодняшнего сообщения, не входящего во вчерашний отчет. Такой head сохраняется как наблюдаемый, но не считается полностью проверенным и не разрешает skip на следующем запуске.
 
 Контрольный benchmark от 2026-07-30:
 
@@ -41,10 +43,30 @@ Range-scan сохранил все 1 742 пары `(chat_id, message_id)` из b
 
 `audio_seconds` — суммарная длительность WAV только для успешно распознанных cache misses. `asr_speed_x` считается как `audio_seconds / stages_seconds.vosk`, а `pipeline_speed_x` — как `audio_seconds / (stages_seconds.model_cold_start + stages_seconds.ffmpeg + stages_seconds.vosk)`. При прогретом transcript cache или отсутствии успешно обработанного аудио все три значения равны нулю.
 
+Объект `dialog_checkpoint` сохраняет `enabled`, `fallback_reason`, общее число dialog, `history_rpc`, `unchanged`, `changed` и `new`. CLI печатает те же counters. Checkpoint не используется для `daily`, ручного `daily-catchup --from`, исторического или разорванного диапазона, при несовпадении account/scope и при невалидном state. Неполный/error run его не меняет.
+
+Live safety-проверка 2026-07-30 на текущем диапазоне сравнила полный и checkpoint scan после v2 bootstrap:
+
+| Проверка | Full | Checkpoint |
+| --- | ---: | ---: |
+| Records | 88 | 88 |
+| Trackmate records | 6 | 6 |
+| History dialogs | 12 | 12 |
+| Batches | 17 | 17 |
+| Unchanged dialogs skipped by checkpoint | 0 | 460 |
+
+Потерянных `(chat_type, chat_id, message_id)` — 0. Расхождений общих JSONL records после удаления только живых dialog counters — 0. Все 12 dialog с сообщениями текущего дня были просканированы; checkpoint не принял уже наблюдавшиеся сегодняшние heads за покрытые вчерашним отчетом.
+
+## Search pagination completeness
+
+`messages.search` не гарантирует, что короткая страница (`len(messages) < requested_limit`) является последней. Daily outgoing search поэтому продолжает последовательную пагинацию до пустой страницы или безопасной границы `MinID`; короткая страница завершает scan только для `getHistory`. Если Telegram возвращает неубывающий offset, scan завершается ошибкой и не публикует checkpoint вместо ложного `complete=true`.
+
+Регрессионный тест воспроизводит две разреженные search-страницы и проверяет, что сообщения со второй страницы попадают в итоговый JSONL.
+
 Поля стадий не перекрываются. `total_seconds` — wall time измеряемой daily-операции, `accounted_seconds` — сумма шести стадий, а `unaccounted_seconds` — оставшаяся локальная работа: нормализация сообщений, cache reads, partitioning, cleanup и orchestration. CLI печатает те же значения:
 
 ```text
-timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s vosk=...s render=...s audio=...s asr_speed=...x pipeline_speed=...x unaccounted=...s total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
+timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s vosk=...s render=...s audio=...s asr_speed=...x pipeline_speed=...x checkpoint_enabled=... checkpoint_history_dialogs=... checkpoint_unchanged=... checkpoint_changed=... checkpoint_new=... checkpoint_fallback=... unaccounted=...s total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
 ```
 
 Live-проверка 2026-07-30 на том же восьмидневном диапазоне и прогретом media/transcript cache:

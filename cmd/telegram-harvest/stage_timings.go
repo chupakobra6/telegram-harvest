@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
@@ -27,32 +28,45 @@ type dailyStageSeconds struct {
 }
 
 type dailyStageTimingReport struct {
-	RunID              string            `json:"run_id"`
-	Command            string            `json:"command"`
-	StartDate          string            `json:"start_date,omitempty"`
-	EndDate            string            `json:"end_date,omitempty"`
-	StartedAt          time.Time         `json:"started_at"`
-	CompletedAt        time.Time         `json:"completed_at"`
-	Success            bool              `json:"success"`
-	Error              string            `json:"error,omitempty"`
-	Stages             dailyStageSeconds `json:"stages_seconds"`
-	AudioSeconds       float64           `json:"audio_seconds"`
-	ASRSpeedX          float64           `json:"asr_speed_x"`
-	PipelineSpeedX     float64           `json:"pipeline_speed_x"`
-	AccountedSeconds   float64           `json:"accounted_seconds"`
-	UnaccountedSeconds float64           `json:"unaccounted_seconds"`
-	TotalSeconds       float64           `json:"total_seconds"`
+	RunID              string                       `json:"run_id"`
+	Command            string                       `json:"command"`
+	StartDate          string                       `json:"start_date,omitempty"`
+	EndDate            string                       `json:"end_date,omitempty"`
+	StartedAt          time.Time                    `json:"started_at"`
+	CompletedAt        time.Time                    `json:"completed_at"`
+	Success            bool                         `json:"success"`
+	Error              string                       `json:"error,omitempty"`
+	Stages             dailyStageSeconds            `json:"stages_seconds"`
+	AudioSeconds       float64                      `json:"audio_seconds"`
+	ASRSpeedX          float64                      `json:"asr_speed_x"`
+	PipelineSpeedX     float64                      `json:"pipeline_speed_x"`
+	DialogCheckpoint   dailyDialogCheckpointMetrics `json:"dialog_checkpoint"`
+	AccountedSeconds   float64                      `json:"accounted_seconds"`
+	UnaccountedSeconds float64                      `json:"unaccounted_seconds"`
+	TotalSeconds       float64                      `json:"total_seconds"`
+}
+
+type dailyDialogCheckpointMetrics struct {
+	Evaluated      bool   `json:"evaluated"`
+	Enabled        bool   `json:"enabled"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
+	DialogsTotal   int    `json:"dialogs_total"`
+	HistoryRPC     int    `json:"history_rpc"`
+	Unchanged      int    `json:"unchanged"`
+	Changed        int    `json:"changed"`
+	New            int    `json:"new"`
 }
 
 type dailyStageTimingCollector struct {
-	mu           sync.Mutex
-	runID        string
-	command      string
-	startDate    string
-	endDate      string
-	startedAt    time.Time
-	durations    map[stages.Name]time.Duration
-	audioSeconds float64
+	mu               sync.Mutex
+	runID            string
+	command          string
+	startDate        string
+	endDate          string
+	startedAt        time.Time
+	durations        map[stages.Name]time.Duration
+	audioSeconds     float64
+	dialogCheckpoint dailyDialogCheckpointMetrics
 }
 
 func newDailyStageTimingCollector(command string, startDate string, endDate string) *dailyStageTimingCollector {
@@ -83,6 +97,24 @@ func (c *dailyStageTimingCollector) ObserveAudioDuration(seconds float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.audioSeconds += seconds
+}
+
+func (c *dailyStageTimingCollector) ObserveDialogCheckpoint(decision harvest.DailyDialogCheckpointDecision, stats harvest.OutgoingStats) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dialogCheckpoint = dailyDialogCheckpointMetrics{
+		Evaluated:      true,
+		Enabled:        decision.Enabled,
+		FallbackReason: decision.FallbackReason,
+		DialogsTotal:   stats.DialogsScanned,
+		HistoryRPC:     stats.DialogsHistoryRPC,
+		Unchanged:      stats.DialogsUnchanged,
+		Changed:        stats.DialogsChanged,
+		New:            stats.DialogsNew,
+	}
 }
 
 func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport {
@@ -117,6 +149,7 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		AudioSeconds:       c.audioSeconds,
 		ASRSpeedX:          asrSpeedX,
 		PipelineSpeedX:     pipelineSpeedX,
+		DialogCheckpoint:   c.dialogCheckpoint,
 		AccountedSeconds:   accounted,
 		UnaccountedSeconds: unaccounted,
 		TotalSeconds:       total,
@@ -139,7 +172,7 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 	path, persistErr := writeDailyStageTimingReport(stateDir, report)
 	if persistErr == nil {
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs vosk=%.3fs render=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx unaccounted=%.3fs total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs vosk=%.3fs render=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s unaccounted=%.3fs total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.Stages.FFmpeg,
@@ -149,6 +182,12 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			report.AudioSeconds,
 			report.ASRSpeedX,
 			report.PipelineSpeedX,
+			report.DialogCheckpoint.Enabled,
+			report.DialogCheckpoint.HistoryRPC,
+			report.DialogCheckpoint.Unchanged,
+			report.DialogCheckpoint.Changed,
+			report.DialogCheckpoint.New,
+			report.DialogCheckpoint.FallbackReason,
 			report.UnaccountedSeconds,
 			report.TotalSeconds,
 			path,

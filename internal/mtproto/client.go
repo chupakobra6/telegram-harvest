@@ -608,12 +608,37 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 	stats := harvest.OutgoingStats{DialogsScanned: len(dialogs)}
 	records := make([]harvest.MessageRecord, 0)
 	for _, chat := range dialogs {
-		if !chat.LastMessageAt.IsZero() && chat.LastMessageAt.Before(opts.Start) {
+		stats.DialogHeads = append(stats.DialogHeads, dailyDialogHead(chat, opts.End))
+		headIndex := len(stats.DialogHeads) - 1
+		dialogPlan := planDailyDialogScan(chat, opts.History.DialogCheckpoint)
+		switch dialogPlan.Kind {
+		case dailyDialogUnchanged:
+			stats.DialogsSkipped++
+			stats.DialogsUnchanged++
+			if opts.Progress != nil {
+				if err := opts.Progress(harvest.OutgoingProgress{
+					Chat:       chat,
+					Skipped:    true,
+					SkipReason: "checkpoint_unchanged",
+					Total:      len(records),
+					FloodWaits: s.FloodWaits(),
+				}); err != nil {
+					return harvest.OutgoingStats{}, err
+				}
+			}
+			continue
+		case dailyDialogChanged:
+			stats.DialogsChanged++
+		case dailyDialogNew:
+			stats.DialogsNew++
+		}
+		if dialogPlan.Kind == dailyDialogFull && !chat.LastMessageAt.IsZero() && chat.LastMessageAt.Before(opts.Start) {
 			stats.DialogsSkipped++
 			if opts.Progress != nil {
 				if err := opts.Progress(harvest.OutgoingProgress{
 					Chat:       chat,
 					Skipped:    true,
+					SkipReason: "before_range",
 					Total:      len(records),
 					FloodWaits: s.FloodWaits(),
 				}); err != nil {
@@ -623,6 +648,8 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 			continue
 		}
 
+		dialogOpts := opts
+		dialogOpts.History.MinID = max(dialogOpts.History.MinID, dialogPlan.MinID)
 		scanStart := time.Now()
 		target, err := s.resolveTarget(ctx, strconv.FormatInt(chat.ID, 10))
 		stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
@@ -641,7 +668,8 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 			continue
 		}
 
-		dialogRecords, dialogStats, err := s.searchOutgoingDayInDialog(ctx, target, opts)
+		stats.DialogsHistoryRPC++
+		dialogRecords, dialogStats, err := s.searchOutgoingDayInDialog(ctx, target, dialogOpts)
 		stats.Batches += dialogStats.Batches
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
@@ -661,9 +689,14 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		if len(dialogRecords) > 0 {
 			stats.DialogsWithRecords++
 			records = append(records, dialogRecords...)
+			for _, record := range dialogRecords {
+				if record.MessageID > stats.DialogHeads[headIndex].VerifiedMessageID {
+					stats.DialogHeads[headIndex].VerifiedMessageID = record.MessageID
+				}
+			}
 		}
 		if !dialogStats.Complete {
-			stats.DialogErrors = append(stats.DialogErrors, dailyDialogIncomplete(chat, opts.History.MaxBatches))
+			stats.DialogErrors = append(stats.DialogErrors, dailyDialogIncomplete(chat, dialogOpts.History.MaxBatches))
 		}
 		if opts.Progress != nil {
 			if err := opts.Progress(harvest.OutgoingProgress{
@@ -708,6 +741,53 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 	stats.FloodWaits = s.FloodWaits()
 	stats.Complete = len(stats.DialogErrors) == 0
 	return stats, nil
+}
+
+func dailyDialogHead(chat harvest.Chat, rangeEnd time.Time) harvest.DailyDialogHead {
+	headFullyVerified := !chat.LastMessageAt.IsZero() && chat.LastMessageAt.Before(rangeEnd)
+	verifiedMessageID := 0
+	if headFullyVerified {
+		verifiedMessageID = chat.TopMessageID
+	}
+	return harvest.DailyDialogHead{
+		ChatID:            chat.ID,
+		ChatType:          chat.Type,
+		TopMessageID:      chat.TopMessageID,
+		VerifiedMessageID: verifiedMessageID,
+		HeadFullyVerified: headFullyVerified,
+	}
+}
+
+type dailyDialogScanKind int
+
+const (
+	dailyDialogFull dailyDialogScanKind = iota
+	dailyDialogUnchanged
+	dailyDialogChanged
+	dailyDialogNew
+)
+
+type dailyDialogScanPlan struct {
+	Kind  dailyDialogScanKind
+	MinID int
+}
+
+func planDailyDialogScan(chat harvest.Chat, checkpoint harvest.DailyDialogCheckpointDecision) dailyDialogScanPlan {
+	if !checkpoint.Enabled {
+		return dailyDialogScanPlan{Kind: dailyDialogFull}
+	}
+	previous, ok := checkpoint.Dialogs[harvest.DailyDialogHeadKey(chat.Type, chat.ID)]
+	if !ok {
+		return dailyDialogScanPlan{Kind: dailyDialogNew}
+	}
+	if previous.HeadFullyVerified && previous.TopMessageID == chat.TopMessageID {
+		return dailyDialogScanPlan{Kind: dailyDialogUnchanged}
+	}
+	plan := dailyDialogScanPlan{Kind: dailyDialogChanged}
+	if previous.VerifiedMessageID > 0 && chat.TopMessageID > previous.VerifiedMessageID {
+		plan.MinID = previous.VerifiedMessageID
+	}
+	return plan
 }
 
 func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarget, opts harvest.HistoryOptions, emit func(harvest.MessageRecord) error, topicByID map[int]harvest.Topic) (harvest.Chat, harvest.HistoryStats, error) {
@@ -888,17 +968,7 @@ func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolv
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "search_messages", func(rpcCtx context.Context) error {
 			var callErr error
-			req := &tg.MessagesSearchRequest{
-				Peer:     target.InputPeer,
-				Q:        "",
-				Filter:   &tg.InputMessagesFilterEmpty{},
-				MinDate:  int(opts.Start.Unix()) - 1,
-				MaxDate:  int(opts.End.Unix()),
-				OffsetID: offsetID,
-				Limit:    batchLimit,
-				Hash:     0,
-			}
-			req.SetFromID(&tg.InputPeerSelf{})
+			req := outgoingSearchRequest(target, opts, offsetID, batchLimit)
 			result, callErr = s.raw.MessagesSearch(rpcCtx, req)
 			return callErr
 		})
@@ -911,16 +981,37 @@ func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolve
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "get_history", func(rpcCtx context.Context) error {
 			var callErr error
-			result, callErr = s.raw.MessagesGetHistory(rpcCtx, &tg.MessagesGetHistoryRequest{
-				Peer:     target.InputPeer,
-				OffsetID: offsetID,
-				Limit:    batchLimit,
-				Hash:     0,
-			})
+			result, callErr = s.raw.MessagesGetHistory(rpcCtx, outgoingHistoryRequest(target, opts, offsetID, batchLimit))
 			return callErr
 		})
 		return result, err
 	})
+}
+
+func outgoingSearchRequest(target resolvedTarget, opts harvest.OutgoingRangeOptions, offsetID int, batchLimit int) *tg.MessagesSearchRequest {
+	request := &tg.MessagesSearchRequest{
+		Peer:     target.InputPeer,
+		Q:        "",
+		Filter:   &tg.InputMessagesFilterEmpty{},
+		MinDate:  int(opts.Start.Unix()) - 1,
+		MaxDate:  int(opts.End.Unix()),
+		OffsetID: offsetID,
+		Limit:    batchLimit,
+		MinID:    opts.History.MinID,
+		Hash:     0,
+	}
+	request.SetFromID(&tg.InputPeerSelf{})
+	return request
+}
+
+func outgoingHistoryRequest(target resolvedTarget, opts harvest.OutgoingRangeOptions, offsetID int, batchLimit int) *tg.MessagesGetHistoryRequest {
+	return &tg.MessagesGetHistoryRequest{
+		Peer:     target.InputPeer,
+		OffsetID: offsetID,
+		Limit:    batchLimit,
+		MinID:    opts.History.MinID,
+		Hash:     0,
+	}
 }
 
 func (s *Session) collectOutgoingDay(
@@ -954,9 +1045,14 @@ func (s *Session) collectOutgoingDay(
 
 		minMessageID := 0
 		reachedStart := false
+		reachedMinID := false
 		for _, msgClass := range messages {
 			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
 				minMessageID = id
+			}
+			if opts.History.MinID > 0 && messageID(msgClass) <= opts.History.MinID {
+				reachedMinID = true
+				continue
 			}
 			if stopAtStart && messageAtOrBefore(msgClass, opts.Start) {
 				reachedStart = true
@@ -967,9 +1063,17 @@ func (s *Session) collectOutgoingDay(
 			}
 			records = append(records, record)
 		}
-		if reachedStart || minMessageID == 0 || len(messages) < batchLimit {
+		// messages.search may return a sparse page shorter than the requested
+		// limit even when older matches still exist. Only getHistory can use a
+		// short page as an end-of-history signal.
+		shortHistoryPage := stopAtStart && len(messages) < batchLimit
+		if reachedStart || reachedMinID || minMessageID == 0 || shortHistoryPage {
 			stats.Complete = true
 			break
+		}
+		if offsetID > 0 && minMessageID >= offsetID {
+			stats.FloodWaits = s.FloodWaits()
+			return nil, stats, fmt.Errorf("daily dialog pagination did not advance: offset_id=%d next_offset_id=%d", offsetID, minMessageID)
 		}
 		offsetID = minMessageID
 	}

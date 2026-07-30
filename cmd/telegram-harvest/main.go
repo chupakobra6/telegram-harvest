@@ -804,16 +804,27 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 		len(plan.Jobs),
 		len(plan.Skipped),
 	)
-	if err := runDailyJobs(cfg, client, plan.Jobs, dailyOpts, timings, out); err != nil {
+	checkpointPath := harvest.DailyDialogCheckpointPath(cfg.StateDir)
+	previousCheckpoint, checkpointLoadErr := harvest.LoadDailyDialogCheckpoint(checkpointPath)
+	checkpointRequest := &dailyCheckpointRequest{
+		Previous:         previousCheckpoint,
+		LoadErr:          checkpointLoadErr,
+		ScopeFingerprint: dailyDialogCheckpointScopeFingerprint(cfg, dailyOpts),
+		StartDate:        plan.Jobs[0].Date,
+		VerifiedThrough:  plan.Jobs[len(plan.Jobs)-1].Date,
+		ForceFull:        strings.TrimSpace(*fromRaw) != "",
+	}
+	dailyResult, err := runDailyJobsWithCheckpoint(cfg, client, plan.Jobs, dailyOpts, timings, checkpointRequest, out)
+	if err != nil {
 		return finishDailyStageTimings(cfg.StateDir, timings, err, out)
 	}
 	renderStart := time.Now()
-	mergedPath, err := publishDailyCatchupMarkdown(reportDir, catchupDates)
+	mergedPath, err := publishDailyCatchupCompletion(reportDir, catchupDates, checkpointPath, dailyResult.Checkpoint)
 	stages.ObserveSince(timings.Observe, stages.Render, renderStart)
 	if err != nil {
 		return finishDailyStageTimings(cfg.StateDir, timings, err, out)
 	}
-	fmt.Fprintf(out, "catchup complete=true generated=%d skipped=%d merged=%s\n", len(plan.Jobs), len(plan.Skipped), mergedPath)
+	fmt.Fprintf(out, "catchup complete=true generated=%d skipped=%d merged=%s checkpoint=%s\n", len(plan.Jobs), len(plan.Skipped), mergedPath, checkpointPath)
 	return finishDailyStageTimings(cfg.StateDir, timings, nil, out)
 }
 
@@ -962,12 +973,57 @@ func publishDailyCatchupMarkdown(reportDir string, dates []string) (string, erro
 	return outputPath, nil
 }
 
+func publishDailyCatchupCompletion(
+	reportDir string,
+	dates []string,
+	checkpointPath string,
+	checkpoint *harvest.DailyDialogCheckpoint,
+) (string, error) {
+	mergedPath, err := publishDailyCatchupMarkdown(reportDir, dates)
+	if err != nil {
+		return "", err
+	}
+	if checkpoint != nil {
+		if err := harvest.SaveDailyDialogCheckpoint(checkpointPath, *checkpoint); err != nil {
+			return mergedPath, err
+		}
+	}
+	return mergedPath, nil
+}
+
 func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, opts dailyOptions, timings *dailyStageTimingCollector, out io.Writer) error {
+	_, err := runDailyJobsWithCheckpoint(cfg, client, jobs, opts, timings, nil, out)
+	return err
+}
+
+type dailyCheckpointRequest struct {
+	Previous         harvest.DailyDialogCheckpoint
+	LoadErr          error
+	ScopeFingerprint string
+	StartDate        string
+	VerifiedThrough  string
+	ForceFull        bool
+}
+
+type dailyRunResult struct {
+	Stats      harvest.OutgoingStats
+	Checkpoint *harvest.DailyDialogCheckpoint
+}
+
+func runDailyJobsWithCheckpoint(
+	cfg config.Config,
+	client *mtproto.Client,
+	jobs []dailyJob,
+	opts dailyOptions,
+	timings *dailyStageTimingCollector,
+	checkpointRequest *dailyCheckpointRequest,
+	out io.Writer,
+) (dailyRunResult, error) {
 	if len(jobs) == 0 {
-		return nil
+		return dailyRunResult{}, nil
 	}
 	if err := validateDailyOptions(opts); err != nil {
-		return err
+		return dailyRunResult{}, err
 	}
 	history := dailyHistoryOptions(cfg, opts)
 	if timings != nil {
@@ -982,26 +1038,69 @@ func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, op
 		}
 	}
 	additionalSenderIDsByChat := dailyAdditionalSenderIDsByChat(cfg)
+	var result dailyRunResult
 	err := withRuntimeLock(cfg, func() error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
-			if err := runDailyRangeJobs(ctx, session, history, opts, jobs, additionalSenderIDsByChat, out); err != nil {
+			accountID := int64(0)
+			if checkpointRequest != nil {
+				accountStart := time.Now()
+				profile, err := session.SelfProfile(ctx)
+				stages.ObserveSince(history.StageTiming, stages.TelegramScan, accountStart)
+				if err != nil {
+					return fmt.Errorf("resolve checkpoint account: %w", err)
+				}
+				accountID = profile.ID
+				history.DialogCheckpoint = evaluateDailyCheckpointRequest(*checkpointRequest, accountID)
+				fmt.Fprintf(out, "dialog_checkpoint enabled=%t fallback=%s\n",
+					history.DialogCheckpoint.Enabled,
+					history.DialogCheckpoint.FallbackReason,
+				)
+			}
+			rangeStats, err := runDailyRangeJobs(ctx, session, history, opts, jobs, additionalSenderIDsByChat, out)
+			result.Stats = rangeStats
+			if timings != nil && checkpointRequest != nil {
+				timings.ObserveDialogCheckpoint(history.DialogCheckpoint, rangeStats)
+			}
+			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					fmt.Fprintf(out, "interrupted=true start=%s end=%s\n", jobs[0].Date, jobs[len(jobs)-1].Date)
-					return nil
 				}
 				return err
+			}
+			if checkpointRequest != nil && rangeStats.Complete {
+				checkpoint := harvest.NewDailyDialogCheckpoint(
+					accountID,
+					checkpointRequest.ScopeFingerprint,
+					checkpointRequest.VerifiedThrough,
+					rangeStats.DialogHeads,
+					time.Now(),
+				)
+				result.Checkpoint = &checkpoint
 			}
 			return nil
 		})
 	})
 	if managedTranscriber != nil {
 		if closeErr := managedTranscriber.Close(); err == nil && closeErr != nil {
-			return closeErr
+			return dailyRunResult{}, closeErr
 		}
 	}
-	return err
+	return result, err
+}
+
+func evaluateDailyCheckpointRequest(request dailyCheckpointRequest, accountID int64) harvest.DailyDialogCheckpointDecision {
+	if request.ForceFull {
+		return harvest.DailyDialogCheckpointDecision{FallbackReason: "explicit_from"}
+	}
+	return harvest.EvaluateDailyDialogCheckpoint(
+		request.Previous,
+		request.LoadErr,
+		accountID,
+		request.ScopeFingerprint,
+		request.StartDate,
+	)
 }
 
 func validateDailyOptions(opts dailyOptions) error {
@@ -1061,9 +1160,9 @@ func runDailyRangeJobs(
 	jobs []dailyJob,
 	additionalSenderIDsByChat map[int64][]int64,
 	out io.Writer,
-) error {
+) (harvest.OutgoingStats, error) {
 	if len(jobs) == 0 {
-		return nil
+		return harvest.OutgoingStats{}, nil
 	}
 	jobs = sortedDailyJobs(jobs)
 	asrLogs := newDailyASRLogs(jobs)
@@ -1100,18 +1199,18 @@ func runDailyRangeJobs(
 	})
 	asrErr := asrLogs.Err()
 	if err != nil {
-		return errors.Join(err, asrErr, asrLogs.Close())
+		return rangeStats, errors.Join(err, asrErr, asrLogs.Close())
 	}
 	if asrErr != nil {
-		return errors.Join(asrErr, asrLogs.Close())
+		return rangeStats, errors.Join(asrErr, asrLogs.Close())
 	}
 	if rangeStats.Complete {
 		if err := asrLogs.EnsureAll(); err != nil {
-			return errors.Join(err, asrLogs.Close())
+			return rangeStats, errors.Join(err, asrLogs.Close())
 		}
 	}
 	if err := asrLogs.Close(); err != nil {
-		return err
+		return rangeStats, err
 	}
 	if !rangeStats.Complete {
 		for _, dialogErr := range rangeStats.DialogErrors {
@@ -1126,7 +1225,7 @@ func runDailyRangeJobs(
 			rangeStats.Transcripts,
 			rangeStats.FloodWaits,
 		)
-		return fmt.Errorf("daily range %s..%s incomplete; final reports were not published", jobs[0].Date, jobs[len(jobs)-1].Date)
+		return rangeStats, fmt.Errorf("daily range %s..%s incomplete; final reports were not published", jobs[0].Date, jobs[len(jobs)-1].Date)
 	}
 
 	recordsByDate := partitionDailyRecords(jobs, records, opts.Limit)
@@ -1139,20 +1238,24 @@ func runDailyRangeJobs(
 		err := publishDailyJob(job, stats, dayRecords)
 		stages.ObserveSince(history.StageTiming, stages.Render, renderStart)
 		if err != nil {
-			return err
+			return rangeStats, err
 		}
 		writeDailyJobResult(out, job, stats)
 	}
-	fmt.Fprintf(out, "range start=%s end=%s collected=%d published=%d dialogs=%d batches=%d flood_waits=%d complete=true\n",
+	fmt.Fprintf(out, "range start=%s end=%s collected=%d published=%d dialogs=%d history_dialogs=%d unchanged=%d changed=%d new=%d batches=%d flood_waits=%d complete=true\n",
 		jobs[0].Date,
 		jobs[len(jobs)-1].Date,
 		len(records),
 		publishedRecords,
 		rangeStats.DialogsScanned,
+		rangeStats.DialogsHistoryRPC,
+		rangeStats.DialogsUnchanged,
+		rangeStats.DialogsChanged,
+		rangeStats.DialogsNew,
 		rangeStats.Batches,
 		rangeStats.FloodWaits,
 	)
-	return nil
+	return rangeStats, nil
 }
 
 func dailyRangeProgress(out io.Writer, enabled bool, start string, end string) func(harvest.OutgoingProgress) error {
@@ -1161,7 +1264,7 @@ func dailyRangeProgress(out io.Writer, enabled bool, start string, end string) f
 			return nil
 		}
 		if progress.Skipped {
-			fmt.Fprintf(out, "progress range=%s..%s skipped=true chat=%s total=%d flood_waits=%d\n", start, end, progress.Chat.Display, progress.Total, progress.FloodWaits)
+			fmt.Fprintf(out, "progress range=%s..%s skipped=true reason=%s chat=%s total=%d flood_waits=%d\n", start, end, progress.SkipReason, progress.Chat.Display, progress.Total, progress.FloodWaits)
 			return nil
 		}
 		if progress.Error != "" {
@@ -1850,6 +1953,25 @@ func dailyAdditionalSenderIDsByChat(cfg config.Config) map[int64][]int64 {
 		result[source.ChatID] = append(result[source.ChatID], source.SenderID)
 	}
 	return result
+}
+
+func dailyDialogCheckpointScopeFingerprint(cfg config.Config, opts dailyOptions) string {
+	dialogLimit := opts.DialogLimit
+	if dialogLimit <= 0 {
+		dialogLimit = dailyDialogLimitDefault()
+	}
+	scope := harvest.DailyDialogCheckpointScope{
+		Version:        harvest.DailyDialogCheckpointVersion,
+		DialogLimit:    dialogLimit,
+		IncludeService: opts.IncludeService,
+	}
+	for _, sender := range cfg.DailyAdditionalSenders {
+		scope.AdditionalSenders = append(scope.AdditionalSenders, harvest.DailyDialogScopeSenderRef{
+			ChatID:   sender.ChatID,
+			SenderID: sender.SenderID,
+		})
+	}
+	return harvest.DailyDialogScopeFingerprint(scope)
 }
 
 func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
@@ -22,6 +23,16 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	first.Observe(stages.Vosk, 4*time.Second)
 	first.Observe(stages.Render, 500*time.Millisecond)
 	first.ObserveAudioDuration(24)
+	first.ObserveDialogCheckpoint(
+		harvest.DailyDialogCheckpointDecision{Enabled: true},
+		harvest.OutgoingStats{
+			DialogsScanned:    10,
+			DialogsHistoryRPC: 2,
+			DialogsUnchanged:  8,
+			DialogsChanged:    1,
+			DialogsNew:        1,
+		},
+	)
 	first.startedAt = time.Now().UTC().Add(-13 * time.Second)
 
 	firstReport := first.Report(nil)
@@ -63,6 +74,11 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	if decoded.PipelineSpeedX != 24.0/7.0 {
 		t.Fatalf("pipeline_speed_x = %f, want %f", decoded.PipelineSpeedX, 24.0/7.0)
 	}
+	if !decoded.DialogCheckpoint.Evaluated || !decoded.DialogCheckpoint.Enabled ||
+		decoded.DialogCheckpoint.DialogsTotal != 10 || decoded.DialogCheckpoint.HistoryRPC != 2 ||
+		decoded.DialogCheckpoint.Unchanged != 8 || decoded.DialogCheckpoint.Changed != 1 || decoded.DialogCheckpoint.New != 1 {
+		t.Fatalf("dialog checkpoint metrics = %+v", decoded.DialogCheckpoint)
+	}
 	if decoded.UnaccountedSeconds <= 0 {
 		t.Fatalf("unaccounted = %f, want positive remainder", decoded.UnaccountedSeconds)
 	}
@@ -84,7 +100,12 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 	if err := finishDailyStageTimings(stateDir, collector, nil, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"telegram_scan=", "download=", "ffmpeg=", "model_cold_start=", "vosk=", "render=", "audio=", "asr_speed=", "pipeline_speed=", "unaccounted=", "total=", "report="} {
+	for _, field := range []string{
+		"telegram_scan=", "download=", "ffmpeg=", "model_cold_start=", "vosk=", "render=",
+		"audio=", "asr_speed=", "pipeline_speed=", "checkpoint_enabled=", "checkpoint_history_dialogs=",
+		"checkpoint_unchanged=", "checkpoint_changed=", "checkpoint_new=", "checkpoint_fallback=",
+		"unaccounted=", "total=", "report=",
+	} {
 		if !strings.Contains(output.String(), field) {
 			t.Fatalf("missing %q in %s", field, output.String())
 		}

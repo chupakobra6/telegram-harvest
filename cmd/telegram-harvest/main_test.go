@@ -402,7 +402,7 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 	}
 	var output strings.Builder
 	timings := newDailyStageTimingCollector("daily-catchup", "2026-06-03", "2026-06-05")
-	err := runDailyRangeJobs(
+	_, err := runDailyRangeJobs(
 		context.Background(),
 		dumper,
 		harvest.HistoryOptions{Limit: 99, StageTiming: timings.Observe},
@@ -464,6 +464,13 @@ func TestRunDailyRangeJobsDoesNotPublishIncompleteRange(t *testing.T) {
 	job := testDailyJob(root, "2026-06-03", start)
 	mustWriteCLIFile(t, job.OutputPath, "old-jsonl\n")
 	mustWriteCLIFile(t, job.MarkdownPath, "old-markdown\n")
+	checkpointPath := harvest.DailyDialogCheckpointPath(root)
+	oldCheckpoint := harvest.NewDailyDialogCheckpoint(42, "scope", "2026-06-02", []harvest.DailyDialogHead{
+		{ChatID: 1, ChatType: "user", TopMessageID: 1, VerifiedMessageID: 1, HeadFullyVerified: true},
+	}, time.Unix(1, 0))
+	if err := harvest.SaveDailyDialogCheckpoint(checkpointPath, oldCheckpoint); err != nil {
+		t.Fatal(err)
+	}
 	dumper := &fakeDailyRangeDumper{
 		records: []harvest.MessageRecord{
 			{Chat: harvest.Chat{ID: 1}, MessageID: 1, Date: start.Add(time.Hour), Outgoing: true, Kind: "text"},
@@ -475,7 +482,7 @@ func TestRunDailyRangeJobsDoesNotPublishIncompleteRange(t *testing.T) {
 		},
 	}
 
-	err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, []dailyJob{job}, nil, &strings.Builder{})
+	_, err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, []dailyJob{job}, nil, &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("error = %v", err)
 	}
@@ -484,6 +491,72 @@ func TestRunDailyRangeJobsDoesNotPublishIncompleteRange(t *testing.T) {
 	}
 	if got := readCLIFile(t, job.MarkdownPath); got != "old-markdown\n" {
 		t.Fatalf("Markdown was replaced: %q", got)
+	}
+	checkpoint, err := harvest.LoadDailyDialogCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.VerifiedThrough != oldCheckpoint.VerifiedThrough || checkpoint.Dialogs[0].TopMessageID != 1 {
+		t.Fatalf("checkpoint changed after incomplete range: %+v", checkpoint)
+	}
+}
+
+func TestPublishDailyCatchupCompletionCommitsCheckpointOnlyAfterMergedPublish(t *testing.T) {
+	root := t.TempDir()
+	reportDir := filepath.Join(root, "reports")
+	checkpointPath := harvest.DailyDialogCheckpointPath(filepath.Join(root, "state"))
+	oldCheckpoint := harvest.NewDailyDialogCheckpoint(42, "scope", "2026-07-28", []harvest.DailyDialogHead{
+		{ChatID: 1, ChatType: "user", TopMessageID: 10, VerifiedMessageID: 10, HeadFullyVerified: true},
+	}, time.Unix(1, 0))
+	if err := harvest.SaveDailyDialogCheckpoint(checkpointPath, oldCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	nextCheckpoint := harvest.NewDailyDialogCheckpoint(42, "scope", "2026-07-29", []harvest.DailyDialogHead{
+		{ChatID: 1, ChatType: "user", TopMessageID: 11, VerifiedMessageID: 11, HeadFullyVerified: true},
+	}, time.Unix(2, 0))
+
+	if _, err := publishDailyCatchupCompletion(reportDir, []string{"2026-07-29"}, checkpointPath, &nextCheckpoint); err == nil {
+		t.Fatal("missing daily report should fail merged publication")
+	}
+	unchanged, err := harvest.LoadDailyDialogCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.VerifiedThrough != oldCheckpoint.VerifiedThrough || unchanged.Dialogs[0].TopMessageID != 10 {
+		t.Fatalf("checkpoint advanced before merged publish: %+v", unchanged)
+	}
+
+	mustWriteCLIFile(t, filepath.Join(reportDir, "2026-07-29.md"), "# Daily\n\nnew message\n")
+	mergedPath, err := publishDailyCatchupCompletion(reportDir, []string{"2026-07-29"}, checkpointPath, &nextCheckpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readCLIFile(t, mergedPath), "new message") {
+		t.Fatalf("merged report missing content: %s", mergedPath)
+	}
+	advanced, err := harvest.LoadDailyDialogCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced.VerifiedThrough != "2026-07-29" || advanced.Dialogs[0].TopMessageID != 11 {
+		t.Fatalf("checkpoint was not advanced after merged publish: %+v", advanced)
+	}
+}
+
+func TestExplicitCatchupFromForcesFullCheckpointFallback(t *testing.T) {
+	scope := "scope"
+	request := dailyCheckpointRequest{
+		Previous: harvest.NewDailyDialogCheckpoint(42, scope, "2026-07-28", []harvest.DailyDialogHead{
+			{ChatID: 1, ChatType: "user", TopMessageID: 10, VerifiedMessageID: 10, HeadFullyVerified: true},
+		}, time.Now()),
+		ScopeFingerprint: scope,
+		StartDate:        "2026-07-29",
+		VerifiedThrough:  "2026-07-29",
+		ForceFull:        true,
+	}
+	decision := evaluateDailyCheckpointRequest(request, 42)
+	if decision.Enabled || decision.FallbackReason != "explicit_from" {
+		t.Fatalf("decision = %+v", decision)
 	}
 }
 
@@ -499,7 +572,7 @@ func TestRunDailyRangeJobsDoesNotTruncateASRLogsBeforeFirstEvent(t *testing.T) {
 	}
 	dumper := &fakeDailyRangeDumper{err: errors.New("telegram unavailable")}
 
-	err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, jobs, nil, &strings.Builder{})
+	_, err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, jobs, nil, &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "telegram unavailable") {
 		t.Fatalf("error = %v", err)
 	}
@@ -525,7 +598,7 @@ func TestRunDailyRangeJobsDetectsDiscardedASREncodeError(t *testing.T) {
 		stats: harvest.OutgoingStats{Complete: true},
 	}
 
-	err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, []dailyJob{job}, nil, &strings.Builder{})
+	_, err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, []dailyJob{job}, nil, &strings.Builder{})
 	if err == nil {
 		t.Fatal("discarded production-style ASR callback error was not detected")
 	}

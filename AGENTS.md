@@ -35,6 +35,7 @@
 - A catch-up means the standard `main` profile daily catch-up through yesterday. Do not invent separate full-chat or full-account catch-up formats; `dump` and `sync` are low-level data primitives, not user-facing catch-up workflows.
 - A successful `daily-catchup` must atomically publish `reports/daily/00-latest-catchup.md` from every daily report in that run's range. Treat individual `YYYY-MM-DD.md` files as the sources and the merged file as the handoff view.
 - `daily-catchup` must collect all missing days through one sequential Telegram range scan, then partition records into day reports. Do not reintroduce one full dialog/chat scan per day.
+- The daily dialog checkpoint may skip history only for an automatic catch-up range contiguous with the last complete checkpoint, on the same Telegram account and identical daily scope, when the dialog `top_message_id` is unchanged and that head was fully covered by the previous range. A head from the next unpublished day must be scanned from its safe `verified_message_id`, never skipped. Explicit `--from`, gaps, historical ranges, state/account/scope mismatch, anomalous heads, incomplete scans, and errors must use the safe full-scan fallback. Publish the checkpoint only after the merged catch-up Markdown succeeds.
 - `daily` and `daily-catchup` must directly measure Telegram scan, download, ffmpeg, Vosk, and render, then atomically preserve a unique per-run JSON under `.state/daily/timings/`. Do not reconstruct historical stage timings from replaceable daily ASR logs.
 
 ## Code Policy
