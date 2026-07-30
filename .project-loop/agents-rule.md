@@ -1,0 +1,11 @@
+## Project Loop
+- Используй skill `project-loop` для сложной или развивающейся работы в этом проекте.
+- `.project-loop/requirements/checklist.md` - источник правды по требованиям.
+- `.project-loop/plan/current-step.md` - источник правды по активному шагу.
+- Raw input сохраняется в `.project-loop/intake/raw/`; свежие комментарии Игоря сохраняются в `.project-loop/intake/user-deltas.md`; sourced requirements продвигаются в checklist, выполняется один delivery step за раз, handoff обновляется перед паузой.
+- Project inbox routing хранится в `inbox/README.md`.
+- Навигационные файлы читаются первыми; raw/archive intake читается по active step, source map или conflict.
+- `.project-loop/agents/registry.md` создается перед subagents; UUID фиксируются в registry.
+- Generated worker/reviewer prompts используются как starting point; `.project-loop/reviews/prompt-audit.md` создается при изменении prompts.
+- Человекочитаемое project content пишется на русском; служебные keys, IDs, paths и commands остаются в исходном виде.
+- Intake/research/derived artifacts получают описательные filenames; source IDs короткие и хранятся в source map/checklist.

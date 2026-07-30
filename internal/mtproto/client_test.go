@@ -79,7 +79,7 @@ func TestHistoryTimeBounds(t *testing.T) {
 }
 
 func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
-	opts := harvest.OutgoingDayOptions{
+	opts := harvest.OutgoingRangeOptions{
 		AdditionalSenderIDsByChat: map[int64][]int64{
 			3740223926: {8718303786},
 		},
@@ -127,6 +127,45 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 		Message: "not part of daily",
 	}, target, entities, nil, opts); ok {
 		t.Fatal("other Haru participant should be excluded from daily")
+	}
+}
+
+func TestDailyRecordFilterRunsBeforeMediaProcessing(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	called := false
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   start.AddDate(0, 0, 1),
+		IncludeRecord: func(record harvest.MessageRecord) bool {
+			called = true
+			return false
+		},
+		History: harvest.HistoryOptions{
+			DownloadMedia:   true,
+			TranscribeMedia: true,
+		},
+	}
+	session := &Session{}
+	target := resolvedTarget{Chat: harvest.Chat{ID: 42, Display: "Notes"}}
+	message := &tg.Message{
+		ID:      1,
+		Date:    int(start.Add(time.Hour).Unix()),
+		Out:     true,
+		Message: "excluded day",
+		Media: &tg.MessageMediaDocument{
+			Document: &tg.Document{
+				ID:       99,
+				MimeType: "audio/ogg",
+				Size:     100,
+			},
+		},
+	}
+
+	if _, ok := session.normalizeOutgoingDayRecord(context.Background(), message, target, peer.Entities{}, nil, opts); ok {
+		t.Fatal("record rejected by range filter should not be emitted")
+	}
+	if !called {
+		t.Fatal("record filter was not called")
 	}
 }
 

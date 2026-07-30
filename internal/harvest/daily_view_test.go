@@ -72,7 +72,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		Date:       "2026-06-05",
 		Start:      start,
 		End:        start.AddDate(0, 0, 1),
-		Stats: OutgoingDayStats{
+		Stats: OutgoingStats{
 			DialogsScanned: 10,
 			DialogsSkipped: 3,
 			FloodWaits:     1,

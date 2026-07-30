@@ -589,32 +589,32 @@ func (s *Session) fetchMessageByIDDirect(ctx context.Context, target resolvedTar
 	return nil, entities, fmt.Errorf("direct message lookup returned no message %d", messageID)
 }
 
-func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingDayStats, error) {
-	opts = normalizeOutgoingDayOptions(opts)
+func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRangeOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingStats, error) {
+	opts = normalizeOutgoingRangeOptions(opts)
 	if opts.Start.IsZero() {
-		return harvest.OutgoingDayStats{}, fmt.Errorf("start time is required")
+		return harvest.OutgoingStats{}, fmt.Errorf("start time is required")
 	}
 	if opts.End.IsZero() || !opts.End.After(opts.Start) {
-		return harvest.OutgoingDayStats{}, fmt.Errorf("end time must be after start time")
+		return harvest.OutgoingStats{}, fmt.Errorf("end time must be after start time")
 	}
 	dialogs, err := s.loadDialogs(ctx, opts.DialogLimit)
 	if err != nil {
-		return harvest.OutgoingDayStats{}, err
+		return harvest.OutgoingStats{}, err
 	}
 
-	stats := harvest.OutgoingDayStats{DialogsScanned: len(dialogs)}
+	stats := harvest.OutgoingStats{DialogsScanned: len(dialogs)}
 	records := make([]harvest.MessageRecord, 0)
 	for _, chat := range dialogs {
 		if !chat.LastMessageAt.IsZero() && chat.LastMessageAt.Before(opts.Start) {
 			stats.DialogsSkipped++
 			if opts.Progress != nil {
-				if err := opts.Progress(harvest.OutgoingDayProgress{
+				if err := opts.Progress(harvest.OutgoingProgress{
 					Chat:       chat,
 					Skipped:    true,
 					Total:      len(records),
 					FloodWaits: s.FloodWaits(),
 				}); err != nil {
-					return harvest.OutgoingDayStats{}, err
+					return harvest.OutgoingStats{}, err
 				}
 			}
 			continue
@@ -624,13 +624,13 @@ func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayO
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
 			if opts.Progress != nil {
-				if err := opts.Progress(harvest.OutgoingDayProgress{
+				if err := opts.Progress(harvest.OutgoingProgress{
 					Chat:       chat,
 					Error:      oneLine(err.Error()),
 					Total:      len(records),
 					FloodWaits: s.FloodWaits(),
 				}); err != nil {
-					return harvest.OutgoingDayStats{}, err
+					return harvest.OutgoingStats{}, err
 				}
 			}
 			continue
@@ -641,14 +641,14 @@ func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayO
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
 			if opts.Progress != nil {
-				if err := opts.Progress(harvest.OutgoingDayProgress{
+				if err := opts.Progress(harvest.OutgoingProgress{
 					Chat:       chat,
 					Error:      oneLine(err.Error()),
 					Total:      len(records),
 					Batches:    dialogStats.Batches,
 					FloodWaits: s.FloodWaits(),
 				}); err != nil {
-					return harvest.OutgoingDayStats{}, err
+					return harvest.OutgoingStats{}, err
 				}
 			}
 			continue
@@ -661,14 +661,14 @@ func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayO
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogIncomplete(chat, opts.History.MaxBatches))
 		}
 		if opts.Progress != nil {
-			if err := opts.Progress(harvest.OutgoingDayProgress{
+			if err := opts.Progress(harvest.OutgoingProgress{
 				Chat:       chat,
 				Records:    len(dialogRecords),
 				Total:      len(records),
 				Batches:    dialogStats.Batches,
 				FloodWaits: s.FloodWaits(),
 			}); err != nil {
-				return harvest.OutgoingDayStats{}, err
+				return harvest.OutgoingStats{}, err
 			}
 		}
 	}
@@ -696,7 +696,7 @@ func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayO
 		}
 		if emit != nil {
 			if err := emit(record); err != nil {
-				return harvest.OutgoingDayStats{}, err
+				return harvest.OutgoingStats{}, err
 			}
 		}
 	}
@@ -845,7 +845,7 @@ func normalizeHistoryOptions(opts harvest.HistoryOptions) harvest.HistoryOptions
 	return opts
 }
 
-func normalizeOutgoingDayOptions(opts harvest.OutgoingDayOptions) harvest.OutgoingDayOptions {
+func normalizeOutgoingRangeOptions(opts harvest.OutgoingRangeOptions) harvest.OutgoingRangeOptions {
 	if opts.DialogLimit <= 0 {
 		opts.DialogLimit = defaultDailyDialogLimit
 	}
@@ -861,7 +861,7 @@ func normalizeOutgoingDayOptions(opts harvest.OutgoingDayOptions) harvest.Outgoi
 	return opts
 }
 
-func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
 	if dailyHasAdditionalSenders(opts, target.Chat.ID) {
 		return s.scanOutgoingDayWithHistory(ctx, target, opts)
 	}
@@ -872,13 +872,13 @@ func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolved
 	return records, stats, err
 }
 
-func dailyHasAdditionalSenders(opts harvest.OutgoingDayOptions, chatID int64) bool {
+func dailyHasAdditionalSenders(opts harvest.OutgoingRangeOptions, chatID int64) bool {
 	return len(opts.AdditionalSenderIDsByChat[chatID]) > 0
 }
 
 type outgoingDayBatchLoader func(context.Context, int, int) (tg.MessagesMessagesClass, error)
 
-func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
 	return s.collectOutgoingDay(ctx, target, opts, false, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "search_messages", func(rpcCtx context.Context) error {
@@ -901,7 +901,7 @@ func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolv
 	})
 }
 
-func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
 	return s.collectOutgoingDay(ctx, target, opts, true, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "get_history", func(rpcCtx context.Context) error {
@@ -921,7 +921,7 @@ func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolve
 func (s *Session) collectOutgoingDay(
 	ctx context.Context,
 	target resolvedTarget,
-	opts harvest.OutgoingDayOptions,
+	opts harvest.OutgoingRangeOptions,
 	stopAtStart bool,
 	load outgoingDayBatchLoader,
 ) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
@@ -1013,7 +1013,7 @@ func (s *Session) normalizeOutgoingDayRecord(
 	target resolvedTarget,
 	entities peer.Entities,
 	topicByID map[int]harvest.Topic,
-	opts harvest.OutgoingDayOptions,
+	opts harvest.OutgoingRangeOptions,
 ) (harvest.MessageRecord, bool) {
 	record, ok := normalizeRecord(msgClass, target.Chat, entities)
 	if !ok {
@@ -1032,12 +1032,15 @@ func (s *Session) normalizeOutgoingDayRecord(
 	if record.Sender.Display == "" && record.Outgoing {
 		record.Sender = harvest.Sender{Type: "self", Display: "self", Self: true}
 	}
+	if opts.IncludeRecord != nil && !opts.IncludeRecord(record) {
+		return harvest.MessageRecord{}, false
+	}
 	ensureDailyAttachments(msgClass, &record)
 	s.downloadRecordMedia(ctx, msgClass, &record, opts.History)
 	return record, true
 }
 
-func dailyAdditionalSenderAllowed(opts harvest.OutgoingDayOptions, chatID int64, senderID int64) bool {
+func dailyAdditionalSenderAllowed(opts harvest.OutgoingRangeOptions, chatID int64, senderID int64) bool {
 	if senderID == 0 {
 		return false
 	}
@@ -1049,7 +1052,7 @@ func dailyAdditionalSenderAllowed(opts harvest.OutgoingDayOptions, chatID int64,
 	return false
 }
 
-func shouldContinueOutgoingDay(opts harvest.OutgoingDayOptions, batches int) bool {
+func shouldContinueOutgoingDay(opts harvest.OutgoingRangeOptions, batches int) bool {
 	if opts.History.MaxBatches > 0 && batches >= opts.History.MaxBatches {
 		return false
 	}

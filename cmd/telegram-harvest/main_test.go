@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chupakobra6/telegram-harvest/internal/config"
+	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 )
 
 func TestRunHelpPrintsCommands(t *testing.T) {
@@ -373,6 +377,178 @@ func TestRunDailyCatchupRejectsInvalidVideoTranscribeModeBeforeRuntimeAccess(t *
 	}
 }
 
+func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
+	root := t.TempDir()
+	location := time.FixedZone("MSK", 3*60*60)
+	dayOne := time.Date(2026, 6, 3, 0, 0, 0, 0, location)
+	dayThree := dayOne.AddDate(0, 0, 2)
+	jobs := []dailyJob{
+		testDailyJob(root, "2026-06-05", dayThree),
+		testDailyJob(root, "2026-06-03", dayOne),
+	}
+	dumper := &fakeDailyRangeDumper{
+		records: []harvest.MessageRecord{
+			{Chat: harvest.Chat{ID: 1, Display: "One"}, MessageID: 1, Date: dayOne.Add(time.Hour), Outgoing: true, Kind: "text", Text: "old"},
+			{Chat: harvest.Chat{ID: 1, Display: "One"}, MessageID: 2, Date: dayOne.Add(2 * time.Hour), Outgoing: true, Kind: "text", Text: "latest"},
+			{Chat: harvest.Chat{ID: 2, Display: "Gap"}, MessageID: 3, Date: dayOne.AddDate(0, 0, 1).Add(time.Hour), Outgoing: true, Kind: "text", Text: "existing day"},
+			{Chat: harvest.Chat{ID: 3, Display: "Three"}, MessageID: 4, Date: dayThree.Add(time.Hour), Outgoing: true, Kind: "text", Text: "third"},
+		},
+		stats: harvest.OutgoingStats{
+			DialogsScanned: 4,
+			Batches:        5,
+			Complete:       true,
+		},
+	}
+	var output strings.Builder
+	err := runDailyRangeJobs(
+		context.Background(),
+		dumper,
+		harvest.HistoryOptions{Limit: 99},
+		dailyOptions{Limit: 1},
+		jobs,
+		map[int64][]int64{10: {20}},
+		&output,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dumper.calls != 1 {
+		t.Fatalf("range calls = %d, want 1", dumper.calls)
+	}
+	if !dumper.opts.Start.Equal(dayOne) || !dumper.opts.End.Equal(dayThree.AddDate(0, 0, 1)) {
+		t.Fatalf("range = %s..%s", dumper.opts.Start, dumper.opts.End)
+	}
+	if dumper.opts.History.Limit != 0 {
+		t.Fatalf("range history limit = %d, want 0 before per-day limiting", dumper.opts.History.Limit)
+	}
+	if got := dumper.opts.AdditionalSenderIDsByChat[10]; len(got) != 1 || got[0] != 20 {
+		t.Fatalf("additional senders = %#v", dumper.opts.AdditionalSenderIDsByChat)
+	}
+
+	dayOneRecords := readMessageRecords(t, jobs[1].OutputPath)
+	if len(dayOneRecords) != 1 || dayOneRecords[0].MessageID != 2 {
+		t.Fatalf("day one records = %+v", dayOneRecords)
+	}
+	dayThreeRecords := readMessageRecords(t, jobs[0].OutputPath)
+	if len(dayThreeRecords) != 1 || dayThreeRecords[0].MessageID != 4 {
+		t.Fatalf("day three records = %+v", dayThreeRecords)
+	}
+	if strings.Contains(readCLIFile(t, jobs[1].MarkdownPath), "existing day") {
+		t.Fatal("gap-day record leaked into generated report")
+	}
+	if got := readASREvents(t, jobs[1].ASRLogPath); len(got) != 2 {
+		t.Fatalf("day one ASR events = %d, want 2", len(got))
+	}
+	if got := readASREvents(t, jobs[0].ASRLogPath); len(got) != 1 || got[0].MessageID != 4 {
+		t.Fatalf("day three ASR events = %+v", got)
+	}
+	if !strings.Contains(output.String(), "range start=2026-06-03 end=2026-06-05") {
+		t.Fatalf("missing range summary:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "collected=3 published=2") {
+		t.Fatalf("range summary does not distinguish collected and limited records:\n%s", output.String())
+	}
+}
+
+func TestRunDailyRangeJobsDoesNotPublishIncompleteRange(t *testing.T) {
+	root := t.TempDir()
+	start := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	job := testDailyJob(root, "2026-06-03", start)
+	mustWriteCLIFile(t, job.OutputPath, "old-jsonl\n")
+	mustWriteCLIFile(t, job.MarkdownPath, "old-markdown\n")
+	dumper := &fakeDailyRangeDumper{
+		records: []harvest.MessageRecord{
+			{Chat: harvest.Chat{ID: 1}, MessageID: 1, Date: start.Add(time.Hour), Outgoing: true, Kind: "text"},
+		},
+		stats: harvest.OutgoingStats{
+			DialogsScanned: 1,
+			DialogErrors:   []string{"One (1): timeout"},
+			Complete:       false,
+		},
+	}
+
+	err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, []dailyJob{job}, nil, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("error = %v", err)
+	}
+	if got := readCLIFile(t, job.OutputPath); got != "old-jsonl\n" {
+		t.Fatalf("JSONL was replaced: %q", got)
+	}
+	if got := readCLIFile(t, job.MarkdownPath); got != "old-markdown\n" {
+		t.Fatalf("Markdown was replaced: %q", got)
+	}
+}
+
+func TestRunDailyRangeJobsDoesNotTruncateASRLogsBeforeFirstEvent(t *testing.T) {
+	root := t.TempDir()
+	start := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	jobs := []dailyJob{
+		testDailyJob(root, "2026-06-03", start),
+		testDailyJob(root, "2026-06-04", start.AddDate(0, 0, 1)),
+	}
+	for _, job := range jobs {
+		mustWriteCLIFile(t, job.ASRLogPath, "previous-run\n")
+	}
+	dumper := &fakeDailyRangeDumper{err: errors.New("telegram unavailable")}
+
+	err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, jobs, nil, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "telegram unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+	for _, job := range jobs {
+		if got := readCLIFile(t, job.ASRLogPath); got != "previous-run\n" {
+			t.Fatalf("%s ASR log was truncated before an event: %q", job.Date, got)
+		}
+	}
+}
+
+func TestRunDailyRangeJobsDetectsDiscardedASREncodeError(t *testing.T) {
+	root := t.TempDir()
+	start := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	job := testDailyJob(root, "2026-06-03", start)
+	blockedParent := filepath.Join(root, "blocked")
+	mustWriteCLIFile(t, blockedParent, "not-a-directory\n")
+	job.ASRLogPath = filepath.Join(blockedParent, "2026-06-03.jsonl")
+	dumper := &fakeDailyRangeDumper{
+		discardASRErr: true,
+		records: []harvest.MessageRecord{
+			{Chat: harvest.Chat{ID: 1}, MessageID: 1, Date: start.Add(time.Hour), Outgoing: true, Kind: "voice"},
+		},
+		stats: harvest.OutgoingStats{Complete: true},
+	}
+
+	err := runDailyRangeJobs(context.Background(), dumper, harvest.HistoryOptions{}, dailyOptions{}, []dailyJob{job}, nil, &strings.Builder{})
+	if err == nil {
+		t.Fatal("discarded production-style ASR callback error was not detected")
+	}
+	if _, statErr := os.Stat(job.OutputPath); !os.IsNotExist(statErr) {
+		t.Fatalf("report JSONL should not be published after ASR error: %v", statErr)
+	}
+	if _, statErr := os.Stat(job.MarkdownPath); !os.IsNotExist(statErr) {
+		t.Fatalf("Markdown should not be published after ASR error: %v", statErr)
+	}
+}
+
+func TestDailyJobAtUsesHalfOpenRangesAndGaps(t *testing.T) {
+	start := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	jobs := sortedDailyJobs([]dailyJob{
+		{Date: "2026-06-05", Start: start.AddDate(0, 0, 2), End: start.AddDate(0, 0, 3)},
+		{Date: "2026-06-03", Start: start, End: start.AddDate(0, 0, 1)},
+	})
+	if job, ok := dailyJobAt(jobs, start); !ok || job.Date != "2026-06-03" {
+		t.Fatalf("start boundary = %+v ok=%t", job, ok)
+	}
+	if _, ok := dailyJobAt(jobs, start.AddDate(0, 0, 1)); ok {
+		t.Fatal("exclusive end/gap boundary should not match")
+	}
+	if job, ok := dailyJobAt(jobs, start.AddDate(0, 0, 3).Add(-time.Nanosecond)); !ok || job.Date != "2026-06-05" {
+		t.Fatalf("last instant = %+v ok=%t", job, ok)
+	}
+	if _, ok := dailyJobAt(jobs, start.AddDate(0, 0, 3)); ok {
+		t.Fatal("range end should be exclusive")
+	}
+}
+
 func TestAtomicOutputPublishReplacesFinalOnlyOnPublish(t *testing.T) {
 	finalPath := filepath.Join(t.TempDir(), "daily.jsonl")
 	mustWriteCLIFile(t, finalPath, "old\n")
@@ -399,6 +575,94 @@ func TestAtomicOutputPublishReplacesFinalOnlyOnPublish(t *testing.T) {
 	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
 		t.Fatalf("temp file should be renamed away, stat err=%v", err)
 	}
+}
+
+type fakeDailyRangeDumper struct {
+	calls         int
+	opts          harvest.OutgoingRangeOptions
+	records       []harvest.MessageRecord
+	stats         harvest.OutgoingStats
+	err           error
+	discardASRErr bool
+}
+
+func (f *fakeDailyRangeDumper) DumpOutgoingRange(_ context.Context, opts harvest.OutgoingRangeOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingStats, error) {
+	f.calls++
+	f.opts = opts
+	if f.err != nil {
+		return harvest.OutgoingStats{}, f.err
+	}
+	stats := f.stats
+	for _, record := range f.records {
+		if opts.IncludeRecord != nil && !opts.IncludeRecord(record) {
+			continue
+		}
+		if opts.History.ASRLog != nil {
+			if err := opts.History.ASRLog(harvest.ASRLogEvent{
+				At:        record.Date,
+				Action:    "cache_hit",
+				Date:      record.Date,
+				Chat:      record.Chat,
+				MessageID: record.MessageID,
+			}); err != nil && !f.discardASRErr {
+				return harvest.OutgoingStats{}, err
+			}
+		}
+		if err := emit(record); err != nil {
+			return harvest.OutgoingStats{}, err
+		}
+		stats.Records++
+	}
+	return stats, nil
+}
+
+func testDailyJob(root string, date string, start time.Time) dailyJob {
+	return dailyJob{
+		Date:         date,
+		Start:        start,
+		End:          start.AddDate(0, 0, 1),
+		OutputPath:   filepath.Join(root, "jsonl", date+".jsonl"),
+		MarkdownPath: filepath.Join(root, "reports", date+".md"),
+		ASRLogPath:   filepath.Join(root, "asr", date+".jsonl"),
+	}
+}
+
+func readMessageRecords(t *testing.T, path string) []harvest.MessageRecord {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	var records []harvest.MessageRecord
+	for decoder.More() {
+		var record harvest.MessageRecord
+		if err := decoder.Decode(&record); err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+func readASREvents(t *testing.T, path string) []harvest.ASRLogEvent {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	var events []harvest.ASRLogEvent
+	for decoder.More() {
+		var event harvest.ASRLogEvent
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func configForCatchup(root string) config.Config {

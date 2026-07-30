@@ -965,14 +965,12 @@ func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, op
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
-			for _, job := range jobs {
-				if err := runDailyJob(ctx, session, history, opts, job, additionalSenderIDsByChat, out); err != nil {
-					if errors.Is(err, context.Canceled) {
-						fmt.Fprintf(out, "interrupted=true date=%s out=%s\n", job.Date, job.OutputPath)
-						return nil
-					}
-					return err
+			if err := runDailyRangeJobs(ctx, session, history, opts, jobs, additionalSenderIDsByChat, out); err != nil {
+				if errors.Is(err, context.Canceled) {
+					fmt.Fprintf(out, "interrupted=true start=%s end=%s\n", jobs[0].Date, jobs[len(jobs)-1].Date)
+					return nil
 				}
+				return err
 			}
 			return nil
 		})
@@ -1023,16 +1021,288 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 	return history
 }
 
-func runDailyJob(
+type dailyRangeDumper interface {
+	DumpOutgoingRange(context.Context, harvest.OutgoingRangeOptions, func(harvest.MessageRecord) error) (harvest.OutgoingStats, error)
+}
+
+type dailyASRLogs struct {
+	paths    map[string]string
+	encoders map[string]*json.Encoder
+	files    []*os.File
+	firstErr error
+}
+
+func runDailyRangeJobs(
 	ctx context.Context,
-	session *mtproto.Session,
+	dumper dailyRangeDumper,
 	history harvest.HistoryOptions,
 	opts dailyOptions,
-	job dailyJob,
+	jobs []dailyJob,
 	additionalSenderIDsByChat map[int64][]int64,
 	out io.Writer,
 ) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	jobs = sortedDailyJobs(jobs)
+	asrLogs := newDailyASRLogs(jobs)
+	defer func() { _ = asrLogs.Close() }()
+
+	rangeHistory := history
+	rangeHistory.Limit = 0
+	if len(asrLogs.paths) > 0 {
+		rangeHistory.ASRLog = func(event harvest.ASRLogEvent) error {
+			job, ok := dailyJobAt(jobs, event.Date)
+			if !ok {
+				return nil
+			}
+			return asrLogs.Encode(job.Date, event)
+		}
+	}
+	progress := dailyRangeProgress(out, opts.Progress, jobs[0].Date, jobs[len(jobs)-1].Date)
 	records := make([]harvest.MessageRecord, 0)
+	rangeStats, err := dumper.DumpOutgoingRange(ctx, harvest.OutgoingRangeOptions{
+		Start:                     jobs[0].Start,
+		End:                       jobs[len(jobs)-1].End,
+		DialogLimit:               opts.DialogLimit,
+		IncludeService:            opts.IncludeService,
+		AdditionalSenderIDsByChat: additionalSenderIDsByChat,
+		IncludeRecord: func(record harvest.MessageRecord) bool {
+			_, ok := dailyJobAt(jobs, record.Date)
+			return ok
+		},
+		History:  rangeHistory,
+		Progress: progress,
+	}, func(record harvest.MessageRecord) error {
+		records = append(records, record)
+		return nil
+	})
+	asrErr := asrLogs.Err()
+	if err != nil {
+		return errors.Join(err, asrErr, asrLogs.Close())
+	}
+	if asrErr != nil {
+		return errors.Join(asrErr, asrLogs.Close())
+	}
+	if rangeStats.Complete {
+		if err := asrLogs.EnsureAll(); err != nil {
+			return errors.Join(err, asrLogs.Close())
+		}
+	}
+	if err := asrLogs.Close(); err != nil {
+		return err
+	}
+	if !rangeStats.Complete {
+		for _, dialogErr := range rangeStats.DialogErrors {
+			fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
+		}
+		fmt.Fprintf(out, "range start=%s end=%s wrote=%d dialogs=%d attachments=%d transcripts=%d flood_waits=%d complete=false published=false\n",
+			jobs[0].Date,
+			jobs[len(jobs)-1].Date,
+			rangeStats.Records,
+			rangeStats.DialogsScanned,
+			rangeStats.Attachments,
+			rangeStats.Transcripts,
+			rangeStats.FloodWaits,
+		)
+		return fmt.Errorf("daily range %s..%s incomplete; final reports were not published", jobs[0].Date, jobs[len(jobs)-1].Date)
+	}
+
+	recordsByDate := partitionDailyRecords(jobs, records, opts.Limit)
+	publishedRecords := 0
+	for _, job := range jobs {
+		dayRecords := recordsByDate[job.Date]
+		publishedRecords += len(dayRecords)
+		stats := dailyStatsFromRange(rangeStats, dayRecords)
+		if err := publishDailyJob(job, stats, dayRecords); err != nil {
+			return err
+		}
+		writeDailyJobResult(out, job, stats)
+	}
+	fmt.Fprintf(out, "range start=%s end=%s collected=%d published=%d dialogs=%d batches=%d flood_waits=%d complete=true\n",
+		jobs[0].Date,
+		jobs[len(jobs)-1].Date,
+		len(records),
+		publishedRecords,
+		rangeStats.DialogsScanned,
+		rangeStats.Batches,
+		rangeStats.FloodWaits,
+	)
+	return nil
+}
+
+func dailyRangeProgress(out io.Writer, enabled bool, start string, end string) func(harvest.OutgoingProgress) error {
+	return func(progress harvest.OutgoingProgress) error {
+		if !enabled {
+			return nil
+		}
+		if progress.Skipped {
+			fmt.Fprintf(out, "progress range=%s..%s skipped=true chat=%s total=%d flood_waits=%d\n", start, end, progress.Chat.Display, progress.Total, progress.FloodWaits)
+			return nil
+		}
+		if progress.Error != "" {
+			fmt.Fprintf(out, "progress range=%s..%s error=true chat=%s detail=%s total=%d batches=%d flood_waits=%d\n", start, end, progress.Chat.Display, progress.Error, progress.Total, progress.Batches, progress.FloodWaits)
+			return nil
+		}
+		fmt.Fprintf(out, "progress range=%s..%s chat=%s records=%d total=%d batches=%d flood_waits=%d\n", start, end, progress.Chat.Display, progress.Records, progress.Total, progress.Batches, progress.FloodWaits)
+		return nil
+	}
+}
+
+func newDailyASRLogs(jobs []dailyJob) *dailyASRLogs {
+	logs := &dailyASRLogs{
+		paths:    map[string]string{},
+		encoders: map[string]*json.Encoder{},
+	}
+	for _, job := range jobs {
+		if strings.TrimSpace(job.ASRLogPath) == "" {
+			continue
+		}
+		logs.paths[job.Date] = job.ASRLogPath
+	}
+	return logs
+}
+
+func (l *dailyASRLogs) Encode(date string, event harvest.ASRLogEvent) error {
+	if l == nil {
+		return nil
+	}
+	encoder, err := l.encoder(date)
+	if err != nil || encoder == nil {
+		l.noteError(err)
+		return err
+	}
+	err = encoder.Encode(event)
+	l.noteError(err)
+	return err
+}
+
+func (l *dailyASRLogs) EnsureAll() error {
+	if l == nil {
+		return nil
+	}
+	for date := range l.paths {
+		if _, err := l.encoder(date); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *dailyASRLogs) encoder(date string) (*json.Encoder, error) {
+	if encoder := l.encoders[date]; encoder != nil {
+		return encoder, nil
+	}
+	path := strings.TrimSpace(l.paths[date])
+	if path == "" {
+		return nil, nil
+	}
+	encoder, file, err := harvest.OpenJSONL(path, false)
+	if err != nil {
+		return nil, err
+	}
+	l.encoders[date] = encoder
+	l.files = append(l.files, file)
+	return encoder, nil
+}
+
+func (l *dailyASRLogs) Err() error {
+	if l == nil {
+		return nil
+	}
+	return l.firstErr
+}
+
+func (l *dailyASRLogs) noteError(err error) {
+	if l != nil && err != nil && l.firstErr == nil {
+		l.firstErr = err
+	}
+}
+
+func (l *dailyASRLogs) Close() error {
+	if l == nil {
+		return nil
+	}
+	var firstErr error
+	for _, file := range l.files {
+		if err := file.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	l.files = nil
+	return firstErr
+}
+
+func sortedDailyJobs(jobs []dailyJob) []dailyJob {
+	sorted := append([]dailyJob(nil), jobs...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Start.Before(sorted[j].Start)
+	})
+	return sorted
+}
+
+func dailyJobAt(jobs []dailyJob, date time.Time) (dailyJob, bool) {
+	index := sort.Search(len(jobs), func(i int) bool {
+		return jobs[i].End.After(date)
+	})
+	if index < len(jobs) && !date.Before(jobs[index].Start) && date.Before(jobs[index].End) {
+		return jobs[index], true
+	}
+	return dailyJob{}, false
+}
+
+func partitionDailyRecords(jobs []dailyJob, records []harvest.MessageRecord, limit int) map[string][]harvest.MessageRecord {
+	recordsByDate := make(map[string][]harvest.MessageRecord, len(jobs))
+	for _, record := range records {
+		job, ok := dailyJobAt(jobs, record.Date)
+		if !ok {
+			continue
+		}
+		recordsByDate[job.Date] = append(recordsByDate[job.Date], record)
+	}
+	if limit > 0 {
+		for date, dayRecords := range recordsByDate {
+			if len(dayRecords) > limit {
+				recordsByDate[date] = dayRecords[len(dayRecords)-limit:]
+			}
+		}
+	}
+	return recordsByDate
+}
+
+func dailyStatsFromRange(rangeStats harvest.OutgoingStats, records []harvest.MessageRecord) harvest.OutgoingStats {
+	stats := rangeStats
+	stats.Records = len(records)
+	stats.DialogsWithRecords = 0
+	stats.Attachments = 0
+	stats.Transcripts = 0
+	stats.Forwarded = 0
+	stats.FirstAt = time.Time{}
+	stats.LastAt = time.Time{}
+	chats := map[int64]struct{}{}
+	for _, record := range records {
+		chats[record.Chat.ID] = struct{}{}
+		if stats.FirstAt.IsZero() || record.Date.Before(stats.FirstAt) {
+			stats.FirstAt = record.Date
+		}
+		if record.Date.After(stats.LastAt) {
+			stats.LastAt = record.Date
+		}
+		if record.Forward != nil {
+			stats.Forwarded++
+		}
+		for _, attachment := range record.Attachments {
+			stats.Attachments++
+			if strings.TrimSpace(attachment.Transcript) != "" {
+				stats.Transcripts++
+			}
+		}
+	}
+	stats.DialogsWithRecords = len(chats)
+	return stats
+}
+
+func publishDailyJob(job dailyJob, stats harvest.OutgoingStats, records []harvest.MessageRecord) error {
 	jsonlTempPath, file, err := createAtomicOutput(job.OutputPath)
 	if err != nil {
 		return err
@@ -1045,78 +1315,18 @@ func runDailyJob(
 		}
 	}()
 	encoder := json.NewEncoder(file)
-	jobHistory := history
-	var asrLogFile *os.File
-	if strings.TrimSpace(job.ASRLogPath) != "" {
-		asrEncoder, file, err := harvest.OpenJSONL(job.ASRLogPath, false)
-		if err != nil {
+	for _, record := range records {
+		if err := encoder.Encode(record); err != nil {
 			return err
 		}
-		asrLogFile = file
-		jobHistory.ASRLog = func(event harvest.ASRLogEvent) error {
-			return asrEncoder.Encode(event)
-		}
-		defer asrLogFile.Close()
-	}
-	progress := func(progress harvest.OutgoingDayProgress) error {
-		if !opts.Progress {
-			return nil
-		}
-		if progress.Skipped {
-			fmt.Fprintf(out, "progress date=%s skipped=true chat=%s total=%d flood_waits=%d\n", job.Date, progress.Chat.Display, progress.Total, progress.FloodWaits)
-			return nil
-		}
-		if progress.Error != "" {
-			fmt.Fprintf(out, "progress date=%s error=true chat=%s detail=%s total=%d batches=%d flood_waits=%d\n", job.Date, progress.Chat.Display, progress.Error, progress.Total, progress.Batches, progress.FloodWaits)
-			return nil
-		}
-		fmt.Fprintf(out, "progress date=%s chat=%s records=%d total=%d batches=%d flood_waits=%d\n", job.Date, progress.Chat.Display, progress.Records, progress.Total, progress.Batches, progress.FloodWaits)
-		return nil
-	}
-	stats, err := session.DumpOutgoingDay(ctx, harvest.OutgoingDayOptions{
-		Start:                     job.Start,
-		End:                       job.End,
-		DialogLimit:               opts.DialogLimit,
-		IncludeService:            opts.IncludeService,
-		AdditionalSenderIDsByChat: additionalSenderIDsByChat,
-		History:                   jobHistory,
-		Progress:                  progress,
-	}, func(record harvest.MessageRecord) error {
-		records = append(records, record)
-		return encoder.Encode(record)
-	})
-	if err != nil {
-		return err
 	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	if !stats.Complete {
-		for _, dialogErr := range stats.DialogErrors {
-			fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
-		}
-		fmt.Fprintf(out, "date=%s wrote=%d dialogs=%d dialogs_with_records=%d attachments=%d transcripts=%d out=%s",
-			job.Date,
-			stats.Records,
-			stats.DialogsScanned,
-			stats.DialogsWithRecords,
-			stats.Attachments,
-			stats.Transcripts,
-			job.OutputPath,
-		)
-		if job.MarkdownPath != "" {
-			fmt.Fprintf(out, " markdown=%s", job.MarkdownPath)
-		}
-		if job.ASRLogPath != "" {
-			fmt.Fprintf(out, " asr_log=%s", job.ASRLogPath)
-		}
-		fmt.Fprintf(out, " flood_waits=%d complete=false published=false\n", stats.FloodWaits)
-		return fmt.Errorf("daily job %s incomplete; final report was not published", job.Date)
-	}
+
 	markdownTempPath := ""
 	publishedMarkdown := false
 	if job.MarkdownPath != "" {
-		var err error
 		markdownTempPath, err = createAtomicTextPath(job.MarkdownPath)
 		if err != nil {
 			return err
@@ -1147,9 +1357,10 @@ func runDailyJob(
 		}
 		publishedMarkdown = true
 	}
-	for _, dialogErr := range stats.DialogErrors {
-		fmt.Fprintf(out, "warning dialog_error=%s\n", dialogErr)
-	}
+	return nil
+}
+
+func writeDailyJobResult(out io.Writer, job dailyJob, stats harvest.OutgoingStats) {
 	fmt.Fprintf(out, "date=%s wrote=%d dialogs=%d dialogs_with_records=%d attachments=%d transcripts=%d out=%s",
 		job.Date,
 		stats.Records,
@@ -1165,11 +1376,7 @@ func runDailyJob(
 	if job.ASRLogPath != "" {
 		fmt.Fprintf(out, " asr_log=%s", job.ASRLogPath)
 	}
-	fmt.Fprintf(out, " flood_waits=%d complete=%t\n",
-		stats.FloodWaits,
-		stats.Complete,
-	)
-	return nil
+	fmt.Fprintf(out, " flood_waits=%d complete=%t\n", stats.FloodWaits, stats.Complete)
 }
 
 func createAtomicOutput(path string) (string, *os.File, error) {

@@ -15,7 +15,7 @@ type DailyMarkdownOptions struct {
 	Date       string
 	Start      time.Time
 	End        time.Time
-	Stats      OutgoingDayStats
+	Stats      OutgoingStats
 	Records    []MessageRecord
 }
 

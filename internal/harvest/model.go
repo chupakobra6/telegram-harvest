@@ -195,17 +195,18 @@ type HistorySource interface {
 	DumpHistory(ctx context.Context, chat string, opts HistoryOptions, emit func(MessageRecord) error) (Chat, HistoryStats, error)
 }
 
-type OutgoingDayOptions struct {
+type OutgoingRangeOptions struct {
 	Start                     time.Time
 	End                       time.Time
 	DialogLimit               int
 	IncludeService            bool
 	AdditionalSenderIDsByChat map[int64][]int64
+	IncludeRecord             func(MessageRecord) bool
 	History                   HistoryOptions
-	Progress                  func(OutgoingDayProgress) error
+	Progress                  func(OutgoingProgress) error
 }
 
-type OutgoingDayStats struct {
+type OutgoingStats struct {
 	Records            int       `json:"records"`
 	DialogsScanned     int       `json:"dialogs_scanned"`
 	DialogsWithRecords int       `json:"dialogs_with_records"`
@@ -221,7 +222,7 @@ type OutgoingDayStats struct {
 	Complete           bool      `json:"complete,omitempty"`
 }
 
-type OutgoingDayProgress struct {
+type OutgoingProgress struct {
 	Chat       Chat
 	Records    int
 	Total      int
