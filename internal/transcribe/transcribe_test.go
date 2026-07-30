@@ -8,6 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
 func TestRunCommandTemplateWritesStdoutTranscript(t *testing.T) {
@@ -54,10 +57,14 @@ func TestRunVoskUsesFFmpegAndVoskCommands(t *testing.T) {
 	writeExecutable(t, ffmpegPath, "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\nprintf 'wav' > \"$out\"\n")
 	writeExecutable(t, voskPath, "#!/bin/sh\nprintf '%s' 'расшифровка'\n")
 
+	observed := map[stages.Name]time.Duration{}
 	text, err := Run(context.Background(), Options{
 		VoskCommand:   voskPath,
 		VoskModelPath: dir,
 		FFmpegCommand: ffmpegPath,
+		StageTiming: func(stage stages.Name, duration time.Duration) {
+			observed[stage] += duration
+		},
 	}, inputPath, outputPath)
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +78,43 @@ func TestRunVoskUsesFFmpegAndVoskCommands(t *testing.T) {
 	}
 	if string(content) != "расшифровка" {
 		t.Fatalf("output = %q", string(content))
+	}
+	if observed[stages.FFmpeg] <= 0 {
+		t.Fatalf("ffmpeg timing = %s", observed[stages.FFmpeg])
+	}
+	if observed[stages.Vosk] <= 0 {
+		t.Fatalf("vosk timing = %s", observed[stages.Vosk])
+	}
+}
+
+func TestRunVoskObservesFailedFFmpegWork(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake command uses POSIX shell")
+	}
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.ogg")
+	if err := os.WriteFile(inputPath, []byte("audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	writeExecutable(t, ffmpegPath, "#!/bin/sh\nexit 7\n")
+	observed := map[stages.Name]time.Duration{}
+	_, err := RunDetailed(context.Background(), Options{
+		VoskCommand:   filepath.Join(dir, "unused-vosk"),
+		VoskModelPath: dir,
+		FFmpegCommand: ffmpegPath,
+		StageTiming: func(stage stages.Name, duration time.Duration) {
+			observed[stage] += duration
+		},
+	}, inputPath, filepath.Join(dir, "out.txt"))
+	if err == nil {
+		t.Fatal("expected ffmpeg error")
+	}
+	if observed[stages.FFmpeg] <= 0 {
+		t.Fatalf("failed ffmpeg timing = %s", observed[stages.FFmpeg])
+	}
+	if observed[stages.Vosk] != 0 {
+		t.Fatalf("vosk should not run after ffmpeg failure: %s", observed[stages.Vosk])
 	}
 }
 

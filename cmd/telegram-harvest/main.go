@@ -21,6 +21,7 @@ import (
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/mtproto"
 	"github.com/chupakobra6/telegram-harvest/internal/runlock"
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 )
 
@@ -738,7 +739,9 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 		MarkdownPath: markdownPath,
 		ASRLogPath:   harvest.DailyDefaultASRLogPath(cfg.StateDir, dateLabel),
 	}
-	return runDailyJobs(cfg, client, []dailyJob{job}, dailyFlags.values(), out)
+	timings := newDailyStageTimingCollector("daily", dateLabel, dateLabel)
+	runErr := runDailyJobs(cfg, client, []dailyJob{job}, dailyFlags.values(), timings, out)
+	return finishDailyStageTimings(cfg.StateDir, timings, runErr, out)
 }
 
 func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
@@ -763,6 +766,9 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 	if err != nil {
 		return err
 	}
+	catchupDates := dailyCatchupDates(plan)
+	startDate, endDate := dailyDateBounds(catchupDates)
+	timings := newDailyStageTimingCollector("daily-catchup", startDate, endDate)
 	if len(plan.Skipped) > 0 {
 		for _, skipped := range plan.Skipped {
 			fmt.Fprintf(out, "skip date=%s reason=markdown_exists\n", skipped)
@@ -770,10 +776,12 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 	}
 	if len(plan.Jobs) == 0 {
 		mergedPath := ""
-		if dates := dailyCatchupDates(plan); len(dates) > 0 {
-			mergedPath, err = publishDailyCatchupMarkdown(reportDir, dates)
+		if len(catchupDates) > 0 {
+			renderStart := time.Now()
+			mergedPath, err = publishDailyCatchupMarkdown(reportDir, catchupDates)
+			stages.ObserveSince(timings.Observe, stages.Render, renderStart)
 			if err != nil {
-				return err
+				return finishDailyStageTimings(cfg.StateDir, timings, err, out)
 			}
 		}
 		fmt.Fprintf(out, "catchup up_to_date=true last_report=%s today=%s report_dir=%s skipped=%d",
@@ -786,7 +794,7 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 			fmt.Fprintf(out, " merged=%s", mergedPath)
 		}
 		fmt.Fprintln(out)
-		return nil
+		return finishDailyStageTimings(cfg.StateDir, timings, nil, out)
 	}
 	fmt.Fprintf(out, "catchup start=%s end=%s today=%s report_dir=%s planned=%d skipped=%d\n",
 		plan.Jobs[0].Date,
@@ -796,15 +804,17 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 		len(plan.Jobs),
 		len(plan.Skipped),
 	)
-	if err := runDailyJobs(cfg, client, plan.Jobs, dailyOpts, out); err != nil {
-		return err
+	if err := runDailyJobs(cfg, client, plan.Jobs, dailyOpts, timings, out); err != nil {
+		return finishDailyStageTimings(cfg.StateDir, timings, err, out)
 	}
-	mergedPath, err := publishDailyCatchupMarkdown(reportDir, dailyCatchupDates(plan))
+	renderStart := time.Now()
+	mergedPath, err := publishDailyCatchupMarkdown(reportDir, catchupDates)
+	stages.ObserveSince(timings.Observe, stages.Render, renderStart)
 	if err != nil {
-		return err
+		return finishDailyStageTimings(cfg.StateDir, timings, err, out)
 	}
 	fmt.Fprintf(out, "catchup complete=true generated=%d skipped=%d merged=%s\n", len(plan.Jobs), len(plan.Skipped), mergedPath)
-	return nil
+	return finishDailyStageTimings(cfg.StateDir, timings, nil, out)
 }
 
 type dailyOptionFlags struct {
@@ -919,6 +929,13 @@ func dailyCatchupDates(plan dailyCatchupPlan) []string {
 	return dates
 }
 
+func dailyDateBounds(dates []string) (string, string) {
+	if len(dates) == 0 {
+		return "", ""
+	}
+	return dates[0], dates[len(dates)-1]
+}
+
 func publishDailyCatchupMarkdown(reportDir string, dates []string) (string, error) {
 	outputPath := filepath.Join(reportDir, harvest.DailyLatestCatchupFilename)
 	tempPath, err := createAtomicTextPath(outputPath)
@@ -945,7 +962,7 @@ func publishDailyCatchupMarkdown(reportDir string, dates []string) (string, erro
 	return outputPath, nil
 }
 
-func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, opts dailyOptions, out io.Writer) error {
+func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, opts dailyOptions, timings *dailyStageTimingCollector, out io.Writer) error {
 	if len(jobs) == 0 {
 		return nil
 	}
@@ -953,6 +970,9 @@ func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, op
 		return err
 	}
 	history := dailyHistoryOptions(cfg, opts)
+	if timings != nil {
+		history.StageTiming = timings.Observe
+	}
 	var managedTranscriber transcribe.ManagedRunner
 	if opts.TranscribeMedia {
 		if transcribeOpts := dailyTranscribeOptions(history); transcribeOpts.Configured() {
@@ -1114,7 +1134,10 @@ func runDailyRangeJobs(
 		dayRecords := recordsByDate[job.Date]
 		publishedRecords += len(dayRecords)
 		stats := dailyStatsFromRange(rangeStats, dayRecords)
-		if err := publishDailyJob(job, stats, dayRecords); err != nil {
+		renderStart := time.Now()
+		err := publishDailyJob(job, stats, dayRecords)
+		stages.ObserveSince(history.StageTiming, stages.Render, renderStart)
+		if err != nil {
 			return err
 		}
 		writeDailyJobResult(out, job, stats)
@@ -1835,6 +1858,7 @@ func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 		VoskModelPath:   opts.VoskModelPath,
 		VoskGrammarPath: opts.VoskGrammarPath,
 		FFmpegCommand:   opts.FFmpegCommand,
+		StageTiming:     opts.StageTiming,
 	}
 }
 

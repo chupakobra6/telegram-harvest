@@ -3,6 +3,8 @@ package harvest
 import (
 	"context"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
 const (
@@ -165,6 +167,7 @@ type HistoryOptions struct {
 	Transcriber           Transcriber
 	Progress              func(HistoryProgress) error
 	ASRLog                func(ASRLogEvent) error
+	StageTiming           stages.Observer
 }
 
 type Transcriber interface {

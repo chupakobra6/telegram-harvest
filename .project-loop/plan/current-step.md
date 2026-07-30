@@ -4,21 +4,23 @@
 Обновлено: 2026-07-30
 
 ## Активный Шаг
-- id: `STEP-001`
+- id: `STEP-002`
 - status: `готово`
-- objective: Заменить отдельный Telegram scan каждого catch-up дня одним range-scan и доказать эквивалентность/ускорение.
-- requirement IDs: `REQ-001`, `REQ-002`, `REQ-003`, `VAL-001`, `VAL-002`, `VAL-003`
-- owned paths: `cmd/telegram-harvest/`, `internal/mtproto/`, `internal/harvest/`, `README.md`, `docs/`, `.project-loop/`
-- validation: focused Go tests; `gofmt`; `go test ./...`; live old/new benchmark 2026-07-22—2026-07-29; JSONL/Markdown comparison; `loopctl.py validate`.
-- done criteria: Один range collector обслуживает весь catch-up, результаты по дням эквивалентны baseline, все проверки зелёные, фактическое ускорение измерено.
+- objective: Добавить честные stage timings и отдельный неизменяемый timing report для каждого daily запуска.
+- requirement IDs: `REQ-004`, `REQ-005`, `VAL-004`
+- owned paths: `cmd/telegram-harvest/`, `internal/mtproto/`, `internal/transcribe/`, `internal/harvest/`, `README.md`, `docs/`, `.project-loop/`
+- validation: focused timing tests; `gofmt`; `go test ./...`; live `daily-catchup`; JSON timing report inspection; подтверждение одного `DumpOutgoingRange`; `loopctl.py validate`.
+- done criteria: Пять стадий измеряются напрямую, wall/unaccounted прозрачен, report уникален и атомарен, range-scan остаётся единым.
 
 ## Фокус Ревью
+- Telegram scan не включает media download/ffmpeg/Vosk.
+- Download включает фактические попытки и pacing, в том числе error path.
+- ffmpeg/Vosk учитываются непосредственно внутри runner, включая failed work и первую загрузку модели.
+- Render включает дневные JSONL/Markdown и merged catch-up.
+- Новый timing report не перезаписывает предыдущий и не зависит от ASR JSONL.
 - Нет скрытого повторного `loadDialogs`/chat scan на каждый день.
-- Полуинтервалы `[start,end)` и московские дни не смешиваются.
-- Existing/skipped reports не вызывают лишнюю media/ASR обработку.
-- Ошибка range-scan не публикует неполные новые отчёты.
-- Сохранены Trackmate/Haru scope, forward metadata и ASR cache behavior.
 
 ## Примечания
 - Telegram RPC остаются последовательными; параллельный crawler не вводится.
-- Итоговый live run: 54.74 s, 1 764 записи, 70 batches, 0 FloodWait; следующий активный шаг отсутствует.
+- STEP-001 завершён: итоговый live run 54.74 s, 1 764 записи, 70 batches, 0 FloodWait.
+- STEP-002 live run: 53.396 s internal total, один range-scan, 70 batches, 1 764 records, timing JSON сохранен отдельно от ASR logs.

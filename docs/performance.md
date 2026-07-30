@@ -26,6 +26,39 @@ Range-scan сохранил все 1 742 пары `(chat_id, message_id)` из b
 - Trackmate в Haru: 58;
 - остальные incoming: 0.
 
+## Stage timings
+
+Каждый `daily` и `daily-catchup` измеряет стадии непосредственно во время работы и сохраняет уникальный JSON в `.state/daily/timings/`. Новый запуск не перезаписывает предыдущий timing report, даже если дневные `.state/daily/asr/YYYY-MM-DD.jsonl` обновились.
+
+Границы стадий:
+
+- `telegram_scan` — `get_dialogs`, разрешение target и последовательные history/search RPC вместе со штатным pacing; media transfer сюда не входит;
+- `download` — фактические попытки скачать пользовательское или временное ASR-медиа вместе с ожиданием download RPC slot; cache hits сюда не входят;
+- `ffmpeg` — подготовка WAV внутри transcriber, включая завершившиеся ошибкой попытки;
+- `vosk` — запуск/первичная загрузка Vosk worker и распознавание, включая завершившуюся ошибкой работу; при custom non-Vosk command поле честно остается нулевым;
+- `render` — запись и атомарная публикация дневных JSONL/Markdown плюс merged `00-latest-catchup.md`.
+
+Поля стадий не перекрываются. `total_seconds` — wall time измеряемой daily-операции, `accounted_seconds` — сумма пяти стадий, а `unaccounted_seconds` — оставшаяся локальная работа: нормализация сообщений, cache reads, partitioning, cleanup и orchestration. CLI печатает те же значения:
+
+```text
+timings telegram_scan=...s download=...s ffmpeg=...s vosk=...s render=...s unaccounted=...s total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
+```
+
+Live-проверка 2026-07-30 на том же восьмидневном диапазоне и прогретом media/transcript cache:
+
+| Стадия | Секунды |
+| --- | ---: |
+| Telegram scan | 52.107 |
+| Download | 0.000 |
+| ffmpeg | 0.000 |
+| Vosk | 0.000 |
+| Render | 0.024 |
+| Unaccounted | 1.265 |
+| Internal total | 53.396 |
+| External wall (`time -p`) | 53.98 |
+
+Нулевые download/ffmpeg/Vosk в этом прогоне означают, что медиа и транскрипты были взяты из существующих файлов/кэша; это не реконструкция из перезаписанного ASR-лога. Run обработал 1 764 сообщения за один range-scan, 70 Telegram batches, 0 FloodWait.
+
 ## Как повторять benchmark
 
 Baseline revision — `e810c83` (`feat: preserve forwarded message origins`). Чтобы не переключать рабочую ветку и не копировать credentials/session в другой worktree, старый код собирается отдельным бинарником, а оба бинарника запускаются из текущего project root. Так они используют один `.env`, session, state и transcript cache:

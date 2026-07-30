@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
 const DefaultFFmpegCommand = "ffmpeg"
@@ -24,6 +26,7 @@ type Options struct {
 	VoskModelPath   string
 	VoskGrammarPath string
 	FFmpegCommand   string
+	StageTiming     stages.Observer
 }
 
 type ManagedRunner interface {
@@ -172,6 +175,7 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 
 	ffmpegStart := time.Now()
 	wavPath, cleanup, err := convertToVoskWAV(ctx, r.opts, inputPath, outputPath)
+	stages.ObserveSince(r.opts.StageTiming, stages.FFmpeg, ffmpegStart)
 	if err != nil {
 		return Result{}, err
 	}
@@ -181,6 +185,8 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	voskStart := time.Now()
+	defer stages.ObserveSince(r.opts.StageTiming, stages.Vosk, voskStart)
 	if r.closed {
 		return Result{}, fmt.Errorf("vosk session is closed")
 	}
@@ -255,6 +261,7 @@ func runVoskDetailed(ctx context.Context, opts Options, inputPath string, output
 
 	ffmpegStart := time.Now()
 	wavPath, cleanup, err := convertToVoskWAV(ctx, opts, inputPath, outputPath)
+	stages.ObserveSince(opts.StageTiming, stages.FFmpeg, ffmpegStart)
 	if err != nil {
 		return Result{}, err
 	}
@@ -272,6 +279,7 @@ func runVoskDetailed(ctx context.Context, opts Options, inputPath string, output
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	asrStart := time.Now()
+	defer stages.ObserveSince(opts.StageTiming, stages.Vosk, asrStart)
 	if err := cmd.Run(); err != nil {
 		return Result{}, fmt.Errorf("vosk: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}

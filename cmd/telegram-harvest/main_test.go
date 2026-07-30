@@ -12,6 +12,7 @@ import (
 
 	"github.com/chupakobra6/telegram-harvest/internal/config"
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
 func TestRunHelpPrintsCommands(t *testing.T) {
@@ -400,10 +401,11 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 		},
 	}
 	var output strings.Builder
+	timings := newDailyStageTimingCollector("daily-catchup", "2026-06-03", "2026-06-05")
 	err := runDailyRangeJobs(
 		context.Background(),
 		dumper,
-		harvest.HistoryOptions{Limit: 99},
+		harvest.HistoryOptions{Limit: 99, StageTiming: timings.Observe},
 		dailyOptions{Limit: 1},
 		jobs,
 		map[int64][]int64{10: {20}},
@@ -420,6 +422,9 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 	}
 	if dumper.opts.History.Limit != 0 {
 		t.Fatalf("range history limit = %d, want 0 before per-day limiting", dumper.opts.History.Limit)
+	}
+	if dumper.opts.History.StageTiming == nil {
+		t.Fatal("range scan lost stage timing observer")
 	}
 	if got := dumper.opts.AdditionalSenderIDsByChat[10]; len(got) != 1 || got[0] != 20 {
 		t.Fatalf("additional senders = %#v", dumper.opts.AdditionalSenderIDsByChat)
@@ -447,6 +452,9 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "collected=3 published=2") {
 		t.Fatalf("range summary does not distinguish collected and limited records:\n%s", output.String())
+	}
+	if got := timings.durations[stages.Render]; got <= 0 {
+		t.Fatalf("render timing = %s", got)
 	}
 }
 

@@ -107,6 +107,7 @@ reports/daily/00-latest-catchup.md
 reports/daily/YYYY-MM-DD.md
 .state/daily/jsonl/YYYY-MM-DD.jsonl
 .state/daily/asr/YYYY-MM-DD.jsonl
+.state/daily/timings/<run-id>-daily-catchup.json
 .state/daily/media/...
 .state/daily/transcripts/cache/...
 ```
@@ -119,7 +120,9 @@ Markdown в `reports/daily` - основной человекочитаемый 
 
 JSONL в `.state/daily/jsonl` - технический audit/source layer. Он хранит raw-поля вроде `media_id`, `local_path`, `transcript_path`, `download_hint`, а для пересланных сообщений — структурированный `forward` с доступным источником, оригинальной датой, message id и ссылкой. Этот слой нужен для отладки, пересборки и анализа, но не является пользовательским отчетом.
 
-ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Он пишется даже для прерванных прогонов.
+ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации текущего прогона: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Дневной файл перезаписывается следующим прогоном этой даты и может остаться частичным после interruption.
+
+Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены `telegram_scan`, `download`, `ffmpeg`, `vosk`, `render`, полный wall time и `unaccounted` remainder. Поэтому исторический performance report не зависит от перезаписываемых ASR-логов.
 
 Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
 

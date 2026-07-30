@@ -20,6 +20,7 @@ import (
 
 	"github.com/chupakobra6/telegram-harvest/internal/config"
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -512,7 +513,7 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 	if strings.TrimSpace(mediaDir) == "" {
 		mediaDir = "media-manual"
 	}
-	s.saveAttachmentFile(ctx, &record, 0, location, fileName, mediaDir, opts.Overwrite)
+	s.saveAttachmentFile(ctx, &record, 0, location, fileName, mediaDir, opts.Overwrite, nil)
 	result := DownloadMediaResult{Record: record, Attachment: record.Attachments[0]}
 	if result.Attachment.DownloadError != "" {
 		return result, errors.New(result.Attachment.DownloadError)
@@ -597,7 +598,9 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 	if opts.End.IsZero() || !opts.End.After(opts.Start) {
 		return harvest.OutgoingStats{}, fmt.Errorf("end time must be after start time")
 	}
+	scanStart := time.Now()
 	dialogs, err := s.loadDialogs(ctx, opts.DialogLimit)
+	stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
 	if err != nil {
 		return harvest.OutgoingStats{}, err
 	}
@@ -620,7 +623,9 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 			continue
 		}
 
+		scanStart := time.Now()
 		target, err := s.resolveTarget(ctx, strconv.FormatInt(chat.ID, 10))
+		stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
 			if opts.Progress != nil {
@@ -932,7 +937,9 @@ func (s *Session) collectOutgoingDay(
 	for shouldContinueOutgoingDay(opts, stats.Batches) {
 		stats.Batches++
 		batchLimit := opts.History.BatchSize
+		scanStart := time.Now()
 		result, err := load(ctx, offsetID, batchLimit)
+		stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
 		if err != nil {
 			stats.FloodWaits = s.FloodWaits()
 			return nil, stats, err
@@ -2033,7 +2040,7 @@ func (s *Session) downloadAttachment(
 		record.Attachments[index].DownloadError = "media dir is empty"
 		return
 	}
-	s.saveAttachmentFile(ctx, record, index, location, fileName, opts.MediaDir, false)
+	s.saveAttachmentFile(ctx, record, index, location, fileName, opts.MediaDir, false, opts.StageTiming)
 }
 
 func (s *Session) saveAttachmentFile(
@@ -2044,6 +2051,7 @@ func (s *Session) saveAttachmentFile(
 	fileName string,
 	mediaDir string,
 	overwrite bool,
+	stageTiming stages.Observer,
 ) {
 	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
 		return
@@ -2067,6 +2075,8 @@ func (s *Session) saveAttachmentFile(
 		record.Attachments[index].DownloadError = fmt.Sprintf("prepare media dir: %v", err)
 		return
 	}
+	downloadStart := time.Now()
+	defer stages.ObserveSince(stageTiming, stages.Download, downloadStart)
 	if err := s.beforeRPC(ctx); err != nil {
 		record.Attachments[index].DownloadError = err.Error()
 		return
@@ -2132,7 +2142,9 @@ func (s *Session) transcribeAttachmentMedia(
 	}
 	defer os.Remove(tempPath)
 	emitASRLog(opts, asrLogEvent("download_start", "download", "", *record, index, *attachment))
+	downloadStageStart := time.Now()
 	if err := s.beforeRPC(ctx); err != nil {
+		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
 		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
@@ -2141,12 +2153,14 @@ func (s *Session) transcribeAttachmentMedia(
 	defer cancelDownload()
 	downloadStart := time.Now()
 	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, tempPath); err != nil {
+		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
 		event := asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment)
 		event.DownloadSeconds = secondsSince(downloadStart)
 		emitASRLog(opts, event)
 		return
 	}
+	stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 	downloadSeconds := secondsSince(downloadStart)
 
 	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
@@ -2414,6 +2428,7 @@ func transcribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 		VoskModelPath:   opts.VoskModelPath,
 		VoskGrammarPath: opts.VoskGrammarPath,
 		FFmpegCommand:   opts.FFmpegCommand,
+		StageTiming:     opts.StageTiming,
 	}
 }
 
