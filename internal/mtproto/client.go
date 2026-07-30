@@ -679,7 +679,7 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		}
 
 		stats.DialogsHistoryRPC++
-		dialogRecords, dialogStats, err := s.searchOutgoingDayInDialog(ctx, target, dialogOpts, pipeline)
+		dialogRecords, dialogStats, err := s.scanDailyHistory(ctx, target, dialogOpts, pipeline)
 		stats.Batches += dialogStats.Batches
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
@@ -962,65 +962,21 @@ func normalizeOutgoingRangeOptions(opts harvest.OutgoingRangeOptions) harvest.Ou
 	return opts
 }
 
-func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	if dailyHasAdditionalSenders(opts, target.Chat.ID) {
-		return s.scanOutgoingDayWithHistory(ctx, target, opts, pipeline)
-	}
-	records, stats, err := s.searchOutgoingDayWithSearch(ctx, target, opts, pipeline)
-	if err != nil && isSearchQueryEmpty(err) {
-		return s.scanOutgoingDayWithHistory(ctx, target, opts, pipeline)
-	}
-	return records, stats, err
-}
+type dailyHistoryBatchLoader func(context.Context, int, int) (tg.MessagesMessagesClass, error)
 
-func dailyHasAdditionalSenders(opts harvest.OutgoingRangeOptions, chatID int64) bool {
-	return len(opts.AdditionalSenderIDsByChat[chatID]) > 0
-}
-
-type outgoingDayBatchLoader func(context.Context, int, int) (tg.MessagesMessagesClass, error)
-
-func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	return s.collectOutgoingDay(ctx, target, opts, pipeline, false, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
-		var result tg.MessagesMessagesClass
-		err := s.performRPC(callCtx, "search_messages", func(rpcCtx context.Context) error {
-			var callErr error
-			req := outgoingSearchRequest(target, opts, offsetID, batchLimit)
-			result, callErr = s.raw.MessagesSearch(rpcCtx, req)
-			return callErr
-		})
-		return result, err
-	})
-}
-
-func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	return s.collectOutgoingDay(ctx, target, opts, pipeline, true, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
+func (s *Session) scanDailyHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	return s.collectDailyHistory(ctx, target, opts, pipeline, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "get_history", func(rpcCtx context.Context) error {
 			var callErr error
-			result, callErr = s.raw.MessagesGetHistory(rpcCtx, outgoingHistoryRequest(target, opts, offsetID, batchLimit))
+			result, callErr = s.raw.MessagesGetHistory(rpcCtx, dailyHistoryRequest(target, opts, offsetID, batchLimit))
 			return callErr
 		})
 		return result, err
 	})
 }
 
-func outgoingSearchRequest(target resolvedTarget, opts harvest.OutgoingRangeOptions, offsetID int, batchLimit int) *tg.MessagesSearchRequest {
-	request := &tg.MessagesSearchRequest{
-		Peer:     target.InputPeer,
-		Q:        "",
-		Filter:   &tg.InputMessagesFilterEmpty{},
-		MinDate:  int(opts.Start.Unix()) - 1,
-		MaxDate:  int(opts.End.Unix()),
-		OffsetID: offsetID,
-		Limit:    batchLimit,
-		MinID:    opts.History.MinID,
-		Hash:     0,
-	}
-	request.SetFromID(&tg.InputPeerSelf{})
-	return request
-}
-
-func outgoingHistoryRequest(target resolvedTarget, opts harvest.OutgoingRangeOptions, offsetID int, batchLimit int) *tg.MessagesGetHistoryRequest {
+func dailyHistoryRequest(target resolvedTarget, opts harvest.OutgoingRangeOptions, offsetID int, batchLimit int) *tg.MessagesGetHistoryRequest {
 	return &tg.MessagesGetHistoryRequest{
 		Peer:     target.InputPeer,
 		OffsetID: offsetID,
@@ -1030,13 +986,12 @@ func outgoingHistoryRequest(target resolvedTarget, opts harvest.OutgoingRangeOpt
 	}
 }
 
-func (s *Session) collectOutgoingDay(
+func (s *Session) collectDailyHistory(
 	ctx context.Context,
 	target resolvedTarget,
 	opts harvest.OutgoingRangeOptions,
 	pipeline *mediaPipeline,
-	stopAtStart bool,
-	load outgoingDayBatchLoader,
+	load dailyHistoryBatchLoader,
 ) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
 	topicByID := map[int]harvest.Topic{}
 	records := make([]harvest.MessageRecord, 0)
@@ -1071,7 +1026,7 @@ func (s *Session) collectOutgoingDay(
 				reachedMinID = true
 				continue
 			}
-			if stopAtStart && messageAtOrBefore(msgClass, opts.Start) {
+			if messageAtOrBefore(msgClass, opts.Start) {
 				reachedStart = true
 			}
 			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts, pipeline)
@@ -1080,11 +1035,7 @@ func (s *Session) collectOutgoingDay(
 			}
 			records = append(records, record)
 		}
-		// messages.search may return a sparse page shorter than the requested
-		// limit even when older matches still exist. Only getHistory can use a
-		// short page as an end-of-history signal.
-		shortHistoryPage := stopAtStart && len(messages) < batchLimit
-		if reachedStart || reachedMinID || minMessageID == 0 || shortHistoryPage {
+		if reachedStart || reachedMinID || minMessageID == 0 {
 			stats.Complete = true
 			break
 		}
@@ -1209,13 +1160,6 @@ func dailyDialogIncomplete(chat harvest.Chat, maxBatches int) string {
 		return fmt.Sprintf("%s (%d): stopped after max_batches=%d before confirming the day boundary", displayChannel(chat.Title, chat.Username, chat.ID), chat.ID, maxBatches)
 	}
 	return fmt.Sprintf("%s (%d): stopped before confirming the day boundary", displayChannel(chat.Title, chat.Username, chat.ID), chat.ID)
-}
-
-func isSearchQueryEmpty(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToUpper(err.Error()), "SEARCH_QUERY_EMPTY")
 }
 
 func oneLine(value string) string {

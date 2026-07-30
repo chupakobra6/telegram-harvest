@@ -21,6 +21,7 @@
 | S004 | user | 2026-07-30 | current request | принято | Добавить прямые stage timings для Telegram scan, download, ffmpeg, Vosk и render; хранить их независимо от перезаписываемых ASR-логов; сохранить единый range-scan. |
 | S005 | user | 2026-07-30 | `/Users/igor/.codex/attachments/2615f2f2-55ee-4d82-b3be-11a55ab1a100/pasted-text.txt` | принято | Полностью реализовать bounded media pipeline и консервативный динамический пул независимых Vosk workers, переиспользовать кэш, сохранить детерминированные отчеты, измерить ресурсы и сравнить sequential/1/2/4/auto. |
 | S006 | user | 2026-07-30 | current request | принято | Не добавлять Metal в Vosk; ввести общий ASR backend, реализовать Vosk CPU и whisper.cpp Metal/Core ML, сделать backend-specific worker policy и воспроизводимо сравнить скорость, cold-start, RAM/CPU/GPU и качество русского текста на одном реальном корпусе. |
+| S007 | user | 2026-07-30 | current request | принято | Не оставлять воспроизводимый пропуск сообщения в `messages.search`: исправить daily completeness и доказать возврат всех 211 baseline records. |
 
 ## Конфликты
 | Источники | Решение | Дата |

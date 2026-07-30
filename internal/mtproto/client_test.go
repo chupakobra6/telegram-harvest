@@ -85,12 +85,6 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 			3740223926: {8718303786},
 		},
 	}
-	if !dailyHasAdditionalSenders(opts, 3740223926) {
-		t.Fatal("configured chat should use daily history scan")
-	}
-	if dailyHasAdditionalSenders(opts, 123) {
-		t.Fatal("unconfigured chat should keep outgoing search")
-	}
 	if !dailyAdditionalSenderAllowed(opts, 3740223926, 8718303786) {
 		t.Fatal("configured sender should be included")
 	}
@@ -217,7 +211,7 @@ func TestDailyDialogHeadDoesNotVerifyHeadBeyondRangeEnd(t *testing.T) {
 	}
 }
 
-func TestChangedDialogMinIDIsSentToSearchAndHistoryRPCs(t *testing.T) {
+func TestChangedDialogMinIDIsSentToHistoryRPC(t *testing.T) {
 	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
 	target := resolvedTarget{InputPeer: &tg.InputPeerUser{UserID: 1}}
 	opts := harvest.OutgoingRangeOptions{
@@ -225,17 +219,13 @@ func TestChangedDialogMinIDIsSentToSearchAndHistoryRPCs(t *testing.T) {
 		End:     start.AddDate(0, 0, 1),
 		History: harvest.HistoryOptions{MinID: 123},
 	}
-	search := outgoingSearchRequest(target, opts, 200, 100)
-	if search.MinID != 123 || search.OffsetID != 200 || search.Limit != 100 {
-		t.Fatalf("search request = %+v", search)
-	}
-	history := outgoingHistoryRequest(target, opts, 200, 100)
+	history := dailyHistoryRequest(target, opts, 200, 100)
 	if history.MinID != 123 || history.OffsetID != 200 || history.Limit != 100 {
 		t.Fatalf("history request = %+v", history)
 	}
 }
 
-func TestOutgoingSearchContinuesAfterSparsePage(t *testing.T) {
+func TestDailyHistoryContinuesAfterSparsePage(t *testing.T) {
 	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
 	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One"}}
 	opts := harvest.OutgoingRangeOptions{
@@ -267,7 +257,7 @@ func TestOutgoingSearchContinuesAfterSparsePage(t *testing.T) {
 		calls++
 		return page, nil
 	}
-	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, nil, false, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,6 +266,53 @@ func TestOutgoingSearchContinuesAfterSparsePage(t *testing.T) {
 	}
 	if len(records) != 2 || records[0].MessageID != 10 || records[1].MessageID != 20 {
 		t.Fatalf("records = %+v", records)
+	}
+}
+
+func TestDailyHistoryDoesNotClaimCompleteAtMaxBatches(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One"}}
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{
+			BatchSize:  100,
+			MaxBatches: 1,
+		},
+	}
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		return &tg.MessagesMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 20, Date: int(start.Add(2 * time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "not a boundary"},
+		}}, nil
+	}
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || stats.Complete || stats.Batches != 1 {
+		t.Fatalf("records=%d stats=%+v", len(records), stats)
+	}
+}
+
+func TestDailyHistoryRejectsNonAdvancingPagination(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One"}}
+	opts := harvest.OutgoingRangeOptions{
+		Start:   start,
+		End:     start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{BatchSize: 100},
+	}
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		return &tg.MessagesMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 20, Date: int(start.Add(2 * time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "same page"},
+		}}, nil
+	}
+	_, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	if err == nil || !strings.Contains(err.Error(), "pagination did not advance") {
+		t.Fatalf("error = %v", err)
+	}
+	if stats.Complete {
+		t.Fatalf("non-advancing scan marked complete: %+v", stats)
 	}
 }
 
@@ -310,7 +347,7 @@ func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
 			},
 		}, nil
 	}
-	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, nil, true, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +362,7 @@ func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
 	}
 	fullOpts := opts
 	fullOpts.History.MinID = 0
-	fullRecords, fullStats, err := (&Session{}).collectOutgoingDay(context.Background(), target, fullOpts, nil, true, load)
+	fullRecords, fullStats, err := (&Session{}).collectDailyHistory(context.Background(), target, fullOpts, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,10 +4,10 @@
 Обновлено: 2026-07-30
 
 ## Цель
-- Реализовать и доказательно сравнить общий ASR backend: Vosk CPU, whisper.cpp Metal и Metal + Core ML, сохранив Telegram/data safety и daily contract.
+- Сохранить полный daily contract: общий ASR backend и history-only Telegram scan без воспроизводимых потерь `messages.search`.
 
 ## Текущий Шаг
-- active step: `STEP-004`
+- active step: `STEP-005`
 - status: `готово`
 
 ## Завершено
@@ -25,6 +25,7 @@
 - `REQ-011`: auto policy backend-specific — динамический CPU pool для Vosk и ровно один GPU worker для Whisper Metal/Core ML.
 - `REQ-012`: Metal и Metal + Core ML собраны и проверяются по runtime evidence; model/quantization/accelerator/binary/decode config изолированы в transcript cache.
 - `REQ-013`: developer benchmark сравнивает 6 вариантов на одном real corpus по performance, resources, quality и failure/empty/hallucination counts.
+- `REQ-014`: daily `messages.search` удалён; все изменившиеся dialogs читаются через `getHistory`, sender scope фильтруется локально.
 
 ## Измененные Файлы
 - `cmd/telegram-harvest/main.go`, `cmd/telegram-harvest/main_test.go`
@@ -37,6 +38,7 @@
 - `internal/mtproto/media_pipeline.go` и тесты, `internal/stages/stages.go`
 - `internal/transcribe/backend.go`, `internal/transcribe/whisper_server.go` и тесты
 - `internal/asrbench/`, `cmd/asr-benchmark/`
+- `internal/mtproto/client.go`, `internal/mtproto/client_test.go`
 
 ## Проверка
 - `gofmt`, `git diff --check`, `go test ./...`, `loopctl.py validate` — зелёные.
@@ -56,7 +58,10 @@
 - Core ML small оказался на 4.7% медленнее plain Metal pipeline и потребовал примерно на 513 MiB больше peak RSS. VAD убрал non-speech hallucination, но порезал speech.
 - Выбран рекомендуемый quality-first профиль: large-v3-turbo-q5_0 Metal, один worker, без VAD. Built-in default остаётся Vosk из-за внешней установки whisper.cpp/model.
 - Финальный live daily: 54.383 s total, Telegram 41.851 s, ASR 5.793 s / 29.40×, pipeline 16.69×, 1 worker, 0 FloodWait.
-- 210 общих live records имеют 0 semantic mismatches. Один record старого файла отсутствует также в независимом no-ASR run; это существующая вариативность Telegram `messages.search`, не ASR regression.
+- History-only no-ASR live на 2026-07-25 вернул 211/211 baseline keys, включая `1221157785:415830`: 92 batches, 70.530 s, 0 FloodWait.
+- Full Whisper E2E вернул 211 records, 21 attachments, 3 transcripts: 81.083 s, 0 FloodWait, 0 missing/extra/semantic mismatches после штатной нормализации.
+- Прежний no-ASR search path занимал 43.335 s и 56 batches. Дополнительные 27.195 s — измеренная цена полноты на холодной исторической дате; checkpoint сохраняется для последовательного catch-up.
+- Добавлены tests для sparse history pages, false-complete при `max_batches`, non-advancing pagination и checkpoint Trackmate/self scope.
 
 ## Агенты
 - `/root/range_scan_reviewer`: независимое ревью завершено, итог accepted без findings.
@@ -71,11 +76,12 @@
 - Блокеров нет. Изменяемые Telegram counters могут отличаться между последовательными чтениями.
 - Точный GPU utilization недоступен без elevated `powermetrics`; отчет честно хранит `available=false`, а Metal/Core ML activation подтверждается runtime logs.
 - Silver reference создан turbo-моделью, поэтому WER/CER являются относительным сравнением, не абсолютной human-annotated оценкой.
+- History-only безопаснее, но холодный исторический scan читает больше страниц. Это принятый trade-off; автоматический contiguous catch-up уменьшает его dialog checkpoint.
 - Технический ASR JSONL намеренно может остаться частичным при interruption; пользовательские report JSONL/Markdown атомарны.
 - Дневные ASR logs по-прежнему отражают текущий прогон; исторические performance figures теперь живут в отдельных immutable timing reports.
 
 ## Следующее Действие
-- Шаг завершён. Отдельно, если потребуется, устранить недетерминизм Telegram `messages.search`; это не входит в ASR backend change.
+- Шаг завершён. Следующее ускорение должно оптимизировать только доказанно безопасные history/checkpoint paths, не возвращая `messages.search`.
 
 ## Обновленные Источники Правды
 - `requirements/source-map.md`

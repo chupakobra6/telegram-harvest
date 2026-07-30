@@ -2,7 +2,7 @@
 
 ## Daily catch-up range scan
 
-`daily-catchup` читает весь новый диапазон одним последовательным Telegram range-scan и только после завершения разбивает записи по московским дням. Telegram RPC не параллелятся и сохраняют штатный pacing 700 ms. Для следующего автоматического непрерывного диапазона dialog checkpoint сравнивает полученные из `get_dialogs` heads с последним полностью опубликованным запуском. Неизменившийся dialog не вызывает history/search RPC только при `head_fully_verified=true`. Иначе он сканируется с `verified_message_id` как безопасным `MinID`; новый dialog сканируется полностью.
+`daily-catchup` читает весь новый диапазон одним последовательным Telegram range-scan и только после завершения разбивает записи по московским дням. Telegram RPC не параллелятся и сохраняют штатный pacing 700 ms. Для следующего автоматического непрерывного диапазона dialog checkpoint сравнивает полученные из `get_dialogs` heads с последним полностью опубликованным запуском. Неизменившийся dialog не вызывает history RPC только при `head_fully_verified=true`. Иначе он сканируется с `verified_message_id` как безопасным `MinID`; новый dialog сканируется полностью.
 
 Разделение `top_message_id` и `verified_message_id` обязательно: catch-up за вчера запускается сегодня, поэтому `get_dialogs` уже может вернуть head сегодняшнего сообщения, не входящего во вчерашний отчет. Такой head сохраняется как наблюдаемый, но не считается полностью проверенным и не разрешает skip на следующем запуске.
 
@@ -34,7 +34,7 @@ Range-scan сохранил все 1 742 пары `(chat_id, message_id)` из b
 
 Границы стадий:
 
-- `telegram_scan` — `get_dialogs`, разрешение target и последовательные history/search RPC вместе со штатным pacing; media transfer сюда не входит;
+- `telegram_scan` — `get_dialogs`, разрешение target и последовательные history RPC вместе со штатным pacing; media transfer сюда не входит;
 - `download` — фактические попытки скачать пользовательское или временное ASR-медиа вместе с ожиданием download RPC slot; cache hits сюда не входят;
 - `ffmpeg` — подготовка WAV внутри transcriber, включая завершившиеся ошибкой попытки;
 - `model_cold_start` — суммарное время запуска использованных ASR workers и ожидания готовности после загрузки модели;
@@ -69,11 +69,11 @@ Live safety-проверка 2026-07-30 на текущем диапазоне �
 
 Потерянных `(chat_type, chat_id, message_id)` — 0. Расхождений общих JSONL records после удаления только живых dialog counters — 0. Все 12 dialog с сообщениями текущего дня были просканированы; checkpoint не принял уже наблюдавшиеся сегодняшние heads за покрытые вчерашним отчетом.
 
-## Search pagination completeness
+## History-only completeness
 
-`messages.search` не гарантирует, что короткая страница (`len(messages) < requested_limit`) является последней. Daily outgoing search поэтому продолжает последовательную пагинацию до пустой страницы или безопасной границы `MinID`; короткая страница завершает scan только для `getHistory`. Если Telegram возвращает неубывающий offset, scan завершается ошибкой и не публикует checkpoint вместо ложного `complete=true`.
+Daily не использует `messages.search` как источник полноты. Empty-query search с `from_id=self` воспроизводимо не вернул существующее исходящее сообщение `1221157785:415830`, хотя `messages.getHistory` его возвращает. Поэтому каждый реально изменившийся dialog читается через последовательный `getHistory`, а self/Trackmate scope фильтруется локально после нормализации.
 
-Регрессионный тест воспроизводит две разреженные search-страницы и проверяет, что сообщения со второй страницы попадают в итоговый JSONL.
+Короткая history page сама по себе также не считается доказанной границей диапазона. Pagination продолжается до сообщения на `start`, safe checkpoint `MinID`, пустой страницы или явного `max_batches`. Неубывающий offset завершает scan ошибкой и не публикует checkpoint вместо ложного `complete=true`. Регрессионный тест воспроизводит две разреженные history pages и проверяет, что обе попадают в JSONL.
 
 `total_seconds` — wall time измеряемой daily-операции. `stage_work_seconds` — сумма всех stage work-seconds; она намеренно не вычитается из wall, потому что Telegram, ffmpeg и ASR могут выполняться одновременно. CLI печатает основные поля:
 
@@ -165,7 +165,9 @@ Machine-readable результаты лежат в приватном `.state/a
 | Total daily wall | 54.383 s |
 | Workers / FloodWait | 1 / 0 |
 
-На 210 общих records с прежним JSONL после исключения живых Telegram dialog counters, локальных paths и самих транскриптов — 0 semantic mismatches. Прежний файл содержит ещё одно сообщение `1221157785:415830`; два повторных current-head scan, включая запуск без download/ASR, одинаково вернули 210 records. Значит, это воспроизводимая вариативность существующего Telegram `messages.search`, а не влияние ASR backend или pipeline. Она оставлена явно зафиксированной и не выдана за успешную ASR-эквивалентность.
+Первоначальный ASR live-run на `messages.search` вернул 210 records и пропустил `1221157785:415830`. После перехода на history-only тот же день без download/ASR вернул все 211 baseline keys, включая проблемное сообщение, при 0 FloodWait. Telegram scan вырос с 42.263 до 69.144 s, batches — с 56 до 92, полный wall — с 43.335 до 70.530 s. Это сознательная плата для холодного исторического запуска; автоматический последовательный catch-up по-прежнему использует dialog checkpoint и не читает неизменившиеся диалоги.
+
+Повторный current-head E2E с download и Whisper turbo также вернул 211 records, 21 attachment и 3 transcript: 92 history batches, 0 FloodWait, 81.083 s total. После исключения только живых Telegram counters, локальных cache paths и самих ASR-текстов все 211 общих JSONL records семантически совпали с baseline; missing/extra keys и semantic mismatches — 0.
 
 ## Как повторять benchmark
 

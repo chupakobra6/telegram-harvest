@@ -165,7 +165,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 | Параметр | Значение | Причина |
 | --- | ---: | --- |
 | RPC spacing | 700 ms | Перенесено из Telegram E2E Test Tool как рабочий read-only pacing. |
-| History batch size | 100 | Кодовый cap для одного Telegram history/search request. |
+| History batch size | 100 | Кодовый cap для одного Telegram history request. |
 | Default history limit | 100 | Обычный `dump`/incremental `sync` читает один batch; полный backfill делается через `--all`. |
 
 `FLOOD_WAIT` обрабатывается внутри MTProto слоя: инструмент записывает flood event, ждёт Telegram delay, сдвигает следующий RPC слот и ретраит ограниченное число раз.
@@ -312,7 +312,9 @@ go run ./cmd/asr-benchmark \
 | 19 дней с локальным Vosk CPU | около 1 часа |
 
 Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в CPU ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
-Daily пропускает per-chat history/search для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.
+Daily пропускает per-chat history для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.
+
+Для полноты daily использует только `messages.getHistory` и уже локально оставляет self/outgoing и настроенных дополнительных отправителей. `messages.search` намеренно не используется: реальный пустой-query поиск по self воспроизводимо пропустил существующее исходящее сообщение. History pagination завершается по временной границе, safe checkpoint `MinID`, пустой странице или явному hard limit, но не только потому, что Telegram вернул короткую страницу.
 
 ## Study sync
 
