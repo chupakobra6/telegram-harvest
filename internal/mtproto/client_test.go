@@ -116,7 +116,7 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 		Date:    int(start.Add(time.Hour).Unix()),
 		FromID:  &tg.PeerUser{UserID: 8718303786},
 		Message: "daily summary",
-	}, target, entities, nil, opts)
+	}, target, entities, nil, opts, nil)
 	if !ok || trackmate.Sender.ID != 8718303786 || !trackmate.Sender.Bot {
 		t.Fatalf("Trackmate record was not included: ok=%t record=%+v", ok, trackmate)
 	}
@@ -126,7 +126,7 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 		Date:    int(start.Add(2 * time.Hour).Unix()),
 		FromID:  &tg.PeerUser{UserID: 42},
 		Message: "not part of daily",
-	}, target, entities, nil, opts); ok {
+	}, target, entities, nil, opts, nil); ok {
 		t.Fatal("other Haru participant should be excluded from daily")
 	}
 }
@@ -267,7 +267,7 @@ func TestOutgoingSearchContinuesAfterSparsePage(t *testing.T) {
 		calls++
 		return page, nil
 	}
-	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, false, load)
+	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, nil, false, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
 			},
 		}, nil
 	}
-	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, true, load)
+	records, stats, err := (&Session{}).collectOutgoingDay(context.Background(), target, opts, nil, true, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
 	}
 	fullOpts := opts
 	fullOpts.History.MinID = 0
-	fullRecords, fullStats, err := (&Session{}).collectOutgoingDay(context.Background(), target, fullOpts, true, load)
+	fullRecords, fullStats, err := (&Session{}).collectOutgoingDay(context.Background(), target, fullOpts, nil, true, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestDailyRecordFilterRunsBeforeMediaProcessing(t *testing.T) {
 		},
 	}
 
-	if _, ok := session.normalizeOutgoingDayRecord(context.Background(), message, target, peer.Entities{}, nil, opts); ok {
+	if _, ok := session.normalizeOutgoingDayRecord(context.Background(), message, target, peer.Entities{}, nil, opts, nil); ok {
 		t.Fatal("record rejected by range filter should not be emitted")
 	}
 	if !called {

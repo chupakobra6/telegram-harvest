@@ -17,7 +17,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
-| Vosk | Go helper `bin/vosk-transcribe` работает как session worker: модель грузится один раз на запуск `daily`. |
+| Vosk | Bounded pipeline автоматически запускает от одного до четырех независимых session workers; модель грузится один раз в каждом фактически использованном worker. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
 | Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. RPC идут последовательно и с pacing. |
@@ -122,7 +122,7 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 
 ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации текущего прогона: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Дневной файл перезаписывается следующим прогоном этой даты и может остаться частичным после interruption.
 
-Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `vosk`, `render`, полный wall time и `unaccounted` remainder. Там же сохраняются `audio_seconds`, `asr_speed_x`, `pipeline_speed_x` и статистика dialog checkpoint: сколько dialog не изменилось, сколько было проверено через history RPC и почему использован полный fallback. Поэтому исторический performance report не зависит от перезаписываемых ASR-логов.
+Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `vosk`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит span/overlap, queue peak, jobs/dedup/failures, requested/activated/peak workers, startup/RSS/ASR speed каждого использованного worker и решения auto-controller. Worker-seconds могут быть больше wall time: локальные стадии теперь перекрываются с Telegram и между собой.
 
 Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
 
@@ -133,6 +133,7 @@ go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --progress
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe-video=phone
+go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --asr-workers=2 # diagnostic override
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
@@ -219,7 +220,11 @@ vosk-transcribe --session <model-dir> [grammar-json-path]
 {"id":1,"text":"recognized text"}
 ```
 
-Это гибридный режим: постоянного демона нет, но внутри одного `daily`-запуска модель грузится один раз и переиспользуется для всех voice/audio/round-video/generic-video cache misses. Если все транскрипты уже есть в кэше, Vosk process не стартует.
+Это гибридный режим без постоянного демона. Telegram producer один: история и media downloads остаются строго последовательными и paced. После скачивания отсутствующее медиа попадает в bounded queue, а локальные workers параллельно выполняют `ffmpeg → Vosk`. Результаты присоединяются к исходным сообщениям по cache path перед сортировкой и публикацией, поэтому порядок завершения workers не меняет JSONL/Markdown.
+
+По умолчанию `--asr-workers=auto`: запуск начинается с одного worker, затем controller может постепенно активировать до четырех. Он расширяет пул только при реальном queued audio backlog, ожидаемой выгоде больше startup cost, CPU ниже защитного порога и достаточной доступной памяти с системным резервом. Фактический RSS Vosk worker измеряется после загрузки модели. Уже активированный worker сохраняется до конца запуска; дребезга create/kill нет. Значения `1..4` предназначены для диагностики и benchmark, обычному агенту их задавать не нужно.
+
+Каждый worker имеет собственный Vosk process, модель и session protocol. Transcript cache проверяется до download, одинаковый in-flight media key распознается один раз, а готовый transcript публикуется через `temp → fsync/close → rename`. Если все транскрипты уже есть в кэше, Vosk process не стартует и timing report показывает `pipeline_workers=0`.
 
 Generic `video` по умолчанию идет через preflight `--transcribe-video=phone`: только вертикальные телефонные видео с Telegram metadata, длительностью до 360 секунд, размером до 80 MiB и разрешением не выше 1080x1920. Горизонтальные фильмы/длинные ролики скипаются до скачивания и попадают в ASR log со skip reason. Режимы:
 
@@ -247,7 +252,7 @@ TG_HARVEST_DAILY_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --outp
 
 ## Производительность daily
 
-На текущем диапазоне 2026-05-17 ... 2026-06-04 полный main-прогон с Vosk занял около часа. Практические ориентиры:
+Контрольный cold-cache день 2026-07-25 содержал 210 сообщений и три ASR jobs общей длительностью 170.284 с. Старый последовательный flow занял 94.22 с; auto pipeline — 54.95 и 55.61 с на двух повторах, то есть примерно 1.70–1.71× быстрее. Fixed 1 worker занял 60.66 с, fixed 2 — 54.56 с, fixed 4 — 55.06 с. Auto выбрал два workers; четыре не дали дополнительной пользы, потому что critical path снова определялся последовательной Telegram-работой.
 
 | Нагрузка дня | Оценка |
 | --- | ---: |

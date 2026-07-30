@@ -28,22 +28,22 @@ type dailyStageSeconds struct {
 }
 
 type dailyStageTimingReport struct {
-	RunID              string                       `json:"run_id"`
-	Command            string                       `json:"command"`
-	StartDate          string                       `json:"start_date,omitempty"`
-	EndDate            string                       `json:"end_date,omitempty"`
-	StartedAt          time.Time                    `json:"started_at"`
-	CompletedAt        time.Time                    `json:"completed_at"`
-	Success            bool                         `json:"success"`
-	Error              string                       `json:"error,omitempty"`
-	Stages             dailyStageSeconds            `json:"stages_seconds"`
-	AudioSeconds       float64                      `json:"audio_seconds"`
-	ASRSpeedX          float64                      `json:"asr_speed_x"`
-	PipelineSpeedX     float64                      `json:"pipeline_speed_x"`
-	DialogCheckpoint   dailyDialogCheckpointMetrics `json:"dialog_checkpoint"`
-	AccountedSeconds   float64                      `json:"accounted_seconds"`
-	UnaccountedSeconds float64                      `json:"unaccounted_seconds"`
-	TotalSeconds       float64                      `json:"total_seconds"`
+	RunID            string                       `json:"run_id"`
+	Command          string                       `json:"command"`
+	StartDate        string                       `json:"start_date,omitempty"`
+	EndDate          string                       `json:"end_date,omitempty"`
+	StartedAt        time.Time                    `json:"started_at"`
+	CompletedAt      time.Time                    `json:"completed_at"`
+	Success          bool                         `json:"success"`
+	Error            string                       `json:"error,omitempty"`
+	Stages           dailyStageSeconds            `json:"stages_seconds"`
+	AudioSeconds     float64                      `json:"audio_seconds"`
+	ASRSpeedX        float64                      `json:"asr_speed_x"`
+	PipelineSpeedX   float64                      `json:"pipeline_speed_x"`
+	MediaPipeline    *stages.MediaPipelineMetrics `json:"media_pipeline,omitempty"`
+	DialogCheckpoint dailyDialogCheckpointMetrics `json:"dialog_checkpoint"`
+	StageWorkSeconds float64                      `json:"stage_work_seconds"`
+	TotalSeconds     float64                      `json:"total_seconds"`
 }
 
 type dailyDialogCheckpointMetrics struct {
@@ -66,6 +66,7 @@ type dailyStageTimingCollector struct {
 	startedAt        time.Time
 	durations        map[stages.Name]time.Duration
 	audioSeconds     float64
+	mediaPipeline    *stages.MediaPipelineMetrics
 	dialogCheckpoint dailyDialogCheckpointMetrics
 }
 
@@ -97,6 +98,16 @@ func (c *dailyStageTimingCollector) ObserveAudioDuration(seconds float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.audioSeconds += seconds
+}
+
+func (c *dailyStageTimingCollector) ObserveMediaPipeline(metrics stages.MediaPipelineMetrics) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	copy := metrics
+	c.mediaPipeline = &copy
 }
 
 func (c *dailyStageTimingCollector) ObserveDialogCheckpoint(decision harvest.DailyDialogCheckpointDecision, stats harvest.OutgoingStats) {
@@ -132,27 +143,30 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		Vosk:           c.durations[stages.Vosk].Seconds(),
 		Render:         c.durations[stages.Render].Seconds(),
 	}
-	accounted := stageSeconds.TelegramScan + stageSeconds.Download + stageSeconds.FFmpeg + stageSeconds.ModelColdStart + stageSeconds.Vosk + stageSeconds.Render
+	stageWork := stageSeconds.TelegramScan + stageSeconds.Download + stageSeconds.FFmpeg + stageSeconds.ModelColdStart + stageSeconds.Vosk + stageSeconds.Render
 	total := completedAt.Sub(c.startedAt).Seconds()
-	unaccounted := total - accounted
 	asrSpeedX := speedRatio(c.audioSeconds, stageSeconds.Vosk)
 	pipelineSpeedX := speedRatio(c.audioSeconds, stageSeconds.ModelColdStart+stageSeconds.FFmpeg+stageSeconds.Vosk)
+	if c.mediaPipeline != nil {
+		asrSpeedX = c.mediaPipeline.WorkerWorkSpeedX
+		pipelineSpeedX = c.mediaPipeline.PoolSpeedX
+	}
 	report := dailyStageTimingReport{
-		RunID:              c.runID,
-		Command:            c.command,
-		StartDate:          c.startDate,
-		EndDate:            c.endDate,
-		StartedAt:          c.startedAt,
-		CompletedAt:        completedAt,
-		Success:            runErr == nil,
-		Stages:             stageSeconds,
-		AudioSeconds:       c.audioSeconds,
-		ASRSpeedX:          asrSpeedX,
-		PipelineSpeedX:     pipelineSpeedX,
-		DialogCheckpoint:   c.dialogCheckpoint,
-		AccountedSeconds:   accounted,
-		UnaccountedSeconds: unaccounted,
-		TotalSeconds:       total,
+		RunID:            c.runID,
+		Command:          c.command,
+		StartDate:        c.startDate,
+		EndDate:          c.endDate,
+		StartedAt:        c.startedAt,
+		CompletedAt:      completedAt,
+		Success:          runErr == nil,
+		Stages:           stageSeconds,
+		AudioSeconds:     c.audioSeconds,
+		ASRSpeedX:        asrSpeedX,
+		PipelineSpeedX:   pipelineSpeedX,
+		MediaPipeline:    c.mediaPipeline,
+		DialogCheckpoint: c.dialogCheckpoint,
+		StageWorkSeconds: stageWork,
+		TotalSeconds:     total,
 	}
 	if runErr != nil {
 		report.Error = strings.TrimSpace(runErr.Error())
@@ -171,24 +185,41 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 	report := collector.Report(runErr)
 	path, persistErr := writeDailyStageTimingReport(stateDir, report)
 	if persistErr == nil {
+		pipelineMode := ""
+		pipelineSpan := 0.0
+		pipelineOverlap := 0.0
+		pipelineWorkers := 0
+		pipelineQueuePeak := 0
+		if report.MediaPipeline != nil {
+			pipelineMode = report.MediaPipeline.Mode
+			pipelineSpan = report.MediaPipeline.SpanSeconds
+			pipelineOverlap = report.MediaPipeline.OverlapSeconds
+			pipelineWorkers = report.MediaPipeline.WorkersPeak
+			pipelineQueuePeak = report.MediaPipeline.QueuePeak
+		}
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs vosk=%.3fs render=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s unaccounted=%.3fs total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs vosk=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.Stages.FFmpeg,
 			report.Stages.ModelColdStart,
 			report.Stages.Vosk,
 			report.Stages.Render,
+			report.StageWorkSeconds,
 			report.AudioSeconds,
 			report.ASRSpeedX,
 			report.PipelineSpeedX,
+			pipelineMode,
+			pipelineSpan,
+			pipelineOverlap,
+			pipelineWorkers,
+			pipelineQueuePeak,
 			report.DialogCheckpoint.Enabled,
 			report.DialogCheckpoint.HistoryRPC,
 			report.DialogCheckpoint.Unchanged,
 			report.DialogCheckpoint.Changed,
 			report.DialogCheckpoint.New,
 			report.DialogCheckpoint.FallbackReason,
-			report.UnaccountedSeconds,
 			report.TotalSeconds,
 			path,
 		)

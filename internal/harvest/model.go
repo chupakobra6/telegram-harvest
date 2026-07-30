@@ -165,10 +165,13 @@ type HistoryOptions struct {
 	VoskGrammarPath       string
 	FFmpegCommand         string
 	Transcriber           Transcriber
+	TranscriberFactory    func() Transcriber
+	ASRWorkerMode         string
 	Progress              func(HistoryProgress) error
 	ASRLog                func(ASRLogEvent) error
 	StageTiming           stages.Observer
 	AudioDurationTiming   stages.AudioDurationObserver
+	MediaPipelineTiming   stages.MediaPipelineObserver
 	DialogCheckpoint      DailyDialogCheckpointDecision
 }
 

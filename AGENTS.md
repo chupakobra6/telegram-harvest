@@ -37,6 +37,9 @@
 - `daily-catchup` must collect all missing days through one sequential Telegram range scan, then partition records into day reports. Do not reintroduce one full dialog/chat scan per day.
 - The daily dialog checkpoint may skip history only for an automatic catch-up range contiguous with the last complete checkpoint, on the same Telegram account and identical daily scope, when the dialog `top_message_id` is unchanged and that head was fully covered by the previous range. A head from the next unpublished day must be scanned from its safe `verified_message_id`, never skipped. Explicit `--from`, gaps, historical ranges, state/account/scope mismatch, anomalous heads, incomplete scans, and errors must use the safe full-scan fallback. Publish the checkpoint only after the merged catch-up Markdown succeeds.
 - `daily` and `daily-catchup` must directly measure Telegram scan, download, ffmpeg, Vosk, and render, then atomically preserve a unique per-run JSON under `.state/daily/timings/`. Do not reconstruct historical stage timings from replaceable daily ASR logs.
+- Daily media concurrency is local-only: one producer owns all MTProto history/download calls, while a bounded queue feeds independent `ffmpeg → Vosk` workers. Apply all results before deterministic sort/render; never let workers own or call the Telegram client.
+- `--asr-workers=auto` is the normal daily mode. Fixed `1..4` values are diagnostic overrides. Auto starts at one, grows only for real queued audio with measured/estimated benefit plus CPU/memory headroom, and never exceeds four without new benchmark evidence.
+- Transcript cache publication must be atomic; in-flight media keys must be deduplicated, temporary source/WAV/transcript files cleaned on success, failure, cancellation, and interruption.
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.

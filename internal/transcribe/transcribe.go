@@ -246,6 +246,15 @@ func (r *VoskSessionRunner) Close() error {
 	return r.stopProcessLocked(false)
 }
 
+func (r *VoskSessionRunner) ProcessID() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cmd == nil || r.cmd.Process == nil {
+		return 0
+	}
+	return r.cmd.Process.Pid
+}
+
 func runVosk(ctx context.Context, opts Options, inputPath string, outputPath string) (string, error) {
 	result, err := runVoskDetailed(ctx, opts, inputPath, outputPath)
 	if err != nil {

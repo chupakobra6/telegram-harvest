@@ -196,8 +196,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  --profile main|study  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
-	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
-	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
+	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off] [--asr-workers auto|1..4]")
+	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off] [--asr-workers auto|1..4]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
@@ -842,6 +842,7 @@ type dailyOptionFlags struct {
 	voskModelPath     *string
 	voskGrammarPath   *string
 	ffmpegCommand     *string
+	asrWorkers        *string
 	transcriptDir     *string
 	progress          *bool
 }
@@ -861,6 +862,7 @@ func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOpt
 		voskModelPath:   fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory"),
 		voskGrammarPath: fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path"),
 		ffmpegCommand:   fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion"),
+		asrWorkers:      fs.String("asr-workers", "auto", "ASR worker mode: auto or diagnostic fixed count 1..4"),
 		transcriptDir:   fs.String("transcript-dir", "transcripts", "transcript output directory, relative to state dir unless absolute"),
 		progress:        fs.Bool("progress", false, "print per-dialog progress"),
 	}
@@ -887,6 +889,7 @@ func (f dailyOptionFlags) values() dailyOptions {
 		VoskModelPath:        *f.voskModelPath,
 		VoskGrammarPath:      *f.voskGrammarPath,
 		FFmpegCommand:        *f.ffmpegCommand,
+		ASRWorkerMode:        *f.asrWorkers,
 		TranscriptDir:        *f.transcriptDir,
 		Progress:             *f.progress,
 	}
@@ -910,6 +913,7 @@ type dailyOptions struct {
 	VoskModelPath        string
 	VoskGrammarPath      string
 	FFmpegCommand        string
+	ASRWorkerMode        string
 	TranscriptDir        string
 	Progress             bool
 }
@@ -1029,13 +1033,7 @@ func runDailyJobsWithCheckpoint(
 	if timings != nil {
 		history.StageTiming = timings.Observe
 		history.AudioDurationTiming = timings.ObserveAudioDuration
-	}
-	var managedTranscriber transcribe.ManagedRunner
-	if opts.TranscribeMedia {
-		if transcribeOpts := dailyTranscribeOptions(history); transcribeOpts.Configured() {
-			managedTranscriber = transcribe.NewManagedRunner(transcribeOpts)
-			history.Transcriber = managedTranscriber
-		}
+		history.MediaPipelineTiming = timings.ObserveMediaPipeline
 	}
 	additionalSenderIDsByChat := dailyAdditionalSenderIDsByChat(cfg)
 	var result dailyRunResult
@@ -1082,11 +1080,6 @@ func runDailyJobsWithCheckpoint(
 			return nil
 		})
 	})
-	if managedTranscriber != nil {
-		if closeErr := managedTranscriber.Close(); err == nil && closeErr != nil {
-			return dailyRunResult{}, closeErr
-		}
-	}
 	return result, err
 }
 
@@ -1106,10 +1099,13 @@ func evaluateDailyCheckpointRequest(request dailyCheckpointRequest, accountID in
 func validateDailyOptions(opts dailyOptions) error {
 	switch strings.TrimSpace(opts.VideoTranscribeMode) {
 	case "", harvest.VideoTranscribePhone, harvest.VideoTranscribeAll, harvest.VideoTranscribeOff:
-		return nil
 	default:
 		return fmt.Errorf("--transcribe-video must be one of: %s, %s, %s", harvest.VideoTranscribePhone, harvest.VideoTranscribeAll, harvest.VideoTranscribeOff)
 	}
+	if _, _, err := mtproto.ParseASRWorkerMode(opts.ASRWorkerMode); err != nil {
+		return err
+	}
+	return nil
 }
 
 func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOptions {
@@ -1124,6 +1120,7 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 		VoskModelPath:        opts.VoskModelPath,
 		VoskGrammarPath:      opts.VoskGrammarPath,
 		FFmpegCommand:        opts.FFmpegCommand,
+		ASRWorkerMode:        opts.ASRWorkerMode,
 		MaxPhotoBytes:        opts.MaxPhotoBytes,
 		MaxDocumentBytes:     opts.MaxDocumentBytes,
 		MaxAudioBytes:        opts.MaxAudioBytes,

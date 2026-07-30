@@ -37,11 +37,21 @@ Range-scan сохранил все 1 742 пары `(chat_id, message_id)` из b
 - `telegram_scan` — `get_dialogs`, разрешение target и последовательные history/search RPC вместе со штатным pacing; media transfer сюда не входит;
 - `download` — фактические попытки скачать пользовательское или временное ASR-медиа вместе с ожиданием download RPC slot; cache hits сюда не входят;
 - `ffmpeg` — подготовка WAV внутри transcriber, включая завершившиеся ошибкой попытки;
-- `model_cold_start` — запуск Vosk session worker и ожидание его `ready` после загрузки модели и grammar; в одном запуске обычно появляется один раз;
+- `model_cold_start` — суммарное время запуска использованных Vosk session workers и ожидания их `ready` после загрузки модели и grammar;
 - `vosk` — только распознавание после готовности модели, включая завершившуюся ошибкой работу; при custom non-Vosk command поле честно остается нулевым;
 - `render` — запись и атомарная публикация дневных JSONL/Markdown плюс merged `00-latest-catchup.md`.
 
-`audio_seconds` — суммарная длительность WAV только для успешно распознанных cache misses. `asr_speed_x` считается как `audio_seconds / stages_seconds.vosk`, а `pipeline_speed_x` — как `audio_seconds / (stages_seconds.model_cold_start + stages_seconds.ffmpeg + stages_seconds.vosk)`. При прогретом transcript cache или отсутствии успешно обработанного аудио все три значения равны нулю.
+`audio_seconds` — суммарная длительность WAV только для успешно распознанных cache misses. `asr_speed_x` показывает отношение audio duration к суммарным Vosk worker-seconds. `pipeline_speed_x` показывает throughput всего media pipeline: audio duration к реальному pipeline span. При прогретом transcript cache или отсутствии успешно обработанного аудио все три значения равны нулю.
+
+После появления параллелизма stage durations являются work-seconds, а не разложением wall time. `stage_work_seconds` может быть больше `total_seconds`. Объект `media_pipeline` поэтому отдельно сохраняет:
+
+- реальный `span_seconds` от начала первого ASR job до завершения последнего;
+- `overlap_seconds` с продолжающимся Telegram producer;
+- queue capacity/peak, submitted/deduplicated/completed/failed jobs;
+- requested cap, activated workers и реальный peak одновременно занятых workers;
+- доступную память, общую CPU utilization и измеренный RSS Vosk process;
+- startup, RSS, jobs, audio, ffmpeg/Vosk/busy seconds и скорость каждого использованного worker;
+- каждое решение auto-controller `grow`/`hold` с backlog, ожидаемой экономией и причиной.
 
 Объект `dialog_checkpoint` сохраняет `enabled`, `fallback_reason`, общее число dialog, `history_rpc`, `unchanged`, `changed` и `new`. CLI печатает те же counters. Checkpoint не используется для `daily`, ручного `daily-catchup --from`, исторического или разорванного диапазона, при несовпадении account/scope и при невалидном state. Неполный/error run его не меняет.
 
@@ -63,10 +73,10 @@ Live safety-проверка 2026-07-30 на текущем диапазоне �
 
 Регрессионный тест воспроизводит две разреженные search-страницы и проверяет, что сообщения со второй страницы попадают в итоговый JSONL.
 
-Поля стадий не перекрываются. `total_seconds` — wall time измеряемой daily-операции, `accounted_seconds` — сумма шести стадий, а `unaccounted_seconds` — оставшаяся локальная работа: нормализация сообщений, cache reads, partitioning, cleanup и orchestration. CLI печатает те же значения:
+`total_seconds` — wall time измеряемой daily-операции. `stage_work_seconds` — сумма всех stage work-seconds; она намеренно не вычитается из wall, потому что Telegram, ffmpeg и Vosk могут выполняться одновременно. CLI печатает основные поля:
 
 ```text
-timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s vosk=...s render=...s audio=...s asr_speed=...x pipeline_speed=...x checkpoint_enabled=... checkpoint_history_dialogs=... checkpoint_unchanged=... checkpoint_changed=... checkpoint_new=... checkpoint_fallback=... unaccounted=...s total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
+timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s vosk=...s render=...s stage_work=...s audio=...s asr_speed=...x pipeline_speed=...x pipeline_mode=... pipeline_span=...s pipeline_overlap=...s pipeline_workers=... pipeline_queue_peak=... checkpoint_enabled=... total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
 ```
 
 Live-проверка 2026-07-30 на том же восьмидневном диапазоне и прогретом media/transcript cache:
@@ -78,11 +88,40 @@ Live-проверка 2026-07-30 на том же восьмидневном д�
 | ffmpeg | 0.000 |
 | Vosk | 0.000 |
 | Render | 0.024 |
-| Unaccounted | 1.265 |
 | Internal total | 53.396 |
 | External wall (`time -p`) | 53.98 |
 
 Нулевые download/ffmpeg/Vosk в этом прогоне означают, что медиа и транскрипты были взяты из существующих файлов/кэша; это не реконструкция из перезаписанного ASR-лога. Run обработал 1 764 сообщения за один range-scan, 70 Telegram batches, 0 FloodWait.
+
+## Bounded media pipeline
+
+Daily использует один последовательный Telegram producer. Он сканирует сообщения, проверяет transcript cache и последовательно скачивает отсутствующее media. После download файл кладется в bounded queue; Telegram producer не ждет локальную обработку. Независимые workers выполняют `ffmpeg → Vosk`, каждый через собственный process/model/session. Collector ждет все jobs, применяет результаты по transcript cache path и только затем сортирует и публикует отчеты.
+
+Queue capacity равна `2 × configured worker cap`: 8 в `auto`, 2/4/6/8 в диагностических fixed modes. Заполненная очередь создает backpressure и ограничивает число временных файлов. Одинаковый in-flight cache key получает один job. Transcript публикуется атомарно через temporary file, `fsync`, close и rename.
+
+`auto` начинается с одного worker и может активировать до четырех. Scale-up выполняется асинхронно, чтобы resource sampling не задерживал Telegram producer. Controller требует:
+
+- queued backlog сверх свободных workers и не меньше 30 секунд известного аудио;
+- ожидаемую экономию больше cold-start с safety margin;
+- общую CPU utilization не выше 80%;
+- достаточно available memory для измеренного RSS дополнительной модели плюс 4 GiB системного резерва.
+
+До первого готового job используется консервативный prior 4× ASR и 2 секунды startup; затем решение опирается на фактические audio/Vosk/startup/RSS. Внутри запуска pool только растет: уже загруженная модель сохраняется до конца, чтобы не создавать дребезг.
+
+Cold-cache benchmark 2026-07-30 для дня 2026-07-25:
+
+| Режим | Wall | Pipeline span | Workers | Относительно sequential |
+| --- | ---: | ---: | ---: | ---: |
+| Старый последовательный flow (`021bbf7`) | 94.22 s | 39.26 s local work sequentially | 1 | 1.00× |
+| Pipeline fixed 1 | 60.66 s | 40.32 s | 1 | 1.55× |
+| Pipeline fixed 2 | 54.56 s | 33.94 s | 2 | 1.73× |
+| Pipeline fixed 4 | 55.06 s | 36.30 s | 3 used / 4 activated | 1.71× |
+| Pipeline auto, repeat 1 | 54.95 s | 35.67 s | 2 | 1.71× |
+| Pipeline auto, repeat 2 | 55.61 s | 33.82 s | 2 | 1.69× |
+
+Во всех cold runs: 210 records, 21 attachments, 3 successful ASR jobs, 170.284 seconds audio, 0 FloodWait. После удаления только живых Telegram dialog counters и локальных cache paths normalized JSONL совпал побайтово во всех режимах. Markdown совпал побайтово без нормализации. Временных source/WAV/transcript файлов после запусков не осталось.
+
+Warm-cache повтор в `auto` занял 44.90 s: download/ffmpeg/model/Vosk/pipeline span равны нулю, `pipeline_workers=0`, user CPU 0.05 s. Это подтверждает, что cache hit не запускает Vosk process.
 
 ## Как повторять benchmark
 

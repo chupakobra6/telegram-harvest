@@ -356,6 +356,20 @@ func TestValidateDailyOptionsRejectsInvalidVideoTranscribeMode(t *testing.T) {
 	}
 }
 
+func TestValidateDailyOptionsAcceptsAutoAndDiagnosticASRWorkers(t *testing.T) {
+	for _, mode := range []string{"", "auto", "1", "2", "3", "4"} {
+		if err := validateDailyOptions(dailyOptions{VideoTranscribeMode: "phone", ASRWorkerMode: mode}); err != nil {
+			t.Fatalf("mode %q: %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"0", "5", "many"} {
+		err := validateDailyOptions(dailyOptions{VideoTranscribeMode: "phone", ASRWorkerMode: mode})
+		if err == nil || !strings.Contains(err.Error(), "--asr-workers") {
+			t.Fatalf("mode %q error = %v", mode, err)
+		}
+	}
+}
+
 func TestRunDailyCatchupRejectsInvalidVideoTranscribeModeBeforeRuntimeAccess(t *testing.T) {
 	dir := t.TempDir()
 	sessionPath := filepath.Join(dir, "sessions", "main.json")

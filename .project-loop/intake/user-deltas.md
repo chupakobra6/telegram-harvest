@@ -33,6 +33,40 @@ ID источника: `S001`
 Конфликты:
 - отсутствуют
 
+### Media pipeline и динамический Vosk pool
+
+ID источника: `S005`
+
+Исходный ввод:
+
+```text
+Полностью реализовать описанный bounded pipeline:
+один последовательный Telegram producer → bounded queue →
+динамический пул независимых ffmpeg/Vosk workers → deterministic collector.
+Протестировать, проанализировать результаты, исправить найденное и показать итог.
+```
+
+Нормализация:
+- [x] требование: Telegram history и media downloads остаются строго последовательными;
+- [x] требование: producer не ждет локальную транскрипцию и использует bounded queue с backpressure;
+- [x] требование: каждый ASR worker владеет отдельным Vosk process/model/session;
+- [x] требование: transcript cache переиспользуется, одинаковое in-flight media не распознается дважды, запись кэша атомарна;
+- [x] требование: collector восстанавливает прежний детерминированный порядок независимо от порядка завершения jobs;
+- [x] требование: auto starts at 1, grows conservatively from backlog/audio/startup/RSS/CPU/memory evidence, hard limit initially 4, no shrink except memory pressure;
+- [x] требование: timings expose pipeline span/overlap, worker count/startup/RSS/utilization/queue and aggregate/per-worker ASR speed;
+- [x] валидация: output equivalence, unit/race/failure tests and cold-cache sequential/1/2/4/auto comparison.
+
+Маршрутизация:
+- [x] карта источников обновлена
+- [x] чеклист обновлен
+- [x] план и текущий шаг обновлены
+- [x] реализация завершена
+- [x] валидация завершена
+- [x] handoff обновлен
+
+Конфликты:
+- нет; `S005` явно расширяет прежнюю границу `SCOPE-001`, где параллельный ASR был отложен.
+
 ### Честные stage timings
 
 ID источника: `S004`

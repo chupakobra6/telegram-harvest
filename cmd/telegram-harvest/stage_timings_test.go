@@ -79,8 +79,8 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 		decoded.DialogCheckpoint.Unchanged != 8 || decoded.DialogCheckpoint.Changed != 1 || decoded.DialogCheckpoint.New != 1 {
 		t.Fatalf("dialog checkpoint metrics = %+v", decoded.DialogCheckpoint)
 	}
-	if decoded.UnaccountedSeconds <= 0 {
-		t.Fatalf("unaccounted = %f, want positive remainder", decoded.UnaccountedSeconds)
+	if decoded.StageWorkSeconds <= 0 {
+		t.Fatalf("stage work = %f, want positive work total", decoded.StageWorkSeconds)
 	}
 	if decoded.Command != "daily-catchup" || decoded.StartDate != "2026-07-22" || decoded.EndDate != "2026-07-29" || !decoded.Success {
 		t.Fatalf("report metadata = %+v", decoded)
@@ -104,7 +104,7 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 		"telegram_scan=", "download=", "ffmpeg=", "model_cold_start=", "vosk=", "render=",
 		"audio=", "asr_speed=", "pipeline_speed=", "checkpoint_enabled=", "checkpoint_history_dialogs=",
 		"checkpoint_unchanged=", "checkpoint_changed=", "checkpoint_new=", "checkpoint_fallback=",
-		"unaccounted=", "total=", "report=",
+		"stage_work=", "pipeline_mode=", "pipeline_span=", "pipeline_overlap=", "pipeline_workers=", "pipeline_queue_peak=", "total=", "report=",
 	} {
 		if !strings.Contains(output.String(), field) {
 			t.Fatalf("missing %q in %s", field, output.String())
@@ -125,5 +125,35 @@ func TestDailyStageTimingReportLeavesSpeedZeroWithoutProcessedAudio(t *testing.T
 	report := collector.Report(nil)
 	if report.AudioSeconds != 0 || report.ASRSpeedX != 0 || report.PipelineSpeedX != 0 {
 		t.Fatalf("unexpected empty-run ASR metrics: %+v", report)
+	}
+}
+
+func TestDailyStageTimingReportUsesOverlappingPipelineMetrics(t *testing.T) {
+	collector := newDailyStageTimingCollector("daily", "2026-07-29", "2026-07-29")
+	collector.Observe(stages.TelegramScan, 10*time.Second)
+	collector.Observe(stages.Vosk, 8*time.Second)
+	collector.ObserveAudioDuration(40)
+	collector.ObserveMediaPipeline(stages.MediaPipelineMetrics{
+		Mode:             "2",
+		WorkersRequested: 2,
+		WorkersPeak:      2,
+		SpanSeconds:      5,
+		OverlapSeconds:   4,
+		PoolSpeedX:       8,
+		WorkerWorkSpeedX: 5,
+	})
+	collector.startedAt = time.Now().UTC().Add(-12 * time.Second)
+	report := collector.Report(nil)
+	if report.MediaPipeline == nil || report.MediaPipeline.WorkersPeak != 2 {
+		t.Fatalf("pipeline = %+v", report.MediaPipeline)
+	}
+	if report.ASRSpeedX != 5 || report.PipelineSpeedX != 8 {
+		t.Fatalf("speeds = asr %.2f pipeline %.2f", report.ASRSpeedX, report.PipelineSpeedX)
+	}
+	if report.StageWorkSeconds != 18 {
+		t.Fatalf("stage work = %.2f, want 18 worker-seconds", report.StageWorkSeconds)
+	}
+	if report.TotalSeconds >= report.StageWorkSeconds {
+		t.Fatalf("expected overlapping work seconds to exceed wall: total=%.2f work=%.2f", report.TotalSeconds, report.StageWorkSeconds)
 	}
 }

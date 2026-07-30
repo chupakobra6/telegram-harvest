@@ -598,6 +598,16 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 	if opts.End.IsZero() || !opts.End.After(opts.Start) {
 		return harvest.OutgoingStats{}, fmt.Errorf("end time must be after start time")
 	}
+	pipeline, err := newMediaPipeline(ctx, opts.History)
+	if err != nil {
+		return harvest.OutgoingStats{}, err
+	}
+	pipelineFinished := false
+	defer func() {
+		if pipeline != nil && !pipelineFinished {
+			pipeline.abort()
+		}
+	}()
 	scanStart := time.Now()
 	dialogs, err := s.loadDialogs(ctx, opts.DialogLimit)
 	stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
@@ -669,7 +679,7 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		}
 
 		stats.DialogsHistoryRPC++
-		dialogRecords, dialogStats, err := s.searchOutgoingDayInDialog(ctx, target, dialogOpts)
+		dialogRecords, dialogStats, err := s.searchOutgoingDayInDialog(ctx, target, dialogOpts, pipeline)
 		stats.Batches += dialogStats.Batches
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
@@ -711,6 +721,12 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		}
 	}
 
+	if pipeline != nil {
+		if err := pipeline.waitAndApply(records); err != nil {
+			return harvest.OutgoingStats{}, err
+		}
+		pipelineFinished = true
+	}
 	sortDailyRecords(records)
 	if opts.History.Limit > 0 && len(records) > opts.History.Limit {
 		records = records[len(records)-opts.History.Limit:]
@@ -946,13 +962,13 @@ func normalizeOutgoingRangeOptions(opts harvest.OutgoingRangeOptions) harvest.Ou
 	return opts
 }
 
-func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
 	if dailyHasAdditionalSenders(opts, target.Chat.ID) {
-		return s.scanOutgoingDayWithHistory(ctx, target, opts)
+		return s.scanOutgoingDayWithHistory(ctx, target, opts, pipeline)
 	}
-	records, stats, err := s.searchOutgoingDayWithSearch(ctx, target, opts)
+	records, stats, err := s.searchOutgoingDayWithSearch(ctx, target, opts, pipeline)
 	if err != nil && isSearchQueryEmpty(err) {
-		return s.scanOutgoingDayWithHistory(ctx, target, opts)
+		return s.scanOutgoingDayWithHistory(ctx, target, opts, pipeline)
 	}
 	return records, stats, err
 }
@@ -963,8 +979,8 @@ func dailyHasAdditionalSenders(opts harvest.OutgoingRangeOptions, chatID int64) 
 
 type outgoingDayBatchLoader func(context.Context, int, int) (tg.MessagesMessagesClass, error)
 
-func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	return s.collectOutgoingDay(ctx, target, opts, false, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
+func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	return s.collectOutgoingDay(ctx, target, opts, pipeline, false, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "search_messages", func(rpcCtx context.Context) error {
 			var callErr error
@@ -976,8 +992,8 @@ func (s *Session) searchOutgoingDayWithSearch(ctx context.Context, target resolv
 	})
 }
 
-func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
-	return s.collectOutgoingDay(ctx, target, opts, true, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
+func (s *Session) scanOutgoingDayWithHistory(ctx context.Context, target resolvedTarget, opts harvest.OutgoingRangeOptions, pipeline *mediaPipeline) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	return s.collectOutgoingDay(ctx, target, opts, pipeline, true, func(callCtx context.Context, offsetID int, batchLimit int) (tg.MessagesMessagesClass, error) {
 		var result tg.MessagesMessagesClass
 		err := s.performRPC(callCtx, "get_history", func(rpcCtx context.Context) error {
 			var callErr error
@@ -1018,6 +1034,7 @@ func (s *Session) collectOutgoingDay(
 	ctx context.Context,
 	target resolvedTarget,
 	opts harvest.OutgoingRangeOptions,
+	pipeline *mediaPipeline,
 	stopAtStart bool,
 	load outgoingDayBatchLoader,
 ) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
@@ -1057,7 +1074,7 @@ func (s *Session) collectOutgoingDay(
 			if stopAtStart && messageAtOrBefore(msgClass, opts.Start) {
 				reachedStart = true
 			}
-			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts)
+			record, ok := s.normalizeOutgoingDayRecord(ctx, msgClass, target, entities, topicByID, opts, pipeline)
 			if !ok {
 				continue
 			}
@@ -1125,6 +1142,7 @@ func (s *Session) normalizeOutgoingDayRecord(
 	entities peer.Entities,
 	topicByID map[int]harvest.Topic,
 	opts harvest.OutgoingRangeOptions,
+	pipeline *mediaPipeline,
 ) (harvest.MessageRecord, bool) {
 	record, ok := normalizeRecord(msgClass, target.Chat, entities)
 	if !ok {
@@ -1147,7 +1165,7 @@ func (s *Session) normalizeOutgoingDayRecord(
 		return harvest.MessageRecord{}, false
 	}
 	ensureDailyAttachments(msgClass, &record)
-	s.downloadRecordMedia(ctx, msgClass, &record, opts.History)
+	s.downloadRecordMediaWithPipeline(ctx, msgClass, &record, opts.History, pipeline)
 	return record, true
 }
 
@@ -2063,6 +2081,16 @@ func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attac
 }
 
 func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
+	s.downloadRecordMediaWithPipeline(ctx, msgClass, record, opts, nil)
+}
+
+func (s *Session) downloadRecordMediaWithPipeline(
+	ctx context.Context,
+	msgClass tg.MessageClass,
+	record *harvest.MessageRecord,
+	opts harvest.HistoryOptions,
+	pipeline *mediaPipeline,
+) {
 	if !opts.DownloadMedia || record == nil {
 		return
 	}
@@ -2087,7 +2115,7 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 		record.Attachments[0].MIMEType = "image/jpeg"
 		record.Attachments[0].FileName = fileName
 		record.Attachments[0].Size = size
-		s.downloadAttachment(ctx, record, 0, location, fileName, opts)
+		s.downloadAttachment(ctx, record, 0, location, fileName, opts, pipeline)
 	case *tg.MessageMediaDocument:
 		if len(record.Attachments) == 0 {
 			return
@@ -2112,12 +2140,12 @@ func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageCl
 		record.Attachments[0].Size = doc.Size
 		record.Attachments[0].FileName = fileName
 		applyDocumentMetadata(&record.Attachments[0], doc)
-		s.downloadAttachment(ctx, record, 0, doc.AsInputDocumentFileLocation(), fileName, opts)
+		s.downloadAttachment(ctx, record, 0, doc.AsInputDocumentFileLocation(), fileName, opts, pipeline)
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
 			copyMsg := *msg
 			copyMsg.Media = attached
-			s.downloadRecordMedia(ctx, &copyMsg, record, opts)
+			s.downloadRecordMediaWithPipeline(ctx, &copyMsg, record, opts, pipeline)
 		}
 	}
 }
@@ -2129,12 +2157,13 @@ func (s *Session) downloadAttachment(
 	location tg.InputFileLocationClass,
 	fileName string,
 	opts harvest.HistoryOptions,
+	pipeline *mediaPipeline,
 ) {
 	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
 		return
 	}
 	if transcriptMediaKind(record.Attachments[index].Kind) {
-		s.transcribeAttachmentMedia(ctx, record, index, location, fileName, opts)
+		s.transcribeAttachmentMedia(ctx, record, index, location, fileName, opts, pipeline)
 		return
 	}
 	if mediaSizeLimitExceeded(record, index, opts) {
@@ -2201,6 +2230,7 @@ func (s *Session) transcribeAttachmentMedia(
 	location tg.InputFileLocationClass,
 	fileName string,
 	opts harvest.HistoryOptions,
+	pipeline *mediaPipeline,
 ) {
 	if record == nil || index < 0 || index >= len(record.Attachments) {
 		return
@@ -2233,23 +2263,37 @@ func (s *Session) transcribeAttachmentMedia(
 		return
 	}
 	transcribeOpts := transcribeOptions(opts)
-	if opts.Transcriber == nil && !transcribeOpts.Configured() {
+	if opts.Transcriber == nil && opts.TranscriberFactory == nil && !transcribeOpts.Configured() {
 		attachment.TranscriptError = "transcription is not configured"
 		emitASRLog(opts, asrLogEvent("skip", "config", attachment.TranscriptError, *record, index, *attachment))
 		return
 	}
+	if pipeline != nil && !pipeline.claim(transcriptPath) {
+		return
+	}
 	tempPath, err := createTemporaryMediaPath(opts.MediaDir, fileName)
 	if err != nil {
+		if pipeline != nil {
+			pipeline.releaseClaim(transcriptPath)
+		}
 		attachment.DownloadError = fmt.Sprintf("prepare temporary media: %v", err)
 		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
-	defer os.Remove(tempPath)
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
 	emitASRLog(opts, asrLogEvent("download_start", "download", "", *record, index, *attachment))
 	downloadStageStart := time.Now()
 	if err := s.beforeRPC(ctx); err != nil {
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
+		if pipeline != nil {
+			pipeline.releaseClaim(transcriptPath)
+		}
 		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
@@ -2259,6 +2303,9 @@ func (s *Session) transcribeAttachmentMedia(
 	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, tempPath); err != nil {
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
+		if pipeline != nil {
+			pipeline.releaseClaim(transcriptPath)
+		}
 		event := asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment)
 		event.DownloadSeconds = secondsSince(downloadStart)
 		emitASRLog(opts, event)
@@ -2266,6 +2313,27 @@ func (s *Session) transcribeAttachmentMedia(
 	}
 	stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 	downloadSeconds := secondsSince(downloadStart)
+	if pipeline != nil {
+		job := mediaPipelineJob{
+			Key:              transcriptPath,
+			InputPath:        tempPath,
+			TranscriptPath:   transcriptPath,
+			Record:           *record,
+			Attachment:       *attachment,
+			AttachmentIndex:  index,
+			DownloadSeconds:  downloadSeconds,
+			EstimatedAudio:   attachment.DurationSeconds,
+			TranscribeOption: transcribeOpts,
+		}
+		if err := pipeline.enqueue(job); err != nil {
+			pipeline.releaseClaim(transcriptPath)
+			attachment.TranscriptError = transcriptErrorMessage(err)
+			emitASRLog(opts, asrLogEvent("error", "transcribe", attachment.TranscriptError, *record, index, *attachment))
+		} else {
+			cleanupTemp = false
+		}
+		return
+	}
 
 	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
 	defer cancel()

@@ -9,6 +9,7 @@
 | STEP-001 | `готово` | REQ-001, REQ-002, REQ-003, VAL-001, VAL-002, VAL-003 | Реализовать единый range-scan, покрыть тестами и измерить old/new. | Проверены границы дней, фильтрация scope, атомарность и доказательства benchmark. | Focused tests, `go test ./...`, live old/new benchmark, structured comparison — зелёные. |
 | STEP-001R | `готово` | REQ-001, REQ-002, REQ-003 | Независимо проверить diff и validation evidence, затем закрыть замечания. | Reviewer проверил итог после двух циклов исправлений. | Итоговый verdict: accepted, findings отсутствуют. |
 | STEP-002 | `готово` | REQ-004, REQ-005, VAL-004 | Добавить прямые stage timings и неизменяемый per-run timing report, не нарушив единый range-scan. | Проверены границы стадий, отсутствие двойного учета, failure paths и атомарность report. | Focused tests, `go test ./...`, live catch-up и JSON report inspection — зелёные. |
+| STEP-003 | `готово` | REQ-006—REQ-009, VAL-005, VAL-006, SCOPE-002 | Реализовать bounded media pipeline, независимые Vosk workers, auto-controller и расширенные overlapping-stage metrics. | Проверены последовательность Telegram, backpressure, dedup/cache atomicity, deterministic output и разумность scale-up; поздний auto scale исправлен после первого benchmark. | Focused/race/failure tests, full suite, structural equivalence, cold-cache sequential/1/2/4/auto benchmark — зелёные. |
 
 ## Примечания По Порядку
 - Шаги достаточно маленькие для цикла: реализация, ревью, исправление, проверка, коммит, handoff.

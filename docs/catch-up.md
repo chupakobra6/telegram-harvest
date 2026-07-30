@@ -67,8 +67,9 @@ ZIP-архивы по умолчанию не создаются. В финал�
 - voice, audio и round video транскрибируются, если ASR настроен;
 - обычные video по умолчанию проходят только в режиме `phone`: вертикальное телефонное видео, не длиннее 6 минут, не больше 80 MiB на preflight и не выше 1080x1920;
 - горизонтальные, слишком длинные и слишком большие generic video не отправляются в ASR;
-- модель Vosk загружается один раз на весь catch-up-прогон и переиспользуется между днями;
+- bounded ASR pipeline по умолчанию сам выбирает от одного до четырех независимых Vosk workers; модель загружается один раз в каждом фактически использованном worker и переиспользуется между днями;
 - кэш привязан к Telegram media id, поэтому одно и то же медиа не должно повторно скачиваться и распознаваться;
+- Telegram scan/download остается единственным последовательным producer; конкурентны только локальные `ffmpeg → Vosk`, а collector применяет результаты перед публикацией в детерминированном порядке;
 - временные audio/video удаляются после обработки; пользовательские изображения и документы сохраняются только когда этого требует вид экспорта;
 - ASR/ffmpeg ошибки остаются в машинном логе и не подмешиваются в текст расшифровки.
 
@@ -83,7 +84,7 @@ ZIP-архивы по умолчанию не создаются. В финал�
 5. Проверить созданные даты, `complete=true`, дневные Markdown, `00-latest-catchup.md` и отсутствие технических ошибок в человекочитаемом тексте.
 6. Проверить, что настроенные дополнительные отправители представлены в релевантных днях, но сообщения остальных участников их чатов не попали в daily.
 7. Проверить ASR-статистику: cache/transcribed/skip/error, нулевые временные файлы и отсутствие зависшего helper-процесса.
-8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, Vosk, render, audio seconds, ASR/pipeline speed, dialog checkpoint counters/fallback, total и unaccounted.
+8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, Vosk, render, stage work, audio seconds, ASR/pipeline speed, media pipeline span/overlap/workers/queue и dialog checkpoint counters/fallback.
 9. Для успешного автоматического catch-up проверить `.state/daily/dialog-checkpoint.json`: `account_id`, `scope_fingerprint`, `verified_through`, `complete=true`, `top_message_id`, `verified_message_id` и `head_fully_verified`. Head из следующего, ещё не опубликованного дня не должен иметь `head_fully_verified=true`. `updated_at` не должен меняться после incomplete/error run или ошибки merged publish.
 10. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports, dialog checkpoint или кэш без явной причины.
 
