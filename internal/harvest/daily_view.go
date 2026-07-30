@@ -40,6 +40,7 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 	writeDailySummaryCount(&b, "Чатов с сообщениями", dailyChatCount(records))
 	writeDailySummaryCount(&b, "Вложений", opts.Stats.Attachments)
 	writeDailySummaryCount(&b, "Транскриптов", opts.Stats.Transcripts)
+	writeDailySummaryCount(&b, "Пересланных", opts.Stats.Forwarded)
 	if len(opts.Stats.DialogErrors) > 0 {
 		b.WriteString("\n## Проблемы сбора\n\n")
 		for _, err := range opts.Stats.DialogErrors {
@@ -76,6 +77,10 @@ func writeDailySummaryCount(b *strings.Builder, label string, count int) {
 func writeDailyMessage(b *strings.Builder, record MessageRecord) {
 	b.WriteString(dailyMessageHeader(record))
 	b.WriteString("\n")
+	if label, origin := dailyForwardOrigin(record.Forward); origin != "" {
+		b.WriteString("\n")
+		b.WriteString("  **" + label + ":** " + origin + "\n")
+	}
 	if text := dailyMarkdownText(record.Text); text != "" {
 		b.WriteString("\n")
 		writeDailyQuote(b, text, "  ")
@@ -92,6 +97,34 @@ func writeDailyMessage(b *strings.Builder, record MessageRecord) {
 			writeDailyQuote(b, transcript, "  ")
 		}
 	}
+}
+
+func dailyForwardOrigin(forward *ForwardInfo) (string, string) {
+	if forward == nil {
+		return "", ""
+	}
+	label := "Переслано от"
+	origin := strings.TrimSpace(forward.OriginName)
+	if forward.Origin != nil {
+		if display := strings.TrimSpace(forward.Origin.Display); display != "" {
+			origin = display
+		} else if username := strings.TrimSpace(forward.Origin.Username); username != "" {
+			origin = "@" + strings.TrimPrefix(username, "@")
+		}
+		if forward.Origin.Type == "channel" || forward.Origin.Type == "supergroup" {
+			label = "Переслано из"
+		}
+	}
+	if origin == "" {
+		origin = "источник скрыт Telegram"
+	}
+	if strings.TrimSpace(forward.SourceURL) != "" {
+		origin = markdownLink(origin, forward.SourceURL)
+	}
+	if author := strings.TrimSpace(forward.PostAuthor); author != "" {
+		origin += " · автор: " + author
+	}
+	return label, origin
 }
 
 func dailyMessageHeader(record MessageRecord) string {

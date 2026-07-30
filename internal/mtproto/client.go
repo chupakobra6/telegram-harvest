@@ -685,6 +685,9 @@ func (s *Session) DumpOutgoingDay(ctx context.Context, opts harvest.OutgoingDayO
 		if record.Date.After(stats.LastAt) {
 			stats.LastAt = record.Date
 		}
+		if record.Forward != nil {
+			stats.Forwarded++
+		}
 		for _, attachment := range record.Attachments {
 			stats.Attachments++
 			if strings.TrimSpace(attachment.Transcript) != "" {
@@ -1659,6 +1662,9 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			Links:       mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media)),
 			Attachments: extractAttachments(msg.Media),
 		}
+		if fwd, ok := msg.GetFwdFrom(); ok {
+			record.Forward = forwardInfoFromHeader(fwd, entities)
+		}
 		if replyID, topID := replyInfo(msg.ReplyTo); replyID > 0 || topID > 0 {
 			record.ReplyToMessageID = replyID
 			record.ThreadTopMessageID = topID
@@ -1685,6 +1691,43 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 	default:
 		return harvest.MessageRecord{}, false
 	}
+}
+
+func forwardInfoFromHeader(header tg.MessageFwdHeader, entities peer.Entities) *harvest.ForwardInfo {
+	info := &harvest.ForwardInfo{
+		OriginalDate: time.Unix(int64(header.Date), 0).UTC(),
+		Imported:     header.Imported,
+	}
+	originPeer, hasOriginPeer := header.GetFromID()
+	if !hasOriginPeer {
+		originPeer, hasOriginPeer = header.GetSavedFromPeer()
+	}
+	if hasOriginPeer {
+		origin := senderFromPeer(originPeer, false, entities)
+		info.Origin = &origin
+	}
+	if originName, ok := header.GetFromName(); ok {
+		info.OriginName = strings.TrimSpace(originName)
+	}
+	if info.OriginName == "" && info.Origin != nil {
+		info.OriginName = strings.TrimSpace(info.Origin.Display)
+	}
+	if messageID, ok := header.GetChannelPost(); ok {
+		info.OriginalMessageID = messageID
+	} else if messageID, ok := header.GetSavedFromMsgID(); ok {
+		info.OriginalMessageID = messageID
+	}
+	if postAuthor, ok := header.GetPostAuthor(); ok {
+		info.PostAuthor = strings.TrimSpace(postAuthor)
+	}
+	if info.Origin != nil && info.OriginalMessageID > 0 {
+		info.SourceURL = messageURL(harvest.Chat{
+			ID:       info.Origin.ID,
+			Type:     info.Origin.Type,
+			Username: info.Origin.Username,
+		}, info.OriginalMessageID)
+	}
+	return info
 }
 
 func senderFromPeer(from tg.PeerClass, outgoing bool, entities peer.Entities) harvest.Sender {

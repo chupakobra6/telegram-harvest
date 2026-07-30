@@ -43,6 +43,19 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 			Outgoing:  true,
 			Kind:      "text",
 			Text:      "Запланировал задачу\n\nПроверил формат",
+			Forward: &ForwardInfo{
+				Origin: &Sender{
+					ID:       123,
+					Type:     "channel",
+					Username: "source_channel",
+					Display:  "Source Channel",
+				},
+				OriginName:        "Source Channel",
+				OriginalDate:      start.Add(-24 * time.Hour),
+				OriginalMessageID: 77,
+				SourceURL:         "https://t.me/source_channel/77",
+				PostAuthor:        "Автор",
+			},
 		},
 		{
 			Chat:      Chat{ID: 3, Display: "Haru 🌸"},
@@ -65,6 +78,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 			FloodWaits:     1,
 			Attachments:    1,
 			Transcripts:    1,
+			Forwarded:      1,
 		},
 		Records: records,
 	})
@@ -78,8 +92,10 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		"- Сообщений: 3",
 		"- Вложений: 1",
 		"- Транскриптов: 1",
+		"- Пересланных: 1",
 		"## Хронология",
 		"- **09:00** в **Notes** #10",
+		"  **Переслано из:** [Source Channel](https://t.me/source_channel/77) · автор: Автор",
 		"  > Запланировал задачу\n  >\n  > Проверил формат",
 		"- **10:00** в **Work** [#20](https://t.me/c/2/20)",
 		"  **Вложение:** голосовое",

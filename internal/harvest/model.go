@@ -90,6 +90,7 @@ type MessageRecord struct {
 	Date               time.Time    `json:"date"`
 	Sender             Sender       `json:"sender,omitempty"`
 	Outgoing           bool         `json:"outgoing,omitempty"`
+	Forward            *ForwardInfo `json:"forward,omitempty"`
 	Kind               string       `json:"kind"`
 	Text               string       `json:"text,omitempty"`
 	Topic              *Topic       `json:"topic,omitempty"`
@@ -100,6 +101,16 @@ type MessageRecord struct {
 	Links              []string     `json:"links,omitempty"`
 	Attachments        []Attachment `json:"attachments,omitempty"`
 	RawAction          string       `json:"raw_action,omitempty"`
+}
+
+type ForwardInfo struct {
+	Origin            *Sender   `json:"origin,omitempty"`
+	OriginName        string    `json:"origin_name,omitempty"`
+	OriginalDate      time.Time `json:"original_date"`
+	OriginalMessageID int       `json:"original_message_id,omitempty"`
+	SourceURL         string    `json:"source_url,omitempty"`
+	PostAuthor        string    `json:"post_author,omitempty"`
+	Imported          bool      `json:"imported,omitempty"`
 }
 
 type SyncState struct {
@@ -202,6 +213,7 @@ type OutgoingDayStats struct {
 	DialogErrors       []string  `json:"dialog_errors,omitempty"`
 	Attachments        int       `json:"attachments"`
 	Transcripts        int       `json:"transcripts"`
+	Forwarded          int       `json:"forwarded"`
 	FirstAt            time.Time `json:"first_at,omitempty"`
 	LastAt             time.Time `json:"last_at,omitempty"`
 	Batches            int       `json:"batches"`

@@ -130,6 +130,64 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 	}
 }
 
+func TestNormalizeRecordPreservesForwardOrigin(t *testing.T) {
+	date := time.Date(2026, 7, 22, 0, 46, 0, 0, time.UTC)
+	channel := &tg.Channel{ID: 123, Title: "Source Channel"}
+	channel.SetUsername("source_channel")
+	entities := peer.NewEntities(nil, nil, map[int64]*tg.Channel{123: channel})
+
+	header := tg.MessageFwdHeader{Date: int(date.Add(-24 * time.Hour).Unix())}
+	header.SetFromID(&tg.PeerChannel{ChannelID: 123})
+	header.SetChannelPost(77)
+	header.SetPostAuthor("Автор")
+	message := &tg.Message{
+		ID:      10,
+		Date:    int(date.Unix()),
+		Out:     true,
+		Message: "Пересланный текст",
+	}
+	message.SetFwdFrom(header)
+
+	record, ok := normalizeRecord(message, harvest.Chat{ID: 42, Display: "Saved Messages"}, entities)
+	if !ok {
+		t.Fatal("forwarded message was not normalized")
+	}
+	if record.Forward == nil {
+		t.Fatal("forward metadata is missing")
+	}
+	if record.Forward.Origin == nil || record.Forward.Origin.ID != 123 || record.Forward.Origin.Type != "channel" || record.Forward.Origin.Display != "Source Channel" {
+		t.Fatalf("unexpected forward origin: %+v", record.Forward.Origin)
+	}
+	if record.Forward.OriginName != "Source Channel" {
+		t.Fatalf("origin name = %q", record.Forward.OriginName)
+	}
+	if record.Forward.OriginalMessageID != 77 || record.Forward.SourceURL != "https://t.me/source_channel/77" {
+		t.Fatalf("unexpected source pointer: %+v", record.Forward)
+	}
+	if record.Forward.PostAuthor != "Автор" {
+		t.Fatalf("post author = %q", record.Forward.PostAuthor)
+	}
+	if !record.Forward.OriginalDate.Equal(date.Add(-24 * time.Hour)) {
+		t.Fatalf("original date = %s", record.Forward.OriginalDate)
+	}
+}
+
+func TestNormalizeRecordPreservesHiddenForwardOriginName(t *testing.T) {
+	date := time.Date(2026, 7, 22, 0, 46, 0, 0, time.UTC)
+	header := tg.MessageFwdHeader{Date: int(date.Add(-time.Hour).Unix())}
+	header.SetFromName("Скрытый автор")
+	message := &tg.Message{ID: 11, Date: int(date.Unix()), Out: true, Message: "Пересланный текст"}
+	message.SetFwdFrom(header)
+
+	record, ok := normalizeRecord(message, harvest.Chat{ID: 42, Display: "Saved Messages"}, peer.Entities{})
+	if !ok || record.Forward == nil {
+		t.Fatalf("hidden-origin forward was not normalized: ok=%t record=%+v", ok, record)
+	}
+	if record.Forward.Origin != nil || record.Forward.OriginName != "Скрытый автор" || record.Forward.SourceURL != "" {
+		t.Fatalf("unexpected hidden-origin metadata: %+v", record.Forward)
+	}
+}
+
 func TestWithFloodWaitRetrySleepRetries(t *testing.T) {
 	ctx := context.Background()
 	attempts := 0

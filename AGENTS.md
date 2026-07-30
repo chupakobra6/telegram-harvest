@@ -37,7 +37,7 @@
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.
-- Keep JSONL output stable and source-rich: every record should include chat, message id, date, sender, text/media metadata, and Telegram source pointer.
+- Keep JSONL output stable and source-rich: every record should include chat, message id, date, sender, text/media metadata, Telegram source pointer, and structured `fwd_from` origin metadata for forwarded messages.
 - Treat `.toon` outputs as rebuildable agent views only; JSONL remains the canonical lossless dump.
 - Treat `agent-view/README.md` as the first file agents should open. It points to `all-recent.md`, then chat/topic/day Markdown files so agents do not read raw JSONL by default.
 - Keep `agent-view/.agent-view-state.json` private/generated; it tracks the processed JSONL byte offset for incremental updates and should not be edited by hand.
