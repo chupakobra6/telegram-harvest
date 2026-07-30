@@ -185,12 +185,13 @@ type HistorySource interface {
 }
 
 type OutgoingDayOptions struct {
-	Start          time.Time
-	End            time.Time
-	DialogLimit    int
-	IncludeService bool
-	History        HistoryOptions
-	Progress       func(OutgoingDayProgress) error
+	Start                     time.Time
+	End                       time.Time
+	DialogLimit               int
+	IncludeService            bool
+	AdditionalSenderIDsByChat map[int64][]int64
+	History                   HistoryOptions
+	Progress                  func(OutgoingDayProgress) error
 }
 
 type OutgoingDayStats struct {

@@ -859,11 +859,18 @@ func normalizeOutgoingDayOptions(opts harvest.OutgoingDayOptions) harvest.Outgoi
 }
 
 func (s *Session) searchOutgoingDayInDialog(ctx context.Context, target resolvedTarget, opts harvest.OutgoingDayOptions) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
+	if dailyHasAdditionalSenders(opts, target.Chat.ID) {
+		return s.scanOutgoingDayWithHistory(ctx, target, opts)
+	}
 	records, stats, err := s.searchOutgoingDayWithSearch(ctx, target, opts)
 	if err != nil && isSearchQueryEmpty(err) {
 		return s.scanOutgoingDayWithHistory(ctx, target, opts)
 	}
 	return records, stats, err
+}
+
+func dailyHasAdditionalSenders(opts harvest.OutgoingDayOptions, chatID int64) bool {
+	return len(opts.AdditionalSenderIDsByChat[chatID]) > 0
 }
 
 type outgoingDayBatchLoader func(context.Context, int, int) (tg.MessagesMessagesClass, error)
@@ -1016,7 +1023,7 @@ func (s *Session) normalizeOutgoingDayRecord(
 	if record.Date.Before(opts.Start) || !record.Date.Before(opts.End) {
 		return harvest.MessageRecord{}, false
 	}
-	if !record.Outgoing && !record.Sender.Self {
+	if !record.Outgoing && !record.Sender.Self && !dailyAdditionalSenderAllowed(opts, record.Chat.ID, record.Sender.ID) {
 		return harvest.MessageRecord{}, false
 	}
 	if record.Sender.Display == "" && record.Outgoing {
@@ -1025,6 +1032,18 @@ func (s *Session) normalizeOutgoingDayRecord(
 	ensureDailyAttachments(msgClass, &record)
 	s.downloadRecordMedia(ctx, msgClass, &record, opts.History)
 	return record, true
+}
+
+func dailyAdditionalSenderAllowed(opts harvest.OutgoingDayOptions, chatID int64, senderID int64) bool {
+	if senderID == 0 {
+		return false
+	}
+	for _, allowedSenderID := range opts.AdditionalSenderIDsByChat[chatID] {
+		if senderID == allowedSenderID {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldContinueOutgoingDay(opts harvest.OutgoingDayOptions, batches int) bool {

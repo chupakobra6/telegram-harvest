@@ -192,17 +192,23 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
 	fmt.Fprintln(out, "  --profile main|study  # required account profile")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Primary daily workflow:")
+	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
+	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
+	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Account and discovery:")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Low-level agent primitives:")
 	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media] [--transcribe --asr-log asr.jsonl]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
 	fmt.Fprintln(out, "  agent-view --in messages.jsonl --out-dir agent-view [--recent 300] [--rebuild]")
-	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
-	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
-	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 }
 
 func printError(stderr io.Writer, code int, err error) int {
@@ -219,6 +225,7 @@ func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
 	fmt.Fprintf(out, "runtime_lock=%s\n", cfg.RuntimeLockPath())
 	fmt.Fprintf(out, "state_dir=%s\n", cfg.StateDir)
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
+	fmt.Fprintf(out, "daily_additional_senders=%d\n", cfg.DailyAdditionalSenderCount())
 	fmt.Fprintf(out, "rpc_spacing=%s\n", cfg.RPCSpacing)
 	if includeDailyRuntime {
 		printDailyRuntimeConfig(out, false)
@@ -236,6 +243,7 @@ func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client, inclu
 	fmt.Fprintf(out, "state_dir=%s\n", cfg.StateDir)
 	fmt.Fprintf(out, "state_dir_exists=%t\n", fileExists(cfg.StateDir))
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
+	fmt.Fprintf(out, "daily_additional_senders=%d\n", cfg.DailyAdditionalSenderCount())
 	fmt.Fprintf(out, "read_only=true\n")
 	if includeDailyRuntime {
 		printDailyRuntimeConfig(out, true)
@@ -900,12 +908,13 @@ func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, op
 			history.Transcriber = managedTranscriber
 		}
 	}
+	additionalSenderIDsByChat := dailyAdditionalSenderIDsByChat(cfg)
 	err := withRuntimeLock(cfg, func() error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
 			for _, job := range jobs {
-				if err := runDailyJob(ctx, session, history, opts, job, out); err != nil {
+				if err := runDailyJob(ctx, session, history, opts, job, additionalSenderIDsByChat, out); err != nil {
 					if errors.Is(err, context.Canceled) {
 						fmt.Fprintf(out, "interrupted=true date=%s out=%s\n", job.Date, job.OutputPath)
 						return nil
@@ -962,7 +971,15 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 	return history
 }
 
-func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.HistoryOptions, opts dailyOptions, job dailyJob, out io.Writer) error {
+func runDailyJob(
+	ctx context.Context,
+	session *mtproto.Session,
+	history harvest.HistoryOptions,
+	opts dailyOptions,
+	job dailyJob,
+	additionalSenderIDsByChat map[int64][]int64,
+	out io.Writer,
+) error {
 	records := make([]harvest.MessageRecord, 0)
 	jsonlTempPath, file, err := createAtomicOutput(job.OutputPath)
 	if err != nil {
@@ -1005,12 +1022,13 @@ func runDailyJob(ctx context.Context, session *mtproto.Session, history harvest.
 		return nil
 	}
 	stats, err := session.DumpOutgoingDay(ctx, harvest.OutgoingDayOptions{
-		Start:          job.Start,
-		End:            job.End,
-		DialogLimit:    opts.DialogLimit,
-		IncludeService: opts.IncludeService,
-		History:        jobHistory,
-		Progress:       progress,
+		Start:                     job.Start,
+		End:                       job.End,
+		DialogLimit:               opts.DialogLimit,
+		IncludeService:            opts.IncludeService,
+		AdditionalSenderIDsByChat: additionalSenderIDsByChat,
+		History:                   jobHistory,
+		Progress:                  progress,
 	}, func(record harvest.MessageRecord) error {
 		records = append(records, record)
 		return encoder.Encode(record)
@@ -1538,6 +1556,17 @@ func latestDailyReportDate(reportDir string, before time.Time) (time.Time, bool,
 
 func dailyDialogLimitDefault() int {
 	return mtproto.DefaultDailyDialogLimit()
+}
+
+func dailyAdditionalSenderIDsByChat(cfg config.Config) map[int64][]int64 {
+	if len(cfg.DailyAdditionalSenders) == 0 {
+		return nil
+	}
+	result := make(map[int64][]int64)
+	for _, source := range cfg.DailyAdditionalSenders {
+		result[source.ChatID] = append(result[source.ChatID], source.SenderID)
+	}
+	return result
 }
 
 func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {

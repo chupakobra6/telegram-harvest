@@ -449,6 +449,7 @@ func clearCommandEnv(t *testing.T) {
 		"SESSION_PATH",
 		"STATE_DIR",
 		"ALLOWED_CHATS",
+		"ADDITIONAL_SENDERS",
 		"TRANSCRIBE_CMD",
 		"VOSK_COMMAND",
 		"VOSK_MODEL_PATH",

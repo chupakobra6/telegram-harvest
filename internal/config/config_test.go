@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,6 +75,32 @@ func TestLoadMainUsesDailyEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.StateDir != DefaultMainStateDir {
 		t.Fatalf("main state dir = %s", cfg.StateDir)
+	}
+}
+
+func TestLoadMainParsesDailyAdditionalSenders(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	t.Setenv("TG_HARVEST_DAILY_ADDITIONAL_SENDERS", "3740223926:8718303786, 100:200, 3740223926:8718303786")
+
+	cfg, err := LoadMain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DailyAdditionalSenderCount() != 2 {
+		t.Fatalf("additional senders = %#v", cfg.DailyAdditionalSenders)
+	}
+	if got := cfg.DailyAdditionalSenders[0]; got.ChatID != 3740223926 || got.SenderID != 8718303786 {
+		t.Fatalf("first additional sender = %#v", got)
+	}
+}
+
+func TestLoadMainRejectsInvalidDailyAdditionalSender(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	t.Setenv("TG_HARVEST_DAILY_ADDITIONAL_SENDERS", "3740223926")
+
+	_, err := LoadMain()
+	if err == nil || !strings.Contains(err.Error(), "TG_HARVEST_DAILY_ADDITIONAL_SENDERS") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -295,6 +322,7 @@ func clearTelegramConfigEnv(t *testing.T) {
 		"SESSION_PATH",
 		"STATE_DIR",
 		"ALLOWED_CHATS",
+		"ADDITIONAL_SENDERS",
 	}
 	for _, prefix := range prefixes {
 		for _, suffix := range suffixes {

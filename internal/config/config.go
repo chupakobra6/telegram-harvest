@@ -23,15 +23,21 @@ const (
 )
 
 type Config struct {
-	Mode         Mode
-	AppID        int
-	AppHash      string
-	Phone        string
-	Password     string
-	SessionPath  string
-	StateDir     string
-	AllowedChats []string
-	RPCSpacing   time.Duration
+	Mode                   Mode
+	AppID                  int
+	AppHash                string
+	Phone                  string
+	Password               string
+	SessionPath            string
+	StateDir               string
+	AllowedChats           []string
+	DailyAdditionalSenders []DailyAdditionalSender
+	RPCSpacing             time.Duration
+}
+
+type DailyAdditionalSender struct {
+	ChatID   int64
+	SenderID int64
 }
 
 type Mode string
@@ -93,16 +99,24 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 	if err != nil {
 		return Config{}, err
 	}
+	additionalSenders := []DailyAdditionalSender(nil)
+	if mode == ModeMain {
+		additionalSenders, err = parseDailyAdditionalSenders(firstEnv(envKeys(mode, "ADDITIONAL_SENDERS")...))
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", envKeys(mode, "ADDITIONAL_SENDERS")[0], err)
+		}
+	}
 	return Config{
-		Mode:         mode,
-		AppID:        appID,
-		AppHash:      firstEnv(envKeys(mode, "APP_HASH")...),
-		Phone:        firstEnv(envKeys(mode, "PHONE")...),
-		Password:     firstEnv(envKeys(mode, "PASSWORD")...),
-		SessionPath:  defaultString(firstEnv(envKeys(mode, "SESSION_PATH")...), defaultSessionPath),
-		StateDir:     defaultString(firstEnv(envKeys(mode, "STATE_DIR")...), defaultStateDir),
-		AllowedChats: splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...)),
-		RPCSpacing:   time.Duration(DefaultRPCSpacingMS) * time.Millisecond,
+		Mode:                   mode,
+		AppID:                  appID,
+		AppHash:                firstEnv(envKeys(mode, "APP_HASH")...),
+		Phone:                  firstEnv(envKeys(mode, "PHONE")...),
+		Password:               firstEnv(envKeys(mode, "PASSWORD")...),
+		SessionPath:            defaultString(firstEnv(envKeys(mode, "SESSION_PATH")...), defaultSessionPath),
+		StateDir:               defaultString(firstEnv(envKeys(mode, "STATE_DIR")...), defaultStateDir),
+		AllowedChats:           splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...)),
+		DailyAdditionalSenders: additionalSenders,
+		RPCSpacing:             time.Duration(DefaultRPCSpacingMS) * time.Millisecond,
 	}, nil
 }
 
@@ -152,6 +166,10 @@ func (c Config) ChatAllowed(chat string) bool {
 
 func (c Config) AllowedChatCount() int {
 	return len(c.AllowedChats)
+}
+
+func (c Config) DailyAdditionalSenderCount() int {
+	return len(c.DailyAdditionalSenders)
 }
 
 func (c Config) ValidateRuntime() error {
@@ -212,6 +230,33 @@ func defaultString(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func parseDailyAdditionalSenders(value string) ([]DailyAdditionalSender, error) {
+	items := splitList(value)
+	result := make([]DailyAdditionalSender, 0, len(items))
+	seen := make(map[DailyAdditionalSender]struct{}, len(items))
+	for _, item := range items {
+		parts := strings.Split(item, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("expected comma-separated chat_id:sender_id pairs")
+		}
+		chatID, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		if err != nil || chatID == 0 {
+			return nil, fmt.Errorf("invalid chat id in %q", item)
+		}
+		senderID, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || senderID == 0 {
+			return nil, fmt.Errorf("invalid sender id in %q", item)
+		}
+		source := DailyAdditionalSender{ChatID: chatID, SenderID: senderID}
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		result = append(result, source)
+	}
+	return result, nil
 }
 
 func firstEnv(keys ...string) string {

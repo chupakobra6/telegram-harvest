@@ -3,7 +3,7 @@
 Локальный read-only CLI для сбора Telegram-данных через MTProto user authorization.
 Проект рассчитан на два практических сценария:
 
-- **daily reports** - личные исходящие сообщения за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через Vosk;
+- **daily reports** - личные исходящие сообщения и настроенные chat-scoped источники за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через Vosk;
 - **study harvest** - выгрузка, синк и агентские Markdown-представления для учебных чатов из allowlist.
 
 CLI один и тот же для всех сценариев. Аккаунт выбирается профилем `main` или `study`, а не отдельными account-specific командами.
@@ -14,7 +14,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | --- | --- |
 | Авторизация | MTProto user session через `login` и явные API credentials для каждого профиля. |
 | Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей/env нет. |
-| Daily | Сканирует диалоги за один московский день и пишет только outgoing/self сообщения авторизованного аккаунта. |
+| Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
 | Vosk | Go helper `bin/vosk-transcribe` работает как session worker: модель грузится один раз на запуск `daily`. |
@@ -38,6 +38,8 @@ TG_HARVEST_DAILY_APP_ID=12345678
 TG_HARVEST_DAILY_APP_HASH=main_account_app_hash
 # Опционально: если не задано, `login` спросит номер интерактивно.
 # TG_HARVEST_DAILY_PHONE=+10000000000
+# Опционально: дополнительные источники daily как chat_id:sender_id.
+# TG_HARVEST_DAILY_ADDITIONAL_SENDERS=3740223926:8718303786
 
 # Учебный аккаунт:
 TG_HARVEST_STUDY_APP_ID=12345678
@@ -110,6 +112,8 @@ reports/daily/YYYY-MM-DD.md
 
 Markdown в `reports/daily` - основной человекочитаемый результат. Он содержит время, чат назначения, текст сообщения, Markdown-ссылку на Telegram-сообщение когда она доступна, короткие сведения о вложениях и транскрипты без технических путей, размеров, cache-полей, ASR/ffmpeg ошибок и runtime-сводки вроде периода или числа просканированных диалогов.
 
+По умолчанию daily оставляет только outgoing/self. `TG_HARVEST_DAILY_ADDITIONAL_SENDERS` может добавить выбранных отправителей строго внутри выбранных чатов. Для пары `3740223926:8718303786` сообщения Trackmate из Haru попадают в ту же хронологию и помечаются именем отправителя; сообщения остальных участников Haru отфильтровываются.
+
 JSONL в `.state/daily/jsonl` - технический audit/source layer. Он хранит raw-поля вроде `media_id`, `local_path`, `transcript_path`, `download_hint` и нужен для отладки, пересборки и анализа, но не является пользовательским отчетом.
 
 ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Он пишется даже для прерванных прогонов.
@@ -139,7 +143,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup
 go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 ```
 
-Каноническое описание слова «catch-up», специальных full-chat/full-account выгрузок, медиа, ASR и проверок готовности находится в [`docs/catch-up.md`](docs/catch-up.md). Запрос без уточнений всегда означает обычный `main` daily catch-up; полные выгрузки других участников требуют явно заданных чата или аккаунта и периода.
+Каноническое описание слова «catch-up», daily scope, медиа, ASR и проверок готовности находится в [`docs/catch-up.md`](docs/catch-up.md). `daily`/`daily-catchup` — единственный пользовательский catch-up flow.
 
 ## Telegram pacing
 
@@ -307,7 +311,9 @@ make dump PROFILE=main CHAT=1234567890 \
 
 `FROM` включается, `TO` не включается. Транскрибация у `dump` требует явного `TRANSCRIBE=1` и доступна только профилю `main`; обычное поведение `study` не меняется.
 
-## Agent views
+## Низкоуровневые кирпичи для агентов
+
+`dump` и `sync` получают lossless JSONL одного чата. `compact` и `agent-view` не являются пользовательскими catch-up командами: они преобразуют уже собранный JSONL, когда агенту нужно работать с большим учебным корпусом. Daily их не запускает, потому что `reports/daily/*.md` уже является его готовым компактным представлением.
 
 JSONL - canonical lossless source. Markdown/TOON - производные представления, их можно пересобрать:
 
@@ -353,7 +359,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --help
 ## Safety model
 
 - Telegram operations read-only: никаких send/click/delete/join/pin/mark-read.
-- Broad full-account daily scan пишет только outgoing/self messages.
+- Broad daily scan пишет только outgoing/self messages и явно настроенных sender IDs строго в их настроенных chat IDs.
 - Study scope ограничивается `TG_HARVEST_STUDY_ALLOWED_CHATS`, когда allowlist задан.
 - `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, dumps и generated views приватные и не коммитятся.
 - Live Telegram поведение проверяется вручную после логина; автоматические тесты покрывают локальную логику, config, state, rendering и helpers.

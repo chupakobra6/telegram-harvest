@@ -78,6 +78,58 @@ func TestHistoryTimeBounds(t *testing.T) {
 	}
 }
 
+func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
+	opts := harvest.OutgoingDayOptions{
+		AdditionalSenderIDsByChat: map[int64][]int64{
+			3740223926: {8718303786},
+		},
+	}
+	if !dailyHasAdditionalSenders(opts, 3740223926) {
+		t.Fatal("configured chat should use daily history scan")
+	}
+	if dailyHasAdditionalSenders(opts, 123) {
+		t.Fatal("unconfigured chat should keep outgoing search")
+	}
+	if !dailyAdditionalSenderAllowed(opts, 3740223926, 8718303786) {
+		t.Fatal("configured sender should be included")
+	}
+	if dailyAdditionalSenderAllowed(opts, 3740223926, 42) {
+		t.Fatal("other sender in configured chat should be excluded")
+	}
+	if dailyAdditionalSenderAllowed(opts, 123, 8718303786) {
+		t.Fatal("configured sender should be excluded from other chats")
+	}
+
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	opts.Start = start
+	opts.End = start.AddDate(0, 0, 1)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 3740223926, Display: "Haru 🌸"}}
+	entities := peer.NewEntities(map[int64]*tg.User{
+		8718303786: {ID: 8718303786, FirstName: "Трекмейт", Bot: true},
+		42:         {ID: 42, FirstName: "Другой участник"},
+	}, nil, nil)
+	session := &Session{}
+
+	trackmate, ok := session.normalizeOutgoingDayRecord(context.Background(), &tg.Message{
+		ID:      1,
+		Date:    int(start.Add(time.Hour).Unix()),
+		FromID:  &tg.PeerUser{UserID: 8718303786},
+		Message: "daily summary",
+	}, target, entities, nil, opts)
+	if !ok || trackmate.Sender.ID != 8718303786 || !trackmate.Sender.Bot {
+		t.Fatalf("Trackmate record was not included: ok=%t record=%+v", ok, trackmate)
+	}
+
+	if _, ok := session.normalizeOutgoingDayRecord(context.Background(), &tg.Message{
+		ID:      2,
+		Date:    int(start.Add(2 * time.Hour).Unix()),
+		FromID:  &tg.PeerUser{UserID: 42},
+		Message: "not part of daily",
+	}, target, entities, nil, opts); ok {
+		t.Fatal("other Haru participant should be excluded from daily")
+	}
+}
+
 func TestWithFloodWaitRetrySleepRetries(t *testing.T) {
 	ctx := context.Background()
 	attempts := 0

@@ -36,7 +36,7 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# Telegram-отчет за %s\n\n", dateLabel))
 	b.WriteString("## Сводка\n\n")
-	writeDailySummaryCount(&b, "Исходящих сообщений", len(records))
+	writeDailySummaryCount(&b, "Сообщений", len(records))
 	writeDailySummaryCount(&b, "Чатов с сообщениями", dailyChatCount(records))
 	writeDailySummaryCount(&b, "Вложений", opts.Stats.Attachments)
 	writeDailySummaryCount(&b, "Транскриптов", opts.Stats.Transcripts)
@@ -48,7 +48,7 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 	}
 	b.WriteString("\n## Хронология\n\n")
 	if len(records) == 0 {
-		b.WriteString("Исходящих сообщений за этот день не найдено.\n")
+		b.WriteString("Сообщений за этот день не найдено.\n")
 		return b.String()
 	}
 	lastHour := ""
@@ -103,6 +103,16 @@ func dailyMessageHeader(record MessageRecord) string {
 	ref := fmt.Sprintf("#%d", record.MessageID)
 	if strings.TrimSpace(record.SourceURL) != "" {
 		ref = fmt.Sprintf("[#%d](%s)", record.MessageID, record.SourceURL)
+	}
+	if !record.Outgoing && !record.Sender.Self {
+		sender := strings.TrimSpace(record.Sender.Display)
+		if sender == "" {
+			sender = displaySender(record.Sender)
+		}
+		if sender == "" {
+			sender = "неизвестный отправитель"
+		}
+		return fmt.Sprintf("- **%s**, **%s** в **%s** %s", timeLabel, sender, destination, ref)
 	}
 	return fmt.Sprintf("- **%s** в **%s** %s", timeLabel, destination, ref)
 }

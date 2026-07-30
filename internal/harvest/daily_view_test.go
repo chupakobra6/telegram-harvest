@@ -18,6 +18,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 			MessageID: 20,
 			SourceURL: "https://t.me/c/2/20",
 			Date:      start.Add(10 * time.Hour),
+			Outgoing:  true,
 			Kind:      "voice",
 			Attachments: []Attachment{
 				{
@@ -39,8 +40,18 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 			Chat:      Chat{ID: 1, Display: "Notes"},
 			MessageID: 10,
 			Date:      start.Add(9 * time.Hour),
+			Outgoing:  true,
 			Kind:      "text",
 			Text:      "Запланировал задачу\n\nПроверил формат",
+		},
+		{
+			Chat:      Chat{ID: 3, Display: "Haru 🌸"},
+			MessageID: 30,
+			SourceURL: "https://t.me/c/3/30",
+			Date:      start.Add(11 * time.Hour),
+			Sender:    Sender{ID: 8718303786, Username: "yaminotrackmatebot", Display: "Трекмейт", Bot: true},
+			Kind:      "text",
+			Text:      "🌿 Рутина Игоря за четверг",
 		},
 	}
 	err := WriteDailyMarkdown(DailyMarkdownOptions{
@@ -64,7 +75,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 	for _, want := range []string{
 		"# Telegram-отчет за 2026-06-05",
 		"## Сводка",
-		"- Исходящих сообщений: 2",
+		"- Сообщений: 3",
 		"- Вложений: 1",
 		"- Транскриптов: 1",
 		"## Хронология",
@@ -73,6 +84,8 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		"- **10:00** в **Work** [#20](https://t.me/c/2/20)",
 		"  **Вложение:** голосовое",
 		"  **Транскрипт:**\n  > Поговорил про итоги дня",
+		"- **11:00**, **Трекмейт** в **Haru 🌸** [#30](https://t.me/c/3/30)",
+		"  > 🌿 Рутина Игоря за четверг",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("markdown missing %q:\n%s", want, content)

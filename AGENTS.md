@@ -2,16 +2,16 @@
 
 ## Project Overview
 - Local Go CLI for read-only Telegram harvesting through MTProto user authorization.
-- The tool exports selected study chat data and daily outgoing personal context for downstream automation and agent reads.
+- The tool exports selected study chat data and daily personal context for downstream automation and agent reads.
 - Keep runtime credentials, sessions, state, dumps, and generated agent views out of git.
-- Study runtime scope is the configured study-chat allowlist; main-profile daily harvest scope is outgoing/self messages for one day under the main account config.
+- Study runtime scope is the configured study-chat allowlist; main-profile daily harvest scope is outgoing/self messages plus configured chat-scoped additional senders for one day.
 
 ## Safety
 - Read-only is a hard boundary: do not add commands that send messages, click buttons, delete messages, pin/unpin, join chats, mark chats read, or mutate Telegram state.
 - Keep Telegram API calls sequential and paced. Do not add concurrent history crawlers.
 - Treat `.env`, `.sessions/`, `.state/`, dumps, and chat exports as private local data.
 - Never print app hashes, passwords, session data, or full phone numbers.
-- Do not keep broad dumps of other people's messages in repo-local `.state/`; daily full-dialog scans must emit only outgoing/self records into the configured daily state directory.
+- Do not keep broad dumps of other people's messages in repo-local `.state/`; daily full-dialog scans may emit only outgoing/self records and explicitly configured sender IDs scoped to their configured chat IDs.
 
 ## Commands
 - Install/update dependencies: `go mod tidy`
@@ -19,7 +19,7 @@
 - Tests: `go test ./...`
 - Doctor: `go run ./cmd/telegram-harvest --profile <main|study> doctor`
 - Login: `go run ./cmd/telegram-harvest --profile <main|study> login`
-- Daily outgoing harvest: `go run ./cmd/telegram-harvest --profile main daily --date yesterday`
+- Daily harvest: `go run ./cmd/telegram-harvest --profile main daily --date yesterday`
 - Daily catch-up through yesterday: `go run ./cmd/telegram-harvest --profile main daily-catchup`
 - List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
 - List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
@@ -31,9 +31,8 @@
 - Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
 
 ## Catch-up requests
-- Read `docs/catch-up.md` before handling a user request phrased as "catch-up" or "катчап". It is the canonical definition of the default daily catch-up, the explicit full-chat/full-account variants, output rules, media handling, and completion checks.
-- An unqualified catch-up means the standard `main` profile daily catch-up through yesterday. Do not silently widen it to other people's messages or a full-account export.
-- Full-chat and full-account catch-ups require an explicit scope and date range. They are special export workflows, not aliases for `daily-catchup`.
+- Read `docs/catch-up.md` before handling a user request phrased as "catch-up" or "катчап". It is the canonical definition of daily scope, output rules, media handling, and completion checks.
+- A catch-up means the standard `main` profile daily catch-up through yesterday. Do not invent separate full-chat or full-account catch-up formats; `dump` and `sync` are low-level data primitives, not user-facing catch-up workflows.
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.
@@ -45,6 +44,7 @@
 - Keep generated `agent-view/AGENTS.md` and `agent-view/README.md` aligned whenever changing the agent read path; they are the agent-facing navigation source of truth.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
 - Main profile uses `TG_HARVEST_DAILY_*`. Study profile uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
+- `TG_HARVEST_DAILY_ADDITIONAL_SENDERS` contains comma-separated `chat_id:sender_id` pairs. Additional senders must remain scoped to their configured chats; never include all incoming messages from those chats.
 - CLI commands must receive `--profile main|study`; do not add command-based profile defaults or profile env fallbacks.
 - Telegram pacing/history defaults are code-owned; do not add env knobs for RPC spacing, history batch size, history limit, max batches, or dialog limit.
 - Both profiles use explicit Telegram API credentials and CLI `login`; do not read or import Telegram Desktop `tdata`.
