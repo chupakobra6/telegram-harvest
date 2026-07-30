@@ -21,7 +21,7 @@ help:
 	@printf "  make doctor PROFILE=main|study # show config/session status\\n"
 	@printf "  make login PROFILE=main|study  # create MTProto user session\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
-	@printf "  make daily-catchup PROFILE=main # generate missing reports through yesterday\\n"
+	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make chats PROFILE=study # list dialogs; pass QUERY='вшэ' to filter\\n"
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"

@@ -324,6 +324,9 @@ func TestBuildDailyCatchupPlanSkipsExistingReportsFromManualStart(t *testing.T) 
 	if strings.Join(plan.Skipped, ",") != "2026-06-04" {
 		t.Fatalf("skipped=%v", plan.Skipped)
 	}
+	if got := strings.Join(dailyCatchupDates(plan), ","); got != "2026-06-03,2026-06-04,2026-06-05,2026-06-06" {
+		t.Fatalf("merged dates=%s", got)
+	}
 }
 
 func TestBuildDailyCatchupPlanRequiresManualStartWithoutReports(t *testing.T) {

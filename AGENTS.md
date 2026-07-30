@@ -33,6 +33,7 @@
 ## Catch-up requests
 - Read `docs/catch-up.md` before handling a user request phrased as "catch-up" or "катчап". It is the canonical definition of daily scope, output rules, media handling, and completion checks.
 - A catch-up means the standard `main` profile daily catch-up through yesterday. Do not invent separate full-chat or full-account catch-up formats; `dump` and `sync` are low-level data primitives, not user-facing catch-up workflows.
+- A successful `daily-catchup` must atomically publish `reports/daily/00-latest-catchup.md` from every daily report in that run's range. Treat individual `YYYY-MM-DD.md` files as the sources and the merged file as the handoff view.
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.

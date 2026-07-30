@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -768,12 +769,23 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 		}
 	}
 	if len(plan.Jobs) == 0 {
-		fmt.Fprintf(out, "catchup up_to_date=true last_report=%s today=%s report_dir=%s skipped=%d\n",
+		mergedPath := ""
+		if dates := dailyCatchupDates(plan); len(dates) > 0 {
+			mergedPath, err = publishDailyCatchupMarkdown(reportDir, dates)
+			if err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(out, "catchup up_to_date=true last_report=%s today=%s report_dir=%s skipped=%d",
 			plan.LastReport,
 			plan.Today,
 			reportDir,
 			len(plan.Skipped),
 		)
+		if mergedPath != "" {
+			fmt.Fprintf(out, " merged=%s", mergedPath)
+		}
+		fmt.Fprintln(out)
 		return nil
 	}
 	fmt.Fprintf(out, "catchup start=%s end=%s today=%s report_dir=%s planned=%d skipped=%d\n",
@@ -787,7 +799,11 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 	if err := runDailyJobs(cfg, client, plan.Jobs, dailyOpts, out); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "catchup complete=true generated=%d skipped=%d\n", len(plan.Jobs), len(plan.Skipped))
+	mergedPath, err := publishDailyCatchupMarkdown(reportDir, dailyCatchupDates(plan))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "catchup complete=true generated=%d skipped=%d merged=%s\n", len(plan.Jobs), len(plan.Skipped), mergedPath)
 	return nil
 }
 
@@ -891,6 +907,42 @@ type dailyCatchupPlan struct {
 	Skipped    []string
 	LastReport string
 	Today      string
+}
+
+func dailyCatchupDates(plan dailyCatchupPlan) []string {
+	dates := make([]string, 0, len(plan.Jobs)+len(plan.Skipped))
+	dates = append(dates, plan.Skipped...)
+	for _, job := range plan.Jobs {
+		dates = append(dates, job.Date)
+	}
+	sort.Strings(dates)
+	return dates
+}
+
+func publishDailyCatchupMarkdown(reportDir string, dates []string) (string, error) {
+	outputPath := filepath.Join(reportDir, harvest.DailyLatestCatchupFilename)
+	tempPath, err := createAtomicTextPath(outputPath)
+	if err != nil {
+		return "", err
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := harvest.WriteDailyCatchupMarkdown(harvest.DailyCatchupMarkdownOptions{
+		OutputPath: tempPath,
+		ReportDir:  reportDir,
+		Dates:      dates,
+	}); err != nil {
+		return "", err
+	}
+	if err := publishAtomicOutput(tempPath, outputPath); err != nil {
+		return "", err
+	}
+	published = true
+	return outputPath, nil
 }
 
 func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, opts dailyOptions, out io.Writer) error {
