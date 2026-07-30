@@ -395,6 +395,27 @@ func TestMediaPipelineAutoGrowsOnlyWithResourceHeadroom(t *testing.T) {
 	}
 }
 
+func TestMediaPipelineWhisperAutoUsesOneGPUWorker(t *testing.T) {
+	harness := &pipelineHarness{}
+	opts := harvest.HistoryOptions{
+		TranscribeMedia:    true,
+		ASRBackend:         transcribe.BackendWhisperCPP,
+		ASRWorkerMode:      asrWorkerAuto,
+		TranscriberFactory: harness.factory(0, 1, time.Millisecond, false, nil),
+	}
+	pipeline, err := newMediaPipeline(t.Context(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pipeline.cfg.MaxWorkers != 1 {
+		t.Fatalf("max workers = %d, want 1", pipeline.cfg.MaxWorkers)
+	}
+	if pipeline.cfg.WorkerPolicy.Dynamic {
+		t.Fatalf("whisper policy = %+v, want non-dynamic", pipeline.cfg.WorkerPolicy)
+	}
+	pipeline.abort()
+}
+
 func strconvItoa(value int) string {
 	return string(rune('a' + value))
 }

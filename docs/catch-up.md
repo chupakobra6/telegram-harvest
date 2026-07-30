@@ -67,13 +67,13 @@ ZIP-архивы по умолчанию не создаются. В финал�
 - voice, audio и round video транскрибируются, если ASR настроен;
 - обычные video по умолчанию проходят только в режиме `phone`: вертикальное телефонное видео, не длиннее 6 минут, не больше 80 MiB на preflight и не выше 1080x1920;
 - горизонтальные, слишком длинные и слишком большие generic video не отправляются в ASR;
-- bounded ASR pipeline по умолчанию сам выбирает от одного до четырех независимых Vosk workers; модель загружается один раз в каждом фактически использованном worker и переиспользуется между днями;
-- кэш привязан к Telegram media id, поэтому одно и то же медиа не должно повторно скачиваться и распознаваться;
-- Telegram scan/download остается единственным последовательным producer; конкурентны только локальные `ffmpeg → Vosk`, а collector применяет результаты перед публикацией в детерминированном порядке;
+- bounded ASR pipeline использует backend-specific policy: Vosk CPU может динамически вырасти до четырёх workers, whisper.cpp Metal/Core ML в `auto` использует один GPU worker; модель загружается один раз в каждом фактически активированном worker и переиспользуется между днями;
+- кэш привязан к Telegram media id и ASR backend/model/accelerator/config, поэтому одно и то же медиа переиспользуется только при той же транскрипционной конфигурации;
+- Telegram scan/download остается единственным последовательным producer; конкурентны только локальные `ffmpeg → ASR`, а collector применяет результаты перед публикацией в детерминированном порядке;
 - временные audio/video удаляются после обработки; пользовательские изображения и документы сохраняются только когда этого требует вид экспорта;
 - ASR/ffmpeg ошибки остаются в машинном логе и не подмешиваются в текст расшифровки.
 
-Транскрибация аудиодорожки и анализ изображения — разные операции. Vosk не описывает скриншоты и кадры. Для полного визуального разбора нужен отдельный vision/OCR-проход, после которого текстовые описания добавляются рядом с медиа; сами изображения можно удалить только после проверки полноты описаний и если пользователь это разрешил.
+Транскрибация аудиодорожки и анализ изображения — разные операции. ASR не описывает скриншоты и кадры. Для полного визуального разбора нужен отдельный vision/OCR-проход, после которого текстовые описания добавляются рядом с медиа; сами изображения можно удалить только после проверки полноты описаний и если пользователь это разрешил.
 
 ## Порядок выполнения
 
@@ -84,7 +84,7 @@ ZIP-архивы по умолчанию не создаются. В финал�
 5. Проверить созданные даты, `complete=true`, дневные Markdown, `00-latest-catchup.md` и отсутствие технических ошибок в человекочитаемом тексте.
 6. Проверить, что настроенные дополнительные отправители представлены в релевантных днях, но сообщения остальных участников их чатов не попали в daily.
 7. Проверить ASR-статистику: cache/transcribed/skip/error, нулевые временные файлы и отсутствие зависшего helper-процесса.
-8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, Vosk, render, stage work, audio seconds, ASR/pipeline speed, media pipeline span/overlap/workers/queue и dialog checkpoint counters/fallback.
+8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, ASR, render, stage work, audio seconds, ASR/pipeline speed, backend/model/accelerator, media pipeline span/overlap/workers/queue/resources и dialog checkpoint counters/fallback.
 9. Для успешного автоматического catch-up проверить `.state/daily/dialog-checkpoint.json`: `account_id`, `scope_fingerprint`, `verified_through`, `complete=true`, `top_message_id`, `verified_message_id` и `head_fully_verified`. Head из следующего, ещё не опубликованного дня не должен иметь `head_fully_verified=true`. `updated_at` не должен меняться после incomplete/error run или ошибки merged publish.
 10. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports, dialog checkpoint или кэш без явной причины.
 

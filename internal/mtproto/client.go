@@ -2239,7 +2239,8 @@ func (s *Session) transcribeAttachmentMedia(
 	if !transcriptMediaKind(attachment.Kind) {
 		return
 	}
-	transcriptPath := transcriptCachePath(opts.TranscriptDir, *record, index, *attachment)
+	transcribeOpts := transcribeOptions(opts)
+	transcriptPath := transcriptCachePath(opts.TranscriptDir, transcribeOpts.CacheIdentity(), *record, index, *attachment)
 	attachment.TranscriptPath = transcriptPath
 	if transcript, err := readTranscriptFile(transcriptPath); err == nil {
 		attachment.Transcript = transcript
@@ -2262,7 +2263,6 @@ func (s *Session) transcribeAttachmentMedia(
 		emitASRLog(opts, asrLogEvent("skip", "size", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
-	transcribeOpts := transcribeOptions(opts)
 	if opts.Transcriber == nil && opts.TranscriberFactory == nil && !transcribeOpts.Configured() {
 		attachment.TranscriptError = "transcription is not configured"
 		emitASRLog(opts, asrLogEvent("skip", "config", attachment.TranscriptError, *record, index, *attachment))
@@ -2546,11 +2546,11 @@ func touchTranscriptFile(path string) {
 	_ = os.Chtimes(path, now, now)
 }
 
-func transcriptCachePath(transcriptDir string, record harvest.MessageRecord, index int, attachment harvest.Attachment) string {
+func transcriptCachePath(transcriptDir string, backendIdentity string, record harvest.MessageRecord, index int, attachment harvest.Attachment) string {
 	if strings.TrimSpace(transcriptDir) == "" {
 		transcriptDir = "transcripts"
 	}
-	key := transcriptCacheKey(record, index, attachment)
+	key := strings.TrimSpace(backendIdentity) + ":" + transcriptCacheKey(record, index, attachment)
 	sum := sha256.Sum256([]byte(key))
 	hash := hex.EncodeToString(sum[:])
 	kind := safePathSegment(attachment.Kind)
@@ -2601,12 +2601,19 @@ func createTemporaryMediaPath(mediaDir string, fileName string) (string, error) 
 
 func transcribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 	return transcribe.Options{
-		CommandTemplate: opts.TranscribeCommand,
-		VoskCommand:     opts.VoskCommand,
-		VoskModelPath:   opts.VoskModelPath,
-		VoskGrammarPath: opts.VoskGrammarPath,
-		FFmpegCommand:   opts.FFmpegCommand,
-		StageTiming:     opts.StageTiming,
+		CommandTemplate:     opts.TranscribeCommand,
+		Backend:             opts.ASRBackend,
+		VoskCommand:         opts.VoskCommand,
+		VoskModelPath:       opts.VoskModelPath,
+		VoskGrammarPath:     opts.VoskGrammarPath,
+		WhisperCommand:      opts.WhisperCommand,
+		WhisperModelPath:    opts.WhisperModelPath,
+		WhisperAccelerator:  opts.WhisperAccelerator,
+		WhisperThreads:      opts.WhisperThreads,
+		WhisperVADModelPath: opts.WhisperVADModelPath,
+		Language:            opts.ASRLanguage,
+		FFmpegCommand:       opts.FFmpegCommand,
+		StageTiming:         opts.StageTiming,
 	}
 }
 

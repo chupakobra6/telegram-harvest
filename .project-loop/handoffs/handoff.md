@@ -4,10 +4,10 @@
 Обновлено: 2026-07-30
 
 ## Цель
-- Ускорить cold-cache daily через bounded local media pipeline и безопасный auto-пул независимых Vosk workers, не меняя Telegram/data safety.
+- Реализовать и доказательно сравнить общий ASR backend: Vosk CPU, whisper.cpp Metal и Metal + Core ML, сохранив Telegram/data safety и daily contract.
 
 ## Текущий Шаг
-- active step: `STEP-003`
+- active step: `STEP-004`
 - status: `готово`
 
 ## Завершено
@@ -21,6 +21,10 @@
 - `REQ-007`: `auto` стартует с одного logical worker и активирует до четырех только при queued backlog, выгоде выше startup и CPU/memory headroom; fixed `1..4` — diagnostic override.
 - `REQ-008`: in-flight media dedup, atomic transcript cache и deterministic collector сохраняют content/order.
 - `REQ-009`: timing report хранит work-seconds отдельно от pipeline span/overlap и per-worker startup/RSS/jobs/audio/speed.
+- `REQ-010`: единый typed ASR contract реализован для Vosk, whisper.cpp и custom command; WAV upload в long-lived whisper-server потоковый.
+- `REQ-011`: auto policy backend-specific — динамический CPU pool для Vosk и ровно один GPU worker для Whisper Metal/Core ML.
+- `REQ-012`: Metal и Metal + Core ML собраны и проверяются по runtime evidence; model/quantization/accelerator/binary/decode config изолированы в transcript cache.
+- `REQ-013`: developer benchmark сравнивает 6 вариантов на одном real corpus по performance, resources, quality и failure/empty/hallucination counts.
 
 ## Измененные Файлы
 - `cmd/telegram-harvest/main.go`, `cmd/telegram-harvest/main_test.go`
@@ -31,6 +35,8 @@
 - `README.md`, `AGENTS.md`, `docs/catch-up.md`, `docs/performance.md`
 - `.project-loop/`, `inbox/README.md`
 - `internal/mtproto/media_pipeline.go` и тесты, `internal/stages/stages.go`
+- `internal/transcribe/backend.go`, `internal/transcribe/whisper_server.go` и тесты
+- `internal/asrbench/`, `cmd/asr-benchmark/`
 
 ## Проверка
 - `gofmt`, `git diff --check`, `go test ./...`, `loopctl.py validate` — зелёные.
@@ -45,6 +51,12 @@
 - Во всех cold runs: 210 records, 21 attachments, 3 ASR jobs, 170.284 s audio, 0 FloodWait; normalized JSONL и raw Markdown идентичны.
 - Warm cache: 44.90 s, download/ffmpeg/model/Vosk/span 0, workers peak 0, user CPU 0.05 s.
 - `go test ./...`, `go vet ./...`, focused `-race`, `TestMediaPipeline` ×20, `git diff --check`, Project Loop validation — зелёные.
+- ASR corpus: 3 Telegram media, 170.284 s, hash `ba03ca…16c4`; 6 variants × 3 fresh process runs.
+- Current benchmark: Vosk 6.06×; small Metal 39.02×; small Core ML 37.69×; small q5_1 Metal 48.63×; turbo q5_0 Metal 29.37×; turbo + VAD 36.26×.
+- Core ML small оказался на 4.7% медленнее plain Metal pipeline и потребовал примерно на 513 MiB больше peak RSS. VAD убрал non-speech hallucination, но порезал speech.
+- Выбран рекомендуемый quality-first профиль: large-v3-turbo-q5_0 Metal, один worker, без VAD. Built-in default остаётся Vosk из-за внешней установки whisper.cpp/model.
+- Финальный live daily: 54.383 s total, Telegram 41.851 s, ASR 5.793 s / 29.40×, pipeline 16.69×, 1 worker, 0 FloodWait.
+- 210 общих live records имеют 0 semantic mismatches. Один record старого файла отсутствует также в независимом no-ASR run; это существующая вариативность Telegram `messages.search`, не ASR regression.
 
 ## Агенты
 - `/root/range_scan_reviewer`: независимое ревью завершено, итог accepted без findings.
@@ -57,11 +69,13 @@
 
 ## Риски И Блокеры
 - Блокеров нет. Изменяемые Telegram counters могут отличаться между последовательными чтениями.
+- Точный GPU utilization недоступен без elevated `powermetrics`; отчет честно хранит `available=false`, а Metal/Core ML activation подтверждается runtime logs.
+- Silver reference создан turbo-моделью, поэтому WER/CER являются относительным сравнением, не абсолютной human-annotated оценкой.
 - Технический ASR JSONL намеренно может остаться частичным при interruption; пользовательские report JSONL/Markdown атомарны.
 - Дневные ASR logs по-прежнему отражают текущий прогон; исторические performance figures теперь живут в отдельных immutable timing reports.
 
 ## Следующее Действие
-- Нет обязательного следующего шага; смена ASR engine и Telegram pacing остаются отдельными решениями.
+- Шаг завершён. Отдельно, если потребуется, устранить недетерминизм Telegram `messages.search`; это не входит в ASR backend change.
 
 ## Обновленные Источники Правды
 - `requirements/source-map.md`

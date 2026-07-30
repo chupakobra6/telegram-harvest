@@ -23,7 +23,7 @@ type dailyStageSeconds struct {
 	Download       float64 `json:"download"`
 	FFmpeg         float64 `json:"ffmpeg"`
 	ModelColdStart float64 `json:"model_cold_start"`
-	Vosk           float64 `json:"vosk"`
+	ASR            float64 `json:"asr"`
 	Render         float64 `json:"render"`
 }
 
@@ -140,13 +140,13 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		Download:       c.durations[stages.Download].Seconds(),
 		FFmpeg:         c.durations[stages.FFmpeg].Seconds(),
 		ModelColdStart: c.durations[stages.ModelColdStart].Seconds(),
-		Vosk:           c.durations[stages.Vosk].Seconds(),
+		ASR:            c.durations[stages.ASR].Seconds(),
 		Render:         c.durations[stages.Render].Seconds(),
 	}
-	stageWork := stageSeconds.TelegramScan + stageSeconds.Download + stageSeconds.FFmpeg + stageSeconds.ModelColdStart + stageSeconds.Vosk + stageSeconds.Render
+	stageWork := stageSeconds.TelegramScan + stageSeconds.Download + stageSeconds.FFmpeg + stageSeconds.ModelColdStart + stageSeconds.ASR + stageSeconds.Render
 	total := completedAt.Sub(c.startedAt).Seconds()
-	asrSpeedX := speedRatio(c.audioSeconds, stageSeconds.Vosk)
-	pipelineSpeedX := speedRatio(c.audioSeconds, stageSeconds.ModelColdStart+stageSeconds.FFmpeg+stageSeconds.Vosk)
+	asrSpeedX := speedRatio(c.audioSeconds, stageSeconds.ASR)
+	pipelineSpeedX := speedRatio(c.audioSeconds, stageSeconds.ModelColdStart+stageSeconds.FFmpeg+stageSeconds.ASR)
 	if c.mediaPipeline != nil {
 		asrSpeedX = c.mediaPipeline.WorkerWorkSpeedX
 		pipelineSpeedX = c.mediaPipeline.PoolSpeedX
@@ -198,12 +198,12 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			pipelineQueuePeak = report.MediaPipeline.QueuePeak
 		}
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs vosk=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.Stages.FFmpeg,
 			report.Stages.ModelColdStart,
-			report.Stages.Vosk,
+			report.Stages.ASR,
 			report.Stages.Render,
 			report.StageWorkSeconds,
 			report.AudioSeconds,

@@ -33,6 +33,32 @@ ID источника: `S001`
 Конфликты:
 - отсутствуют
 
+### Общий ASR backend и Whisper на Apple Silicon
+
+ID источника: `S006`
+
+Исходный ввод:
+
+```text
+Не пытаться прикручивать Metal к Vosk. Сделать общий ASR backend и сравнить
+Vosk CPU, whisper.cpp Metal и whisper.cpp Metal + Core ML encoder на одном
+реальном наборе по скорости, ресурсам и качеству. Для Whisper начинать с
+одного GPU worker; динамический пул должен быть backend-specific.
+```
+
+Нормализация:
+- [x] требование: общий typed backend contract и cache fingerprint;
+- [x] требование: Vosk CPU, whisper.cpp Metal и Metal + Core ML;
+- [x] требование: backend-specific worker policy, safe Whisper auto = 1;
+- [x] требование: одинаковый real corpus, cold/steady performance и quality metrics;
+- [x] требование: проверить multilingual models/quantization при практической пользе;
+- [x] реализация завершена;
+- [x] live benchmark и анализ завершены;
+- [x] handoff обновлен.
+
+Конфликты:
+- нет; S006 явно открывает смену ASR engine, ранее исключённую только из STEP-003.
+
 ### Media pipeline и динамический Vosk pool
 
 ID источника: `S005`

@@ -160,9 +160,16 @@ type HistoryOptions struct {
 	VideoTranscribeMode   string
 	TranscriptDir         string
 	TranscribeCommand     string
+	ASRBackend            string
 	VoskCommand           string
 	VoskModelPath         string
 	VoskGrammarPath       string
+	WhisperCommand        string
+	WhisperModelPath      string
+	WhisperAccelerator    string
+	WhisperThreads        int
+	WhisperVADModelPath   string
+	ASRLanguage           string
 	FFmpegCommand         string
 	Transcriber           Transcriber
 	TranscriberFactory    func() Transcriber

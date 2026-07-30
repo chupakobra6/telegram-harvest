@@ -988,3 +988,28 @@ func TestRPCTimeoutsAreConservativeForHistoryReads(t *testing.T) {
 		t.Fatalf("default timeout = %s, want %s", got, defaultRPCTimeout)
 	}
 }
+
+func TestTranscriptCachePathIsIsolatedByASRBackend(t *testing.T) {
+	record := harvest.MessageRecord{
+		Source:    "telegram",
+		MessageID: 42,
+		Chat:      harvest.Chat{ID: 7},
+	}
+	attachment := harvest.Attachment{Kind: "voice", MediaID: "document:99"}
+	vosk := transcribe.Options{
+		Backend:       transcribe.BackendVosk,
+		VoskCommand:   "vosk",
+		VoskModelPath: "/models/vosk",
+	}
+	whisper := transcribe.Options{
+		Backend:            transcribe.BackendWhisperCPP,
+		WhisperCommand:     "whisper-server",
+		WhisperModelPath:   "/models/ggml-small.bin",
+		WhisperAccelerator: transcribe.AcceleratorMetal,
+	}
+	voskPath := transcriptCachePath("transcripts", vosk.CacheIdentity(), record, 0, attachment)
+	whisperPath := transcriptCachePath("transcripts", whisper.CacheIdentity(), record, 0, attachment)
+	if voskPath == whisperPath {
+		t.Fatalf("cache paths collide: %s", voskPath)
+	}
+}

@@ -82,8 +82,8 @@ func TestRunVoskUsesFFmpegAndVoskCommands(t *testing.T) {
 	if observed[stages.FFmpeg] <= 0 {
 		t.Fatalf("ffmpeg timing = %s", observed[stages.FFmpeg])
 	}
-	if observed[stages.Vosk] <= 0 {
-		t.Fatalf("vosk timing = %s", observed[stages.Vosk])
+	if observed[stages.ASR] <= 0 {
+		t.Fatalf("asr timing = %s", observed[stages.ASR])
 	}
 }
 
@@ -113,8 +113,8 @@ func TestRunVoskObservesFailedFFmpegWork(t *testing.T) {
 	if observed[stages.FFmpeg] <= 0 {
 		t.Fatalf("failed ffmpeg timing = %s", observed[stages.FFmpeg])
 	}
-	if observed[stages.Vosk] != 0 {
-		t.Fatalf("vosk should not run after ffmpeg failure: %s", observed[stages.Vosk])
+	if observed[stages.ASR] != 0 {
+		t.Fatalf("asr should not run after ffmpeg failure: %s", observed[stages.ASR])
 	}
 }
 
@@ -190,8 +190,8 @@ done
 	if observed[stages.ModelColdStart] != firstResult.ModelColdStartDuration {
 		t.Fatalf("observed cold start = %s, result = %s", observed[stages.ModelColdStart], firstResult.ModelColdStartDuration)
 	}
-	if observed[stages.Vosk] <= 0 {
-		t.Fatalf("vosk timing = %s", observed[stages.Vosk])
+	if observed[stages.ASR] <= 0 {
+		t.Fatalf("asr timing = %s", observed[stages.ASR])
 	}
 	workerLines := readNonEmptyLines(t, workerLog)
 	if len(workerLines) != 1 {
@@ -202,6 +202,25 @@ done
 	}
 	if ffmpegLines := readNonEmptyLines(t, ffmpegLog); len(ffmpegLines) != 2 {
 		t.Fatalf("ffmpeg calls = %d, lines=%q", len(ffmpegLines), ffmpegLines)
+	}
+}
+
+func TestSynchronizedBufferKeepsBoundedTail(t *testing.T) {
+	buffer := &synchronizedBuffer{}
+	first := strings.Repeat("a", 100<<10)
+	second := strings.Repeat("b", 100<<10)
+	if _, err := buffer.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buffer.Write([]byte(second)); err != nil {
+		t.Fatal(err)
+	}
+	got := buffer.String()
+	if len(got) != 128<<10 {
+		t.Fatalf("buffer bytes = %d, want %d", len(got), 128<<10)
+	}
+	if !strings.HasSuffix(got, second) {
+		t.Fatal("buffer did not retain newest output")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
@@ -21,12 +22,20 @@ const DefaultFFmpegCommand = "ffmpeg"
 const VoskSessionFlag = "--session"
 
 type Options struct {
-	CommandTemplate string
-	VoskCommand     string
-	VoskModelPath   string
-	VoskGrammarPath string
-	FFmpegCommand   string
-	StageTiming     stages.Observer
+	CommandTemplate     string
+	Backend             string
+	VoskCommand         string
+	VoskModelPath       string
+	VoskGrammarPath     string
+	WhisperCommand      string
+	WhisperModelPath    string
+	WhisperAccelerator  string
+	WhisperThreads      int
+	WhisperVADModelPath string
+	Language            string
+	Environment         map[string]string
+	FFmpegCommand       string
+	StageTiming         stages.Observer
 }
 
 type ManagedRunner interface {
@@ -38,6 +47,7 @@ type ManagedRunner interface {
 type Result struct {
 	Text                   string
 	Engine                 string
+	Backend                Descriptor
 	FFmpegDuration         time.Duration
 	ModelColdStartDuration time.Duration
 	ASRDuration            time.Duration
@@ -49,27 +59,22 @@ type Result struct {
 }
 
 func NewManagedRunner(opts Options) ManagedRunner {
-	if strings.TrimSpace(opts.CommandTemplate) != "" {
+	switch opts.normalizedBackend() {
+	case BackendCommand:
 		return standaloneRunner{opts: opts}
+	case BackendWhisperCPP:
+		return &WhisperServerRunner{opts: opts}
+	default:
+		return &VoskSessionRunner{opts: opts}
 	}
-	return &VoskSessionRunner{opts: opts}
 }
 
 func (o Options) Configured() bool {
-	if strings.TrimSpace(o.CommandTemplate) != "" {
-		return true
-	}
-	return strings.TrimSpace(o.VoskCommand) != "" && strings.TrimSpace(o.VoskModelPath) != ""
+	return o.Validate() == nil
 }
 
 func (o Options) EngineName() string {
-	if strings.TrimSpace(o.CommandTemplate) != "" {
-		return "command"
-	}
-	if strings.TrimSpace(o.VoskCommand) != "" || strings.TrimSpace(o.VoskModelPath) != "" {
-		return "vosk"
-	}
-	return ""
+	return o.normalizedBackend()
 }
 
 func Run(ctx context.Context, opts Options, inputPath string, outputPath string) (string, error) {
@@ -100,6 +105,7 @@ func RunDetailed(ctx context.Context, opts Options, inputPath string, outputPath
 		return Result{
 			Text:            text,
 			Engine:          opts.EngineName(),
+			Backend:         opts.Descriptor(),
 			TotalDuration:   time.Since(start),
 			InputBytes:      inputBytes,
 			TranscriptBytes: int64(len([]byte(text))),
@@ -133,14 +139,15 @@ func (r standaloneRunner) Close() error {
 type VoskSessionRunner struct {
 	opts Options
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   *bufio.Reader
-	stderr   *synchronizedBuffer
-	waitDone chan error
-	nextID   int
-	closed   bool
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    *bufio.Reader
+	stderr    *synchronizedBuffer
+	waitDone  chan error
+	nextID    int
+	closed    bool
+	processID atomic.Int64
 }
 
 type voskSessionRequest struct {
@@ -176,7 +183,7 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 	}
 
 	ffmpegStart := time.Now()
-	wavPath, cleanup, err := convertToVoskWAV(ctx, r.opts, inputPath, outputPath)
+	wavPath, cleanup, err := convertToASRWAV(ctx, r.opts, inputPath, outputPath)
 	stages.ObserveSince(r.opts.StageTiming, stages.FFmpeg, ffmpegStart)
 	if err != nil {
 		return Result{}, err
@@ -200,7 +207,7 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 	r.nextID++
 	requestID := r.nextID
 	asrStart := time.Now()
-	defer stages.ObserveSince(r.opts.StageTiming, stages.Vosk, asrStart)
+	defer stages.ObserveSince(r.opts.StageTiming, stages.ASR, asrStart)
 	if err := json.NewEncoder(r.stdin).Encode(voskSessionRequest{
 		ID:      requestID,
 		WAVPath: wavPath,
@@ -228,6 +235,7 @@ func (r *VoskSessionRunner) RunDetailed(ctx context.Context, inputPath string, o
 	return Result{
 		Text:                   text,
 		Engine:                 r.opts.EngineName(),
+		Backend:                r.opts.Descriptor(),
 		FFmpegDuration:         ffmpegDuration,
 		ModelColdStartDuration: modelColdStartDuration,
 		ASRDuration:            asrDuration,
@@ -247,12 +255,7 @@ func (r *VoskSessionRunner) Close() error {
 }
 
 func (r *VoskSessionRunner) ProcessID() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cmd == nil || r.cmd.Process == nil {
-		return 0
-	}
-	return r.cmd.Process.Pid
+	return int(r.processID.Load())
 }
 
 func runVosk(ctx context.Context, opts Options, inputPath string, outputPath string) (string, error) {
@@ -275,7 +278,7 @@ func runVoskDetailed(ctx context.Context, opts Options, inputPath string, output
 	}
 
 	ffmpegStart := time.Now()
-	wavPath, cleanup, err := convertToVoskWAV(ctx, opts, inputPath, outputPath)
+	wavPath, cleanup, err := convertToASRWAV(ctx, opts, inputPath, outputPath)
 	stages.ObserveSince(opts.StageTiming, stages.FFmpeg, ffmpegStart)
 	if err != nil {
 		return Result{}, err
@@ -289,12 +292,13 @@ func runVoskDetailed(ctx context.Context, opts Options, inputPath string, output
 		voskArgs = append(voskArgs, grammarPath)
 	}
 	cmd := exec.CommandContext(ctx, voskCommand, voskArgs...)
+	cmd.Env = commandEnvironment(opts.Environment)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	asrStart := time.Now()
-	defer stages.ObserveSince(opts.StageTiming, stages.Vosk, asrStart)
+	defer stages.ObserveSince(opts.StageTiming, stages.ASR, asrStart)
 	if err := cmd.Run(); err != nil {
 		return Result{}, fmt.Errorf("vosk: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
@@ -306,6 +310,7 @@ func runVoskDetailed(ctx context.Context, opts Options, inputPath string, output
 	return Result{
 		Text:               text,
 		Engine:             opts.EngineName(),
+		Backend:            opts.Descriptor(),
 		FFmpegDuration:     ffmpegDuration,
 		ASRDuration:        asrDuration,
 		TotalDuration:      time.Since(start),
@@ -334,6 +339,7 @@ func (r *VoskSessionRunner) startLocked(ctx context.Context) (time.Duration, err
 		args = append(args, grammarPath)
 	}
 	cmd := exec.Command(voskCommand, args...)
+	cmd.Env = commandEnvironment(r.opts.Environment)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return time.Since(startedAt), fmt.Errorf("prepare vosk session stdin: %w", err)
@@ -358,6 +364,7 @@ func (r *VoskSessionRunner) startLocked(ctx context.Context) (time.Duration, err
 		waitDone <- cmd.Wait()
 	}()
 	r.cmd = cmd
+	r.processID.Store(int64(cmd.Process.Pid))
 	r.stdin = stdin
 	r.stdout = bufio.NewReader(stdout)
 	r.stderr = stderr
@@ -433,6 +440,7 @@ func (r *VoskSessionRunner) stopProcessLocked(kill bool) error {
 	r.stdout = nil
 	r.stderr = nil
 	r.waitDone = nil
+	r.processID.Store(0)
 	if kill {
 		return nil
 	}
@@ -452,12 +460,12 @@ func (r *VoskSessionRunner) processDetailLocked() string {
 	return ""
 }
 
-func convertToVoskWAV(ctx context.Context, opts Options, inputPath string, outputPath string) (string, func(), error) {
+func convertToASRWAV(ctx context.Context, opts Options, inputPath string, outputPath string) (string, func(), error) {
 	ffmpegCommand := strings.TrimSpace(opts.FFmpegCommand)
 	if ffmpegCommand == "" {
 		ffmpegCommand = DefaultFFmpegCommand
 	}
-	wavFile, err := os.CreateTemp(filepath.Dir(outputPath), ".vosk-*.wav")
+	wavFile, err := os.CreateTemp(filepath.Dir(outputPath), ".asr-*.wav")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("create temporary wav: %w", err)
 	}
@@ -516,15 +524,40 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
+func commandEnvironment(overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	environment := os.Environ()
+	for key, value := range overrides {
+		environment = append(environment, key+"="+value)
+	}
+	return environment
+}
+
 type synchronizedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
 func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	const maxBytes = 128 << 10
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	written := len(p)
+	if len(p) >= maxBytes {
+		b.buf.Reset()
+		_, _ = b.buf.Write(p[len(p)-maxBytes:])
+		return written, nil
+	}
+	if overflow := b.buf.Len() + len(p) - maxBytes; overflow > 0 {
+		current := b.buf.Bytes()
+		kept := append([]byte(nil), current[min(overflow, len(current)):]...)
+		b.buf.Reset()
+		_, _ = b.buf.Write(kept)
+	}
+	_, _ = b.buf.Write(p)
+	return written, nil
 }
 
 func (b *synchronizedBuffer) String() string {

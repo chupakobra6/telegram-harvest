@@ -20,7 +20,7 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	first.Observe(stages.Download, 2*time.Second)
 	first.Observe(stages.FFmpeg, time.Second)
 	first.Observe(stages.ModelColdStart, 2*time.Second)
-	first.Observe(stages.Vosk, 4*time.Second)
+	first.Observe(stages.ASR, 4*time.Second)
 	first.Observe(stages.Render, 500*time.Millisecond)
 	first.ObserveAudioDuration(24)
 	first.ObserveDialogCheckpoint(
@@ -62,7 +62,7 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	if err := json.Unmarshal(content, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Stages.TelegramScan != 3 || decoded.Stages.Download != 2 || decoded.Stages.FFmpeg != 1 || decoded.Stages.ModelColdStart != 2 || decoded.Stages.Vosk != 4 || decoded.Stages.Render != 0.5 {
+	if decoded.Stages.TelegramScan != 3 || decoded.Stages.Download != 2 || decoded.Stages.FFmpeg != 1 || decoded.Stages.ModelColdStart != 2 || decoded.Stages.ASR != 4 || decoded.Stages.Render != 0.5 {
 		t.Fatalf("stages = %+v", decoded.Stages)
 	}
 	if decoded.AudioSeconds != 24 {
@@ -101,7 +101,7 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, field := range []string{
-		"telegram_scan=", "download=", "ffmpeg=", "model_cold_start=", "vosk=", "render=",
+		"telegram_scan=", "download=", "ffmpeg=", "model_cold_start=", "asr=", "render=",
 		"audio=", "asr_speed=", "pipeline_speed=", "checkpoint_enabled=", "checkpoint_history_dialogs=",
 		"checkpoint_unchanged=", "checkpoint_changed=", "checkpoint_new=", "checkpoint_fallback=",
 		"stage_work=", "pipeline_mode=", "pipeline_span=", "pipeline_overlap=", "pipeline_workers=", "pipeline_queue_peak=", "total=", "report=",
@@ -121,7 +121,7 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 
 func TestDailyStageTimingReportLeavesSpeedZeroWithoutProcessedAudio(t *testing.T) {
 	collector := newDailyStageTimingCollector("daily", "2026-07-29", "2026-07-29")
-	collector.Observe(stages.Vosk, 2*time.Second)
+	collector.Observe(stages.ASR, 2*time.Second)
 	report := collector.Report(nil)
 	if report.AudioSeconds != 0 || report.ASRSpeedX != 0 || report.PipelineSpeedX != 0 {
 		t.Fatalf("unexpected empty-run ASR metrics: %+v", report)
@@ -131,7 +131,7 @@ func TestDailyStageTimingReportLeavesSpeedZeroWithoutProcessedAudio(t *testing.T
 func TestDailyStageTimingReportUsesOverlappingPipelineMetrics(t *testing.T) {
 	collector := newDailyStageTimingCollector("daily", "2026-07-29", "2026-07-29")
 	collector.Observe(stages.TelegramScan, 10*time.Second)
-	collector.Observe(stages.Vosk, 8*time.Second)
+	collector.Observe(stages.ASR, 8*time.Second)
 	collector.ObserveAudioDuration(40)
 	collector.ObserveMediaPipeline(stages.MediaPipelineMetrics{
 		Mode:             "2",

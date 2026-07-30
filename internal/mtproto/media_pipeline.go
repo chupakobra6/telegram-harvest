@@ -59,6 +59,8 @@ type mediaPipelineConfig struct {
 	Mode            string
 	MaxWorkers      int
 	QueueCapacity   int
+	Backend         transcribe.Descriptor
+	WorkerPolicy    transcribe.WorkerPolicy
 	RunnerFactory   func() harvest.Transcriber
 	SampleResources func() mediaPipelineResourceSnapshot
 	SampleRSS       func(int) uint64
@@ -93,7 +95,7 @@ type mediaPipeline struct {
 	activeJobs        int
 	peakActiveJobs    int
 	totalAudio        float64
-	totalVosk         float64
+	totalASR          float64
 	totalStartup      float64
 	startupSamples    int
 	workerRSS         uint64
@@ -103,6 +105,12 @@ type mediaPipeline struct {
 	drainedOnce       sync.Once
 	scaleWG           sync.WaitGroup
 	scaleMu           sync.Mutex
+	resourceDone      chan struct{}
+	resourceWG        sync.WaitGroup
+	resourceStopOnce  sync.Once
+	resourceSamples   int
+	resourceCPUTotal  float64
+	resourceCPUPeak   float64
 }
 
 type mediaPipelineWorker struct {
@@ -137,6 +145,9 @@ func newMediaPipeline(ctx context.Context, opts harvest.HistoryOptions) (*mediaP
 		return nil, err
 	}
 	factory := opts.TranscriberFactory
+	transcribeOpts := transcribeOptions(opts)
+	descriptor := transcribeOpts.Descriptor()
+	policy := transcribeOpts.WorkerPolicy()
 	if factory == nil && opts.Transcriber != nil {
 		runner := opts.Transcriber
 		mode = "1"
@@ -144,7 +155,6 @@ func newMediaPipeline(ctx context.Context, opts harvest.HistoryOptions) (*mediaP
 		factory = func() harvest.Transcriber { return runner }
 	}
 	if factory == nil {
-		transcribeOpts := transcribeOptions(opts)
 		if !transcribeOpts.Configured() {
 			return nil, nil
 		}
@@ -152,10 +162,18 @@ func newMediaPipeline(ctx context.Context, opts harvest.HistoryOptions) (*mediaP
 			return transcribe.NewManagedRunner(transcribeOpts)
 		}
 	}
+	if mode == asrWorkerAuto {
+		workers = policy.AutoMaxWorkers
+		if workers < 1 {
+			workers = 1
+		}
+	}
 	return newMediaPipelineWithConfig(ctx, opts, mediaPipelineConfig{
 		Mode:            mode,
 		MaxWorkers:      workers,
 		QueueCapacity:   2 * workers,
+		Backend:         descriptor,
+		WorkerPolicy:    policy,
 		RunnerFactory:   factory,
 		SampleResources: sampleMediaPipelineResources,
 		SampleRSS:       sampleProcessRSS,
@@ -169,6 +187,13 @@ func newMediaPipelineWithConfig(ctx context.Context, opts harvest.HistoryOptions
 	}
 	if cfg.QueueCapacity < 1 {
 		cfg.QueueCapacity = 2 * cfg.MaxWorkers
+	}
+	if cfg.WorkerPolicy.AutoMaxWorkers == 0 {
+		cfg.WorkerPolicy = transcribe.WorkerPolicy{
+			Resource:       "cpu",
+			AutoMaxWorkers: cfg.MaxWorkers,
+			Dynamic:        true,
+		}
 	}
 	if cfg.RunnerFactory == nil {
 		return nil, fmt.Errorf("media pipeline runner factory is required")
@@ -193,6 +218,7 @@ func newMediaPipelineWithConfig(ctx context.Context, opts harvest.HistoryOptions
 		results:           make(map[string]mediaPipelineResult),
 		claimed:           make(map[string]struct{}),
 		producerStartedAt: cfg.Now(),
+		resourceDone:      make(chan struct{}),
 	}
 	p.wg.Add(cfg.MaxWorkers)
 	for id := 1; id <= cfg.MaxWorkers; id++ {
@@ -208,6 +234,7 @@ func newMediaPipelineWithConfig(ctx context.Context, opts harvest.HistoryOptions
 			p.activateNextWorkerLocked()
 		}
 	}
+	p.startResourceMonitor()
 	return p, nil
 }
 
@@ -258,7 +285,7 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 			p.queuePeak = queued
 		}
 		p.mu.Unlock()
-		if p.cfg.Mode == asrWorkerAuto {
+		if p.cfg.Mode == asrWorkerAuto && p.cfg.WorkerPolicy.Dynamic {
 			p.scaleWG.Add(1)
 			go func() {
 				defer p.scaleWG.Done()
@@ -393,7 +420,7 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 	p.jobsCompleted++
 	p.activeJobs = max(0, p.activeJobs-1)
 	p.totalAudio += audioSeconds
-	p.totalVosk += result.Result.ASRDuration.Seconds()
+	p.totalASR += result.Result.ASRDuration.Seconds()
 	p.totalStartup += result.Result.ModelColdStartDuration.Seconds()
 	if result.Result.ModelColdStartDuration > 0 {
 		p.startupSamples++
@@ -406,7 +433,7 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 	worker.metrics.AudioSeconds += audioSeconds
 	worker.metrics.FFmpegSeconds += result.Result.FFmpegDuration.Seconds()
 	worker.metrics.ModelColdStartSeconds += result.Result.ModelColdStartDuration.Seconds()
-	worker.metrics.VoskSeconds += result.Result.ASRDuration.Seconds()
+	worker.metrics.ASRSeconds += result.Result.ASRDuration.Seconds()
 	if provider, ok := worker.runner.(interface{ ProcessID() int }); ok {
 		if rss := p.cfg.SampleRSS(provider.ProcessID()); rss > worker.metrics.PeakRSSBytes {
 			worker.metrics.PeakRSSBytes = rss
@@ -426,13 +453,13 @@ func (p *mediaPipeline) maybeScale() {
 	defer p.scaleMu.Unlock()
 	p.mu.Lock()
 	idleWorkers := p.activeWorkers - p.activeJobs
-	if p.cfg.Mode != asrWorkerAuto || p.activeWorkers >= p.cfg.MaxWorkers || len(p.jobs) <= idleWorkers {
+	if p.cfg.Mode != asrWorkerAuto || !p.cfg.WorkerPolicy.Dynamic || p.activeWorkers >= p.cfg.MaxWorkers || len(p.jobs) <= idleWorkers {
 		p.mu.Unlock()
 		return
 	}
 	workers := p.activeWorkers
 	remainingAudio := p.queuedAudio
-	speed := speedRatio(p.totalAudio, p.totalVosk)
+	speed := speedRatio(p.totalAudio, p.totalASR)
 	startup := p.totalStartup / float64(max(1, p.startupSamples))
 	workerRSS := p.workerRSS
 	p.mu.Unlock()
@@ -520,6 +547,7 @@ func (p *mediaPipeline) waitAndApply(records []harvest.MessageRecord) error {
 	p.mu.Unlock()
 	p.scaleWG.Wait()
 	p.wg.Wait()
+	p.stopResourceMonitor()
 	p.cancel()
 
 	p.mu.Lock()
@@ -595,6 +623,7 @@ func (p *mediaPipeline) abort() {
 	}
 	p.mu.Unlock()
 	p.wg.Wait()
+	p.stopResourceMonitor()
 	for job := range p.jobs {
 		_ = os.Remove(job.InputPath)
 	}
@@ -625,10 +654,15 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		if metrics.Jobs == 0 {
 			continue
 		}
-		metrics.ASRSpeedX = speedRatio(metrics.AudioSeconds, metrics.VoskSeconds)
+		metrics.ASRSpeedX = speedRatio(metrics.AudioSeconds, metrics.ASRSeconds)
 		workers = append(workers, metrics)
 	}
 	return stages.MediaPipelineMetrics{
+		Backend:                 p.cfg.Backend.Backend,
+		Accelerator:             p.cfg.Backend.Accelerator,
+		Model:                   p.cfg.Backend.Model,
+		WorkerResource:          p.cfg.WorkerPolicy.Resource,
+		DynamicWorkers:          p.cfg.WorkerPolicy.Dynamic,
 		Mode:                    p.cfg.Mode,
 		QueueCapacity:           cap(p.jobs),
 		QueuePeak:               p.queuePeak,
@@ -643,13 +677,50 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		SpanSeconds:             span.Seconds(),
 		OverlapSeconds:          overlap.Seconds(),
 		PoolSpeedX:              speedRatio(p.totalAudio, span.Seconds()),
-		WorkerWorkSpeedX:        speedRatio(p.totalAudio, p.totalVosk),
+		WorkerWorkSpeedX:        speedRatio(p.totalAudio, p.totalASR),
 		AvailableMemoryBytes:    p.lastResources.AvailableMemoryBytes,
 		CPUUtilization:          p.lastResources.CPUUtilization,
+		SystemCPUMean:           ratioOrZero(p.resourceCPUTotal, float64(p.resourceSamples)),
+		SystemCPUPeak:           p.resourceCPUPeak,
+		GPUUtilizationAvailable: false,
+		GPUUtilizationReason:    gpuUtilizationUnavailableReason(p.cfg.WorkerPolicy.Resource),
 		EstimatedWorkerRSSBytes: p.workerRSS,
 		ScaleDecisions:          append([]stages.MediaScaleDecision(nil), p.scaleDecisions...),
 		Workers:                 workers,
 	}
+}
+
+func (p *mediaPipeline) startResourceMonitor() {
+	p.resourceWG.Add(1)
+	go func() {
+		defer p.resourceWG.Done()
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-p.resourceDone:
+				return
+			case <-ticker.C:
+				snapshot := p.cfg.SampleResources()
+				p.mu.Lock()
+				p.lastResources = snapshot
+				p.resourceSamples++
+				p.resourceCPUTotal += snapshot.CPUUtilization
+				if snapshot.CPUUtilization > p.resourceCPUPeak {
+					p.resourceCPUPeak = snapshot.CPUUtilization
+				}
+				p.mu.Unlock()
+			}
+		}
+	}()
+}
+
+func (p *mediaPipeline) stopResourceMonitor() {
+	if p.resourceDone == nil {
+		return
+	}
+	p.resourceStopOnce.Do(func() { close(p.resourceDone) })
+	p.resourceWG.Wait()
 }
 
 func runTranscriberDetailedAtomic(
@@ -795,9 +866,26 @@ func sampleProcessRSS(pid int) uint64 {
 	return kib * 1024
 }
 
+func gpuUtilizationUnavailableReason(resource string) string {
+	if resource != "gpu" {
+		return "not_applicable_for_backend"
+	}
+	if runtime.GOOS == "darwin" {
+		return "macos_gpu_sampler_requires_elevated_powermetrics_access"
+	}
+	return "gpu_sampler_not_configured"
+}
+
 func speedRatio(audioSeconds float64, workSeconds float64) float64 {
 	if audioSeconds <= 0 || workSeconds <= 0 {
 		return 0
 	}
 	return audioSeconds / workSeconds
+}
+
+func ratioOrZero(numerator, denominator float64) float64 {
+	if numerator <= 0 || denominator <= 0 {
+		return 0
+	}
+	return numerator / denominator
 }

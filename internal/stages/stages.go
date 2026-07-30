@@ -9,7 +9,7 @@ const (
 	Download       Name = "download"
 	FFmpeg         Name = "ffmpeg"
 	ModelColdStart Name = "model_cold_start"
-	Vosk           Name = "vosk"
+	ASR            Name = "asr"
 	Render         Name = "render"
 )
 
@@ -18,6 +18,11 @@ type AudioDurationObserver func(float64)
 type MediaPipelineObserver func(MediaPipelineMetrics)
 
 type MediaPipelineMetrics struct {
+	Backend                 string               `json:"backend,omitempty"`
+	Accelerator             string               `json:"accelerator,omitempty"`
+	Model                   string               `json:"model,omitempty"`
+	WorkerResource          string               `json:"worker_resource,omitempty"`
+	DynamicWorkers          bool                 `json:"dynamic_workers"`
 	Mode                    string               `json:"mode,omitempty"`
 	QueueCapacity           int                  `json:"queue_capacity"`
 	QueuePeak               int                  `json:"queue_peak"`
@@ -35,6 +40,11 @@ type MediaPipelineMetrics struct {
 	WorkerWorkSpeedX        float64              `json:"worker_work_speed_x"`
 	AvailableMemoryBytes    uint64               `json:"available_memory_bytes,omitempty"`
 	CPUUtilization          float64              `json:"cpu_utilization,omitempty"`
+	SystemCPUMean           float64              `json:"system_cpu_mean,omitempty"`
+	SystemCPUPeak           float64              `json:"system_cpu_peak,omitempty"`
+	GPUUtilization          float64              `json:"gpu_utilization,omitempty"`
+	GPUUtilizationAvailable bool                 `json:"gpu_utilization_available"`
+	GPUUtilizationReason    string               `json:"gpu_utilization_reason,omitempty"`
 	EstimatedWorkerRSSBytes uint64               `json:"estimated_worker_rss_bytes,omitempty"`
 	ScaleDecisions          []MediaScaleDecision `json:"scale_decisions,omitempty"`
 	Workers                 []MediaWorkerMetrics `json:"workers,omitempty"`
@@ -58,7 +68,7 @@ type MediaWorkerMetrics struct {
 	AudioSeconds          float64 `json:"audio_seconds"`
 	FFmpegSeconds         float64 `json:"ffmpeg_seconds"`
 	ModelColdStartSeconds float64 `json:"model_cold_start_seconds"`
-	VoskSeconds           float64 `json:"vosk_seconds"`
+	ASRSeconds            float64 `json:"asr_seconds"`
 	BusySeconds           float64 `json:"busy_seconds"`
 	ASRSpeedX             float64 `json:"asr_speed_x"`
 	PeakRSSBytes          uint64  `json:"peak_rss_bytes,omitempty"`

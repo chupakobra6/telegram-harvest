@@ -13,6 +13,7 @@ import (
 	"github.com/chupakobra6/telegram-harvest/internal/config"
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
+	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 )
 
 func TestRunHelpPrintsCommands(t *testing.T) {
@@ -367,6 +368,27 @@ func TestValidateDailyOptionsAcceptsAutoAndDiagnosticASRWorkers(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--asr-workers") {
 			t.Fatalf("mode %q error = %v", mode, err)
 		}
+	}
+}
+
+func TestValidateDailyOptionsChecksSelectedASRBackend(t *testing.T) {
+	valid := dailyOptions{
+		TranscribeMedia:     true,
+		VideoTranscribeMode: harvest.VideoTranscribePhone,
+		ASRWorkerMode:       "auto",
+		ASRBackend:          transcribe.BackendWhisperCPP,
+		WhisperCommand:      "whisper-server",
+		WhisperModelPath:    "ggml-small.bin",
+		WhisperAccelerator:  transcribe.AcceleratorMetal,
+		ASRLanguage:         "ru",
+	}
+	if err := validateDailyOptions(valid); err != nil {
+		t.Fatal(err)
+	}
+	missingModel := valid
+	missingModel.WhisperModelPath = ""
+	if err := validateDailyOptions(missingModel); err == nil || !strings.Contains(err.Error(), "model path") {
+		t.Fatalf("missing model error = %v", err)
 	}
 }
 
