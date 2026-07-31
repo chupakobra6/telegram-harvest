@@ -159,21 +159,12 @@ type HistoryOptions struct {
 	TranscribeMedia       bool
 	VideoTranscribeMode   string
 	TranscriptDir         string
-	TranscribeCommand     string
-	ASRBackend            string
-	VoskCommand           string
-	VoskModelPath         string
-	VoskGrammarPath       string
 	WhisperCommand        string
 	WhisperModelPath      string
-	WhisperAccelerator    string
-	WhisperThreads        int
 	WhisperGateFilePath   string
-	ASRLanguage           string
 	FFmpegCommand         string
 	Transcriber           Transcriber
 	TranscriberFactory    func() Transcriber
-	ASRWorkerMode         string
 	Progress              func(HistoryProgress) error
 	ASRLog                func(ASRLogEvent) error
 	StageTiming           stages.Observer

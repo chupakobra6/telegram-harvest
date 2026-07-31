@@ -58,6 +58,7 @@ func TestShouldBypassProxySupportsWildcardDomainsAndIPs(t *testing.T) {
 }
 
 func TestCtxDeadline(t *testing.T) {
+	//lint:ignore SA1012 ctxDeadline explicitly supports a nil context as no deadline.
 	if _, ok := ctxDeadline(nil); ok {
 		t.Fatalf("nil context should not have deadline")
 	}

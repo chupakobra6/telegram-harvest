@@ -10,14 +10,13 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt test vosk-transcribe doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup fmt test doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
 	@printf "  make setup   # go mod tidy\\n"
 	@printf "  make fmt     # gofmt project files\\n"
 	@printf "  make test    # go test ./...\\n"
-	@printf "  make vosk-transcribe # build local Vosk helper into bin/\\n"
 	@printf "  make doctor PROFILE=main|study # show config/session status\\n"
 	@printf "  make login PROFILE=main|study  # create MTProto user session\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
@@ -41,9 +40,6 @@ fmt:
 
 test:
 	go test ./...
-
-vosk-transcribe:
-	go build -o bin/vosk-transcribe ./cmd/vosk-transcribe
 
 doctor:
 	$(REQUIRE_PROFILE)

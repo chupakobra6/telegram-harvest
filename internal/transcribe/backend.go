@@ -7,24 +7,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
 
 const (
-	BackendCommand    = "command"
-	BackendVosk       = "vosk"
-	BackendWhisperCPP = "whispercpp"
-
-	AcceleratorCPU         = "cpu"
-	AcceleratorMetal       = "metal"
-	AcceleratorMetalCoreML = "metal-coreml"
+	BackendWhisperCPP        = "whispercpp"
+	AcceleratorMetal         = "metal"
+	ProductionLanguage       = "ru"
+	ProductionThreads        = 4
+	ProductionModelFile      = "ggml-large-v3-turbo-q5_0.bin"
+	ProductionSpeechGateFile = "ggml-silero-v6.2.0.bin"
 )
 
-// Descriptor is the stable identity of an ASR implementation. It is used in
-// timing reports and transcript cache keys, so fields must describe everything
-// that can materially change a transcript.
+// Descriptor is the stable identity of the production ASR implementation.
+// It is used in timing reports and transcript cache keys, so fields must
+// describe everything that can materially change a transcript.
 type Descriptor struct {
 	Backend      string                       `json:"backend"`
 	Accelerator  string                       `json:"accelerator"`
@@ -32,15 +32,13 @@ type Descriptor struct {
 	Language     string                       `json:"language,omitempty"`
 	Quantization string                       `json:"quantization,omitempty"`
 	Threads      int                          `json:"threads,omitempty"`
-	VADModel     string                       `json:"vad_model,omitempty"`
 	Decode       *WhisperDecodeDescriptor     `json:"decode,omitempty"`
 	SpeechGate   *WhisperSpeechGateDescriptor `json:"speech_gate,omitempty"`
 	PostFilter   string                       `json:"post_filter,omitempty"`
 }
 
-// WhisperDecodeOptions contains only material decoder settings. Pointer fields
-// distinguish an explicit zero (for example, disabling temperature fallback)
-// from the whisper.cpp default.
+// WhisperDecodeOptions is intentionally retained as a benchmark-level
+// contract. Daily and dump always use ProductionWhisperDecode.
 type WhisperDecodeOptions struct {
 	BeamSize                *int     `json:"beam_size,omitempty"`
 	BestOf                  *int     `json:"best_of,omitempty"`
@@ -96,130 +94,78 @@ type Diagnostics struct {
 	RemovedTerminalHallucinations []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
-// WorkerPolicy describes safe automatic concurrency for a backend. CPU
-// backends may scale when the pipeline proves a benefit; a single Apple GPU
-// and unified memory are treated as one shared resource.
-type WorkerPolicy struct {
-	Resource       string `json:"resource"`
-	AutoMaxWorkers int    `json:"auto_max_workers"`
-	Dynamic        bool   `json:"dynamic"`
+// ProductionOptions is the only ASR profile used by product commands. Paths
+// remain configurable because the runtime is a local dependency; inference
+// behavior is deliberately code-owned and regression-tested.
+func ProductionOptions(command, modelPath, gateModelPath, ffmpegCommand string, timing stages.Observer) Options {
+	return Options{
+		WhisperCommand:    command,
+		WhisperModelPath:  modelPath,
+		WhisperThreads:    ProductionThreads,
+		WhisperDecode:     ProductionWhisperDecode(),
+		WhisperSpeechGate: ProductionWhisperSpeechGate(gateModelPath),
+		Language:          ProductionLanguage,
+		FFmpegCommand:     ffmpegCommand,
+		StageTiming:       timing,
+		productionProfile: true,
+	}
 }
 
 func (o Options) Descriptor() Descriptor {
-	backend := o.normalizedBackend()
+	decode := o.WhisperDecode.normalized()
 	descriptor := Descriptor{
-		Backend:  backend,
-		Language: strings.TrimSpace(o.Language),
+		Backend:      BackendWhisperCPP,
+		Accelerator:  AcceleratorMetal,
+		Model:        stableModelIdentity(o.WhisperModelPath),
+		Language:     normalizedLanguage(o.Language),
+		Quantization: whisperQuantization(o.WhisperModelPath),
+		Threads:      normalizedThreads(o.WhisperThreads),
+		Decode:       &decode,
+		PostFilter:   whisperTerminalHallucinationProfile,
 	}
-	switch backend {
-	case BackendWhisperCPP:
-		descriptor.Accelerator = normalizedWhisperAccelerator(o.WhisperAccelerator)
-		descriptor.Model = stableModelIdentity(o.WhisperModelPath)
-		descriptor.Quantization = whisperQuantization(o.WhisperModelPath)
-		descriptor.Threads = o.WhisperThreads
-		descriptor.VADModel = stableModelIdentity(o.WhisperVADModelPath)
-		decode := o.WhisperDecode.normalized()
-		descriptor.Decode = &decode
-		if o.WhisperSpeechGate.Enabled {
-			gate := o.WhisperSpeechGate.normalized(o)
-			descriptor.SpeechGate = &gate
-		}
-		descriptor.PostFilter = whisperTerminalHallucinationProfile
-	case BackendVosk:
-		descriptor.Accelerator = AcceleratorCPU
-		descriptor.Model = stableModelIdentity(o.VoskModelPath)
-	case BackendCommand:
-		descriptor.Accelerator = "external"
-		sum := sha256.Sum256([]byte(strings.TrimSpace(o.CommandTemplate)))
-		descriptor.Model = "command-" + hex.EncodeToString(sum[:8])
+	if o.WhisperSpeechGate.Enabled {
+		gate := o.WhisperSpeechGate.normalized()
+		descriptor.SpeechGate = &gate
 	}
 	return descriptor
 }
 
-func (o Options) WorkerPolicy() WorkerPolicy {
-	switch o.normalizedBackend() {
-	case BackendWhisperCPP:
-		return WorkerPolicy{Resource: "gpu", AutoMaxWorkers: 1, Dynamic: false}
-	case BackendVosk:
-		return WorkerPolicy{Resource: "cpu", AutoMaxWorkers: 4, Dynamic: true}
-	default:
-		return WorkerPolicy{Resource: "external", AutoMaxWorkers: 1, Dynamic: false}
-	}
-}
-
+// CacheIdentity keeps the v2 layout used by the selected production profile.
+// The empty fifth component is the removed integrated-VAD slot; preserving it
+// lets existing tuned-Whisper transcripts remain reusable.
 func (o Options) CacheIdentity() string {
-	descriptor := o.Descriptor()
-	descriptorJSON, _ := json.Marshal(descriptor)
+	descriptorJSON, _ := json.Marshal(o.Descriptor())
 	parts := []string{
 		"v2",
 		string(descriptorJSON),
-		cacheModelIdentity(o.engineCommand()),
-		cacheModelIdentity(o.modelPath()),
-		cacheModelIdentity(o.WhisperVADModelPath),
+		cacheModelIdentity(o.WhisperCommand),
+		cacheModelIdentity(o.WhisperModelPath),
+		"",
 		cacheModelIdentity(o.WhisperSpeechGate.command(o)),
 		cacheModelIdentity(o.WhisperSpeechGate.ModelPath),
-	}
-	if descriptor.Backend == BackendVosk {
-		parts = append(parts, cacheModelIdentity(o.VoskGrammarPath))
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:16])
 }
 
-func (o Options) engineCommand() string {
-	switch o.normalizedBackend() {
-	case BackendWhisperCPP:
-		return o.WhisperCommand
-	case BackendVosk:
-		return o.VoskCommand
-	default:
-		return ""
-	}
-}
-
-func (o Options) modelPath() string {
-	switch o.normalizedBackend() {
-	case BackendWhisperCPP:
-		return o.WhisperModelPath
-	case BackendVosk:
-		return o.VoskModelPath
-	default:
-		return ""
-	}
-}
-
 func (o Options) Validate() error {
-	switch o.normalizedBackend() {
-	case BackendCommand:
-		if strings.TrimSpace(o.CommandTemplate) == "" {
-			return fmt.Errorf("ASR command template is empty")
-		}
-	case BackendVosk:
-		if strings.TrimSpace(o.VoskCommand) == "" {
-			return fmt.Errorf("vosk command is empty")
-		}
-		if strings.TrimSpace(o.VoskModelPath) == "" {
-			return fmt.Errorf("vosk model path is empty")
-		}
-	case BackendWhisperCPP:
-		if strings.TrimSpace(o.WhisperCommand) == "" {
-			return fmt.Errorf("whisper.cpp server command is empty")
-		}
-		if strings.TrimSpace(o.WhisperModelPath) == "" {
-			return fmt.Errorf("whisper.cpp model path is empty")
-		}
-		accelerator := normalizedWhisperAccelerator(o.WhisperAccelerator)
-		if accelerator != AcceleratorMetal && accelerator != AcceleratorMetalCoreML && accelerator != AcceleratorCPU {
-			return fmt.Errorf("unsupported whisper.cpp accelerator %q", accelerator)
-		}
-		if err := o.WhisperDecode.validate(); err != nil {
-			return err
-		}
-		if err := o.WhisperSpeechGate.validate(o); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported ASR backend %q", o.Backend)
+	if strings.TrimSpace(o.WhisperCommand) == "" {
+		return fmt.Errorf("whisper.cpp server command is empty")
+	}
+	if strings.TrimSpace(o.WhisperModelPath) == "" {
+		return fmt.Errorf("whisper.cpp model path is empty")
+	}
+	if o.productionProfile && filepath.Base(filepath.Clean(o.WhisperModelPath)) != ProductionModelFile {
+		return fmt.Errorf("production whisper.cpp model must be %s", ProductionModelFile)
+	}
+	if err := o.WhisperDecode.validate(); err != nil {
+		return err
+	}
+	if err := o.WhisperSpeechGate.validate(o); err != nil {
+		return err
+	}
+	if o.productionProfile && filepath.Base(filepath.Clean(o.WhisperSpeechGate.ModelPath)) != ProductionSpeechGateFile {
+		return fmt.Errorf("production whisper speech-gate model must be %s", ProductionSpeechGateFile)
 	}
 	return nil
 }
@@ -237,17 +183,11 @@ func (o WhisperDecodeOptions) normalized() WhisperDecodeDescriptor {
 	}
 }
 
-// ProductionWhisperDecode is the single decode profile used by daily
-// catch-ups. Beam search recovered content and numbers that greedy decoding
-// omitted on the private outgoing-Russian benchmark while remaining faster
-// than the Telegram stage.
 func ProductionWhisperDecode() WhisperDecodeOptions {
 	beamSize := 5
 	return WhisperDecodeOptions{BeamSize: &beamSize}
 }
 
-// ProductionWhisperSpeechGate is a whole-file speech-presence check. It does
-// not cut audio, so detected speech always reaches Whisper unchanged.
 func ProductionWhisperSpeechGate(modelPath string) WhisperSpeechGateOptions {
 	threshold := 0.5
 	minSpeechDurationMS := 250
@@ -280,7 +220,7 @@ func (o WhisperDecodeOptions) validate() error {
 	return nil
 }
 
-func (o WhisperSpeechGateOptions) normalized(_ Options) WhisperSpeechGateDescriptor {
+func (o WhisperSpeechGateOptions) normalized() WhisperSpeechGateDescriptor {
 	return WhisperSpeechGateDescriptor{
 		Enabled:              o.Enabled,
 		Model:                stableModelIdentity(o.ModelPath),
@@ -301,7 +241,7 @@ func (o WhisperSpeechGateOptions) validate(parent Options) error {
 	if strings.TrimSpace(o.ModelPath) == "" {
 		return fmt.Errorf("whisper speech-gate model is empty")
 	}
-	value := o.normalized(parent)
+	value := o.normalized()
 	if value.Threshold < 0 || value.Threshold > 1 {
 		return fmt.Errorf("whisper speech-gate threshold must be between 0 and 1")
 	}
@@ -322,6 +262,13 @@ func (o WhisperSpeechGateOptions) command(parent Options) string {
 	return filepath.Join(filepath.Dir(server), "whisper-vad-speech-segments")
 }
 
+func normalizedThreads(threads int) int {
+	if threads > 0 {
+		return threads
+	}
+	return ProductionThreads
+}
+
 func intValue(value *int, fallback int) int {
 	if value == nil {
 		return fallback
@@ -334,29 +281,6 @@ func floatValue(value *float64, fallback float64) float64 {
 		return fallback
 	}
 	return *value
-}
-
-func (o Options) normalizedBackend() string {
-	if strings.TrimSpace(o.CommandTemplate) != "" {
-		return BackendCommand
-	}
-	if backend := strings.ToLower(strings.TrimSpace(o.Backend)); backend != "" {
-		return backend
-	}
-	if strings.TrimSpace(o.WhisperCommand) != "" || strings.TrimSpace(o.WhisperModelPath) != "" {
-		return BackendWhisperCPP
-	}
-	return BackendVosk
-}
-
-func normalizedWhisperAccelerator(value string) string {
-	if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
-		return value
-	}
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
-		return AcceleratorMetal
-	}
-	return AcceleratorCPU
 }
 
 func stableModelIdentity(path string) string {

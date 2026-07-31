@@ -37,23 +37,22 @@ Range-scan сохранил все 1 742 пары `(chat_id, message_id)` из b
 - `telegram_scan` — `get_dialogs`, разрешение target и последовательные history RPC вместе со штатным pacing; media transfer сюда не входит;
 - `download` — фактические попытки скачать пользовательское или временное ASR-медиа вместе с ожиданием download RPC slot; cache hits сюда не входят;
 - `ffmpeg` — подготовка WAV внутри transcriber, включая завершившиеся ошибкой попытки;
-- `model_cold_start` — суммарное время запуска использованных ASR workers и ожидания готовности после загрузки модели;
+- `model_cold_start` — время запуска Whisper worker и ожидания готовности после загрузки модели;
 - `asr` — только распознавание после готовности модели, включая завершившуюся ошибкой работу;
 - `render` — запись и атомарная публикация дневных JSONL/Markdown плюс merged `00-latest-catchup.md`.
 
 `audio_seconds` — суммарная длительность WAV только для успешно распознанных cache misses. `asr_speed_x` показывает отношение audio duration к суммарным ASR worker-seconds. `pipeline_speed_x` показывает throughput всего media pipeline: audio duration к реальному pipeline span. При прогретом transcript cache или отсутствии успешно обработанного аудио все три значения равны нулю.
 
-После появления параллелизма stage durations являются work-seconds, а не разложением wall time. `stage_work_seconds` может быть больше `total_seconds`. Объект `media_pipeline` поэтому отдельно сохраняет:
+После перекрытия Telegram download и локального ASR stage durations являются work-seconds, а не разложением wall time. `stage_work_seconds` может быть больше `total_seconds`. Объект `media_pipeline` поэтому отдельно сохраняет:
 
 - реальный `span_seconds` от начала первого ASR job до завершения последнего;
 - `overlap_seconds` с продолжающимся Telegram producer;
 - queue capacity/peak, submitted/deduplicated/completed/failed jobs;
-- requested cap, activated workers и реальный peak одновременно занятых workers;
-- backend/model/accelerator и backend-specific worker resource/policy;
+- один requested/activated GPU worker и реальный peak одновременно занятых jobs;
+- backend/model/accelerator и фиксированный worker resource;
 - доступную память, среднюю/пиковую общую CPU utilization и измеренный RSS ASR process;
-- доступность GPU sampler: на macOS без elevated `powermetrics` значение явно помечается unavailable, а Metal/Core ML подтверждается runtime evidence;
+- доступность GPU sampler: на macOS без elevated `powermetrics` значение явно помечается unavailable, а Metal подтверждается runtime evidence;
 - startup, RSS, jobs, audio, ffmpeg/ASR/busy seconds и скорость каждого использованного worker;
-- каждое решение auto-controller `grow`/`hold` с backlog, ожидаемой экономией и причиной.
 
 Объект `dialog_checkpoint` сохраняет `enabled`, `fallback_reason`, общее число dialog, `history_rpc`, `unchanged`, `changed` и `new`. CLI печатает те же counters. Checkpoint не используется для `daily`, ручного `daily-catchup --from`, исторического или разорванного диапазона, при несовпадении account/scope и при невалидном state. Неполный/error run его не меняет.
 
@@ -97,35 +96,11 @@ Live-проверка 2026-07-30 на том же восьмидневном д�
 
 ## Bounded media pipeline
 
-Daily использует один последовательный Telegram producer. Он сканирует сообщения, проверяет transcript cache и последовательно скачивает отсутствующее media. После download файл кладется в bounded queue; Telegram producer не ждет локальную обработку. Независимые workers выполняют `ffmpeg → ASR`, каждый через собственный process/model/session. Collector ждет все jobs, применяет результаты по transcript cache path и только затем сортирует и публикует отчеты.
+Daily использует один последовательный Telegram producer. Он сканирует сообщения, проверяет transcript cache и последовательно скачивает отсутствующее media. После download файл кладется в bounded queue ёмкостью два элемента; Telegram producer не ждёт локальную обработку, пока в очереди есть место. Один production Whisper Metal worker выполняет `ffmpeg → whole-file Silero gate → ASR` через один long-lived process/model. Collector ждёт все jobs, применяет результаты по transcript cache path и только затем сортирует и публикует отчеты.
 
-Queue capacity равна `2 × configured worker cap`: 8 в `auto`, 2/4/6/8 в диагностических fixed modes. Заполненная очередь создает backpressure и ограничивает число временных файлов. Одинаковый in-flight cache key получает один job. Transcript публикуется атомарно через temporary file, `fsync`, close и rename.
+Заполненная очередь создаёт backpressure и ограничивает число временных файлов. Одинаковый in-flight cache key получает один job. Transcript публикуется атомарно через temporary file, `fsync`, close и rename. Несколько Whisper workers и динамический controller удалены из production flow: измерения показали, что они конкурируют за общий GPU/unified memory, а после перекрытия локального ASR bottleneck снова становится последовательный Telegram stage.
 
-Vosk CPU `auto` начинается с одного worker и может активировать до четырех. Scale-up выполняется асинхронно, чтобы resource sampling не задерживал Telegram producer. Controller требует:
-
-- queued backlog сверх свободных workers и не меньше 30 секунд известного аудио;
-- ожидаемую экономию больше cold-start с safety margin;
-- общую CPU utilization не выше 80%;
-- достаточно available memory для измеренного RSS дополнительной модели плюс 4 GiB системного резерва.
-
-До первого готового job используется консервативный prior 4× ASR и 2 секунды startup; затем решение опирается на фактические audio/ASR/startup/RSS. Внутри запуска pool только растет: уже загруженная модель сохраняется до конца, чтобы не создавать дребезг.
-
-whisper.cpp Metal/Core ML использует другую policy: `auto_max_workers=1`, `dynamic=false`. Явный fixed count остаётся диагностическим override, но штатный flow не запускает несколько процессов, конкурирующих за один GPU и unified memory.
-
-Cold-cache benchmark 2026-07-30 для дня 2026-07-25:
-
-| Режим | Wall | Pipeline span | Workers | Относительно sequential |
-| --- | ---: | ---: | ---: | ---: |
-| Старый последовательный flow (`021bbf7`) | 94.22 s | 39.26 s local work sequentially | 1 | 1.00× |
-| Pipeline fixed 1 | 60.66 s | 40.32 s | 1 | 1.55× |
-| Pipeline fixed 2 | 54.56 s | 33.94 s | 2 | 1.73× |
-| Pipeline fixed 4 | 55.06 s | 36.30 s | 3 used / 4 activated | 1.71× |
-| Pipeline auto, repeat 1 | 54.95 s | 35.67 s | 2 | 1.71× |
-| Pipeline auto, repeat 2 | 55.61 s | 33.82 s | 2 | 1.69× |
-
-Во всех cold runs: 210 records, 21 attachments, 3 successful ASR jobs, 170.284 seconds audio, 0 FloodWait. После удаления только живых Telegram dialog counters и локальных cache paths normalized JSONL совпал побайтово во всех режимах. Markdown совпал побайтово без нормализации. Временных source/WAV/transcript файлов после запусков не осталось.
-
-Warm-cache повтор в `auto` занял 44.90 s: download/ffmpeg/model/ASR/pipeline span равны нулю, `pipeline_workers=0`, user CPU 0.05 s. Это подтверждает, что cache hit не запускает ASR process.
+Current-head cold-cache E2E для дня 2026-07-25: 211 records, 21 attachments, 3 ASR jobs, 170.284 seconds audio, 0 FloodWait, 85.888 s wall. ASR speed — `17.08×`, media pipeline speed — `13.39×`; один non-speech файл остановлен gate. Warm-cache запуск не стартует `whisper-server`, потому что transcript cache проверяется до download.
 
 ## Расширенный ASR benchmark на M4 Pro
 
@@ -169,6 +144,8 @@ Model-level `no_speech_threshold=0.4`, `suppress_nst` и отключение te
 В stable whisper.cpp v1.9.1 найден upstream CLI defect: `--vad-min-silence-duration-ms` ошибочно перезаписывает minimum speech. Runner намеренно передает minimum speech после minimum silence и защищен regression test. После workaround gate дал `0 missed / 0 hallucinations` на 30 speech + 12 controls.
 
 Machine-readable приватные результаты лежат в `.state/asr-quality-20260731/` и не входят в git. `cmd/asr-benchmark` сохраняет corpus hash, полные transcripts, decoder/gate descriptor, confidence diagnostics, audio/ffmpeg/gate/ASR/wall, cold-start, RSS/CPU, WER/CER/content metrics и ошибки.
+
+Финальный повтор после архитектурной чистки на последних пяти voice (262.473 s аудио) занял 17.473 s wall: ASR speed `15.70×`, pipeline speed `15.02×`, cold-start 0.253 s, peak RSS 923,385,856 bytes, mean process CPU 9.41%. Ошибок, пустых результатов и пропущенной речи — 0; все пять текстов побайтово совпали с предыдущим production-прогоном. Результат сохранён в `.state/asr-quality-20260731/results-polish-current.json`.
 
 ### Telegram completeness и live E2E
 

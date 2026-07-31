@@ -5,17 +5,13 @@ import (
 	"testing"
 )
 
-func TestBackendDescriptorAndCacheIdentitySeparateVariants(t *testing.T) {
+func TestDescriptorAndCacheIdentitySeparateWhisperVariants(t *testing.T) {
 	base := Options{
-		Backend:            BackendWhisperCPP,
-		WhisperCommand:     "/tmp/whisper-server",
-		WhisperModelPath:   "/models/ggml-small.bin",
-		WhisperAccelerator: AcceleratorMetal,
-		WhisperThreads:     4,
-		Language:           "ru",
+		WhisperCommand:   "/tmp/whisper-server",
+		WhisperModelPath: "/models/ggml-small.bin",
+		WhisperThreads:   4,
+		Language:         "ru",
 	}
-	coreML := base
-	coreML.WhisperAccelerator = AcceleratorMetalCoreML
 	quantized := base
 	quantized.WhisperModelPath = "/models/ggml-small-q5_0.bin"
 	english := base
@@ -37,8 +33,7 @@ func TestBackendDescriptorAndCacheIdentitySeparateVariants(t *testing.T) {
 
 	identities := map[string]bool{}
 	for name, opts := range map[string]Options{
-		"metal":            base,
-		"coreml":           coreML,
+		"base":             base,
 		"quantized":        quantized,
 		"english":          english,
 		"different-binary": differentBinary,
@@ -67,34 +62,36 @@ func TestBackendDescriptorAndCacheIdentitySeparateVariants(t *testing.T) {
 	if got := speechGate.Descriptor().SpeechGate.Model; got != "ggml-silero-v6.2.0.bin" {
 		t.Fatalf("speech gate model = %q", got)
 	}
-
-	commandA := Options{CommandTemplate: "engine-a {input} {output}"}
-	commandB := Options{CommandTemplate: "engine-b {input} {output}"}
-	if commandA.CacheIdentity() == commandB.CacheIdentity() {
-		t.Fatal("external command templates share a transcript cache identity")
-	}
 }
 
 func TestProductionWhisperProfileIsPinned(t *testing.T) {
-	opts := Options{
-		Backend:            BackendWhisperCPP,
-		WhisperCommand:     "whisper-server",
-		WhisperModelPath:   "ggml-large-v3-turbo-q5_0.bin",
-		WhisperAccelerator: AcceleratorMetal,
-		WhisperDecode:      ProductionWhisperDecode(),
-		WhisperSpeechGate:  ProductionWhisperSpeechGate("ggml-silero-v6.2.0.bin"),
-	}
+	opts := ProductionOptions(
+		"whisper-server",
+		"ggml-large-v3-turbo-q5_0.bin",
+		"ggml-silero-v6.2.0.bin",
+		"ffmpeg",
+		nil,
+	)
 	if err := opts.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	descriptor := opts.Descriptor()
+	if descriptor.Backend != BackendWhisperCPP || descriptor.Accelerator != AcceleratorMetal {
+		t.Fatalf("production backend = %#v", descriptor)
+	}
+	if descriptor.Language != ProductionLanguage || descriptor.Threads != ProductionThreads {
+		t.Fatalf("production language/threads = %q/%d", descriptor.Language, descriptor.Threads)
+	}
 	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 {
 		t.Fatalf("production beam size = %#v, want 5", descriptor.Decode)
 	}
 	if descriptor.SpeechGate == nil {
 		t.Fatal("production speech gate is disabled")
 	}
-	if descriptor.SpeechGate.Threshold != 0.5 || descriptor.SpeechGate.MinSpeechDurationMS != 250 {
+	if descriptor.SpeechGate.Threshold != 0.5 ||
+		descriptor.SpeechGate.MinSpeechDurationMS != 250 ||
+		descriptor.SpeechGate.MinSilenceDurationMS != 100 ||
+		descriptor.SpeechGate.SpeechPadMS != 30 {
 		t.Fatalf("production speech gate = %#v", descriptor.SpeechGate)
 	}
 	if descriptor.PostFilter != whisperTerminalHallucinationProfile {
@@ -102,30 +99,41 @@ func TestProductionWhisperProfileIsPinned(t *testing.T) {
 	}
 }
 
-func TestBackendWorkerPolicyIsResourceSpecific(t *testing.T) {
-	vosk := Options{Backend: BackendVosk}.WorkerPolicy()
-	if vosk.Resource != "cpu" || !vosk.Dynamic || vosk.AutoMaxWorkers != 4 {
-		t.Fatalf("vosk policy = %+v", vosk)
+func TestProductionWhisperProfileRejectsDifferentModels(t *testing.T) {
+	opts := ProductionOptions(
+		"whisper-server",
+		"ggml-small-q5_1.bin",
+		ProductionSpeechGateFile,
+		"ffmpeg",
+		nil,
+	)
+	if err := opts.Validate(); err == nil {
+		t.Fatal("production profile accepted a different Whisper model")
 	}
-	whisper := Options{Backend: BackendWhisperCPP}.WorkerPolicy()
-	if whisper.Resource != "gpu" || whisper.Dynamic || whisper.AutoMaxWorkers != 1 {
-		t.Fatalf("whisper policy = %+v", whisper)
+	opts = ProductionOptions(
+		"whisper-server",
+		ProductionModelFile,
+		"ggml-silero-old.bin",
+		"ffmpeg",
+		nil,
+	)
+	if err := opts.Validate(); err == nil {
+		t.Fatal("production profile accepted a different speech-gate model")
 	}
 }
 
-func TestValidateBackendConfiguration(t *testing.T) {
+func TestValidateWhisperConfiguration(t *testing.T) {
 	tests := []struct {
 		name string
 		opts Options
 		ok   bool
 	}{
-		{name: "vosk", opts: Options{Backend: BackendVosk, VoskCommand: "vosk", VoskModelPath: "model"}, ok: true},
-		{name: "whisper", opts: Options{Backend: BackendWhisperCPP, WhisperCommand: "server", WhisperModelPath: "model", WhisperAccelerator: AcceleratorMetal}, ok: true},
-		{name: "missing whisper model", opts: Options{Backend: BackendWhisperCPP, WhisperCommand: "server"}, ok: false},
-		{name: "bad accelerator", opts: Options{Backend: BackendWhisperCPP, WhisperCommand: "server", WhisperModelPath: "model", WhisperAccelerator: "magic"}, ok: false},
+		{name: "whisper", opts: Options{WhisperCommand: "server", WhisperModelPath: "model"}, ok: true},
+		{name: "missing command", opts: Options{WhisperModelPath: "model"}, ok: false},
+		{name: "missing model", opts: Options{WhisperCommand: "server"}, ok: false},
 		{name: "bad no speech threshold", opts: whisperWithNoSpeechThreshold(1.1), ok: false},
 		{name: "missing gate model", opts: Options{
-			Backend: BackendWhisperCPP, WhisperCommand: "server", WhisperModelPath: "model",
+			WhisperCommand: "server", WhisperModelPath: "model",
 			WhisperSpeechGate: WhisperSpeechGateOptions{Enabled: true},
 		}, ok: false},
 	}
@@ -141,7 +149,6 @@ func TestValidateBackendConfiguration(t *testing.T) {
 
 func whisperWithNoSpeechThreshold(value float64) Options {
 	return Options{
-		Backend:          BackendWhisperCPP,
 		WhisperCommand:   "server",
 		WhisperModelPath: "model",
 		WhisperDecode: WhisperDecodeOptions{
@@ -152,7 +159,6 @@ func whisperWithNoSpeechThreshold(value float64) Options {
 
 func TestStableModelIdentityDoesNotEmbedPrivatePath(t *testing.T) {
 	opts := Options{
-		Backend:          BackendWhisperCPP,
 		WhisperCommand:   "server",
 		WhisperModelPath: filepath.Join("/Users/private", "models", "ggml-small.bin"),
 	}

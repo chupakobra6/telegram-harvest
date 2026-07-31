@@ -108,7 +108,7 @@ func (h *pipelineHarness) factory(delay time.Duration, audio float64, asr time.D
 	}
 }
 
-func TestMediaPipelineFixedWorkersCollectDeterministicallyAndAtomically(t *testing.T) {
+func TestMediaPipelineSingleWorkerCollectsDeterministicallyAndAtomically(t *testing.T) {
 	dir := t.TempDir()
 	harness := &pipelineHarness{}
 	var observed stages.MediaPipelineMetrics
@@ -119,8 +119,6 @@ func TestMediaPipelineFixedWorkersCollectDeterministicallyAndAtomically(t *testi
 		ASRLog:              func(event harvest.ASRLogEvent) error { events = append(events, event); return nil },
 	}
 	pipeline, err := newMediaPipelineWithConfig(context.Background(), opts, mediaPipelineConfig{
-		Mode:            "2",
-		MaxWorkers:      2,
 		QueueCapacity:   4,
 		RunnerFactory:   harness.factory(40*time.Millisecond, 12, 2*time.Second, false, nil),
 		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
@@ -157,7 +155,6 @@ func TestMediaPipelineFixedWorkersCollectDeterministicallyAndAtomically(t *testi
 			Record:          records[i],
 			Attachment:      records[i].Attachments[0],
 			AttachmentIndex: 0,
-			EstimatedAudio:  12,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -177,10 +174,10 @@ func TestMediaPipelineFixedWorkersCollectDeterministicallyAndAtomically(t *testi
 			t.Fatalf("cache %d = %q, want %q", i, string(content), want)
 		}
 	}
-	if harness.peak.Load() != 2 {
-		t.Fatalf("peak concurrency = %d, want 2", harness.peak.Load())
+	if harness.peak.Load() != 1 {
+		t.Fatalf("peak concurrency = %d, want 1", harness.peak.Load())
 	}
-	if observed.WorkersPeak != 2 || observed.JobsCompleted != 3 || observed.QueueCapacity != 4 || observed.AudioSeconds != 36 {
+	if observed.WorkersPeak != 1 || observed.WorkersActivated != 1 || observed.JobsCompleted != 3 || observed.QueueCapacity != 4 || observed.AudioSeconds != 36 {
 		t.Fatalf("pipeline metrics = %+v", observed)
 	}
 	if math.Abs(observed.SpeechGateSeconds-0.006) > 1e-9 {
@@ -208,7 +205,7 @@ func TestMediaPipelineDeduplicatesInflightMedia(t *testing.T) {
 	dir := t.TempDir()
 	harness := &pipelineHarness{}
 	pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{}, mediaPipelineConfig{
-		Mode: "1", MaxWorkers: 1, QueueCapacity: 2,
+		QueueCapacity:   2,
 		RunnerFactory:   harness.factory(20*time.Millisecond, 5, time.Second, false, nil),
 		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
 		SampleRSS:       func(int) uint64 { return 0 },
@@ -228,7 +225,7 @@ func TestMediaPipelineDeduplicatesInflightMedia(t *testing.T) {
 	record := harvest.MessageRecord{Attachments: []harvest.Attachment{{Kind: "voice", TranscriptPath: key}}}
 	if err := pipeline.enqueue(mediaPipelineJob{
 		Key: key, InputPath: input, TranscriptPath: key,
-		Record: record, Attachment: record.Attachments[0], EstimatedAudio: 5,
+		Record: record, Attachment: record.Attachments[0],
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +249,7 @@ func TestMediaPipelineBoundedQueueAppliesBackpressure(t *testing.T) {
 	gate := make(chan struct{})
 	harness := &pipelineHarness{}
 	pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{}, mediaPipelineConfig{
-		Mode: "1", MaxWorkers: 1, QueueCapacity: 1,
+		QueueCapacity:   1,
 		RunnerFactory:   harness.factory(0, 1, time.Second, false, gate),
 		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
 		SampleRSS:       func(int) uint64 { return 0 },
@@ -270,7 +267,7 @@ func TestMediaPipelineBoundedQueueAppliesBackpressure(t *testing.T) {
 		if !pipeline.claim(key) {
 			t.Fatalf("claim %s failed", key)
 		}
-		return mediaPipelineJob{Key: key, InputPath: input, TranscriptPath: key, EstimatedAudio: 1}
+		return mediaPipelineJob{Key: key, InputPath: input, TranscriptPath: key}
 	}
 	if err := pipeline.enqueue(makeJob("one")); err != nil {
 		t.Fatal(err)
@@ -311,7 +308,7 @@ func TestMediaPipelineFailureDoesNotPublishPartialCache(t *testing.T) {
 	dir := t.TempDir()
 	harness := &pipelineHarness{}
 	pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{}, mediaPipelineConfig{
-		Mode: "1", MaxWorkers: 1, QueueCapacity: 2,
+		QueueCapacity:   2,
 		RunnerFactory:   harness.factory(0, 1, time.Second, true, nil),
 		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
 		SampleRSS:       func(int) uint64 { return 0 },
@@ -329,7 +326,7 @@ func TestMediaPipelineFailureDoesNotPublishPartialCache(t *testing.T) {
 	record := harvest.MessageRecord{Attachments: []harvest.Attachment{{Kind: "voice", TranscriptPath: key}}}
 	if err := pipeline.enqueue(mediaPipelineJob{
 		Key: key, InputPath: input, TranscriptPath: key,
-		Record: record, Attachment: record.Attachments[0], EstimatedAudio: 1,
+		Record: record, Attachment: record.Attachments[0],
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -348,102 +345,19 @@ func TestMediaPipelineFailureDoesNotPublishPartialCache(t *testing.T) {
 	}
 }
 
-func TestMediaPipelineAutoGrowsOnlyWithResourceHeadroom(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		resources   mediaPipelineResourceSnapshot
-		wantWorkers int
-		wantReason  string
-	}{
-		{
-			name:        "grows",
-			resources:   mediaPipelineResourceSnapshot{AvailableMemoryBytes: 16 << 30, CPUUtilization: 0.20},
-			wantWorkers: 2,
-		},
-		{
-			name:        "holds_for_cpu",
-			resources:   mediaPipelineResourceSnapshot{AvailableMemoryBytes: 16 << 30, CPUUtilization: 0.95},
-			wantWorkers: 1,
-			wantReason:  "cpu_headroom",
-		},
-		{
-			name:        "holds_for_memory",
-			resources:   mediaPipelineResourceSnapshot{AvailableMemoryBytes: 2 << 30, CPUUtilization: 0.20},
-			wantWorkers: 1,
-			wantReason:  "memory_headroom",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			harness := &pipelineHarness{}
-			pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{}, mediaPipelineConfig{
-				Mode: asrWorkerAuto, MaxWorkers: 2, QueueCapacity: 8,
-				RunnerFactory: harness.factory(10*time.Millisecond, 300, 60*time.Second, false, nil),
-				SampleResources: func() mediaPipelineResourceSnapshot {
-					return tc.resources
-				},
-				SampleRSS: func(int) uint64 { return 512 << 20 },
-				Now:       time.Now,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			for i := range 6 {
-				input := filepath.Join(dir, strconvItoa(i)+".ogg")
-				key := filepath.Join(dir, strconvItoa(i)+".txt")
-				if err := os.WriteFile(input, []byte("audio"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				pipeline.claim(key)
-				if err := pipeline.enqueue(mediaPipelineJob{
-					Key: key, InputPath: input, TranscriptPath: key, EstimatedAudio: 300,
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := pipeline.waitAndApply(nil); err != nil {
-				t.Fatal(err)
-			}
-			metrics := pipeline.metrics()
-			if metrics.WorkersPeak != tc.wantWorkers {
-				t.Fatalf("workers peak = %d, want %d; decisions=%+v", metrics.WorkersPeak, tc.wantWorkers, metrics.ScaleDecisions)
-			}
-			if tc.wantReason != "" {
-				found := false
-				for _, decision := range metrics.ScaleDecisions {
-					if decision.Reason == tc.wantReason {
-						found = true
-					}
-				}
-				if !found {
-					t.Fatalf("missing reason %q in %+v", tc.wantReason, metrics.ScaleDecisions)
-				}
-			}
-		})
-	}
-}
-
-func TestMediaPipelineWhisperAutoUsesOneGPUWorker(t *testing.T) {
+func TestMediaPipelineUsesOneGPUWorker(t *testing.T) {
 	harness := &pipelineHarness{}
 	opts := harvest.HistoryOptions{
 		TranscribeMedia:    true,
-		ASRBackend:         transcribe.BackendWhisperCPP,
-		ASRWorkerMode:      asrWorkerAuto,
 		TranscriberFactory: harness.factory(0, 1, time.Millisecond, false, nil),
 	}
 	pipeline, err := newMediaPipeline(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pipeline.cfg.MaxWorkers != 1 {
-		t.Fatalf("max workers = %d, want 1", pipeline.cfg.MaxWorkers)
-	}
-	if pipeline.cfg.WorkerPolicy.Dynamic {
-		t.Fatalf("whisper policy = %+v, want non-dynamic", pipeline.cfg.WorkerPolicy)
+	metrics := pipeline.metrics()
+	if len(pipeline.workers) != 1 || metrics.WorkersRequested != 1 || metrics.Mode != "single-gpu" {
+		t.Fatalf("pipeline worker contract = %+v", metrics)
 	}
 	pipeline.abort()
-}
-
-func strconvItoa(value int) string {
-	return string(rune('a' + value))
 }

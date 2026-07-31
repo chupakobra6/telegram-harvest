@@ -170,10 +170,7 @@ func (r *WhisperServerRunner) startLocked(ctx context.Context) (time.Duration, e
 	if err != nil {
 		return time.Since(startedAt), err
 	}
-	threads := r.opts.WhisperThreads
-	if threads <= 0 {
-		threads = 4
-	}
+	threads := normalizedThreads(r.opts.WhisperThreads)
 	args := []string{
 		"--model", strings.TrimSpace(r.opts.WhisperModelPath),
 		"--host", "127.0.0.1",
@@ -183,12 +180,6 @@ func (r *WhisperServerRunner) startLocked(ctx context.Context) (time.Duration, e
 		"--language", normalizedLanguage(r.opts.Language),
 		"--no-timestamps",
 		"--no-language-probabilities",
-	}
-	if normalizedWhisperAccelerator(r.opts.WhisperAccelerator) == AcceleratorCPU {
-		args = append(args, "--no-gpu")
-	}
-	if vadModel := strings.TrimSpace(r.opts.WhisperVADModelPath); vadModel != "" {
-		args = append(args, "--vad", "--vad-model", vadModel)
 	}
 	cmd := exec.Command(strings.TrimSpace(r.opts.WhisperCommand), args...)
 	cmd.Env = commandEnvironment(r.opts.Environment)
@@ -244,16 +235,11 @@ func (r *WhisperServerRunner) startLocked(ctx context.Context) (time.Duration, e
 
 func (r *WhisperServerRunner) verifyAccelerationLocked() error {
 	evidence := strings.ToLower(r.processOutputLocked())
-	switch normalizedWhisperAccelerator(r.opts.WhisperAccelerator) {
-	case AcceleratorMetal:
-		if !strings.Contains(evidence, "ggml_metal_init: found device") {
-			return fmt.Errorf("whisper.cpp did not confirm Metal activation%s", r.processDetailLocked())
-		}
-	case AcceleratorMetalCoreML:
-		if !strings.Contains(evidence, "core ml model loaded") ||
-			!strings.Contains(evidence, "ggml_metal_init: found device") {
-			return fmt.Errorf("whisper.cpp did not confirm Metal + Core ML activation%s", r.processDetailLocked())
-		}
+	if !strings.Contains(evidence, "ggml_metal_init: found device") {
+		return fmt.Errorf("whisper.cpp did not confirm Metal activation%s", r.processDetailLocked())
+	}
+	if strings.Contains(evidence, "core ml model loaded") || strings.Contains(evidence, "coreml = 1") {
+		return fmt.Errorf("whisper.cpp unexpectedly activated Core ML; production requires Metal-only%s", r.processDetailLocked())
 	}
 	return nil
 }
@@ -350,7 +336,7 @@ func streamWhisperRequest(
 }
 
 func runWhisperSpeechGate(ctx context.Context, opts Options, wavPath string) (bool, error) {
-	gate := opts.WhisperSpeechGate.normalized(opts)
+	gate := opts.WhisperSpeechGate.normalized()
 	args := whisperSpeechGateArgs(opts, gate, wavPath)
 	command := exec.CommandContext(ctx, opts.WhisperSpeechGate.command(opts), args...)
 	command.Env = commandEnvironment(opts.Environment)

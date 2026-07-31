@@ -1,6 +1,37 @@
 package asrbench
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
+)
+
+func TestValidateVariantAllowsOnlyWhisperMetalExperimentSurface(t *testing.T) {
+	valid := Variant{
+		Name:        "turbo-beam5",
+		Backend:     transcribe.BackendWhisperCPP,
+		Accelerator: transcribe.AcceleratorMetal,
+		Language:    transcribe.ProductionLanguage,
+		Threads:     transcribe.ProductionThreads,
+	}
+	if err := validateVariant(valid); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Variant){
+		"backend":     func(variant *Variant) { variant.Backend = "vosk" },
+		"accelerator": func(variant *Variant) { variant.Accelerator = "metal-coreml" },
+		"language":    func(variant *Variant) { variant.Language = "en" },
+		"threads":     func(variant *Variant) { variant.Threads = 8 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := validateVariant(candidate); err == nil {
+				t.Fatalf("variant accepted unsupported %s: %#v", name, candidate)
+			}
+		})
+	}
+}
 
 func TestNormalizeAndQuality(t *testing.T) {
 	if got := Normalize(" Ёж, ПРИВЕТ!! 42 "); got != "еж привет 42" {

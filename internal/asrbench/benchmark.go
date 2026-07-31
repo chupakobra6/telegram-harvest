@@ -40,14 +40,12 @@ type Variant struct {
 	Backend          string                              `json:"backend"`
 	Command          string                              `json:"command"`
 	ModelPath        string                              `json:"model_path"`
-	Accelerator      string                              `json:"accelerator,omitempty"`
+	Accelerator      string                              `json:"accelerator"`
 	Language         string                              `json:"language,omitempty"`
 	Threads          int                                 `json:"threads,omitempty"`
-	VoskGrammarPath  string                              `json:"vosk_grammar_path,omitempty"`
 	FFmpegCommand    string                              `json:"ffmpeg_command,omitempty"`
 	ExpectedEvidence string                              `json:"expected_evidence,omitempty"`
 	Environment      map[string]string                   `json:"environment,omitempty"`
-	VADModelPath     string                              `json:"vad_model_path,omitempty"`
 	Decode           transcribe.WhisperDecodeOptions     `json:"decode,omitempty"`
 	SpeechGate       transcribe.WhisperSpeechGateOptions `json:"speech_gate,omitempty"`
 }
@@ -71,31 +69,30 @@ type Availability struct {
 }
 
 type VariantResult struct {
-	Name                    string                  `json:"name"`
-	Backend                 transcribe.Descriptor   `json:"backend"`
-	WorkerPolicy            transcribe.WorkerPolicy `json:"worker_policy"`
-	Runs                    []RunResult             `json:"runs"`
-	MedianASRSpeedX         float64                 `json:"median_asr_speed_x"`
-	MedianPipelineSpeedX    float64                 `json:"median_pipeline_speed_x"`
-	MedianColdStart         float64                 `json:"median_cold_start_seconds"`
-	PeakRSSBytes            uint64                  `json:"peak_rss_bytes"`
-	MeanProcessCPU          float64                 `json:"mean_process_cpu_percent"`
-	PeakProcessCPU          float64                 `json:"peak_process_cpu_percent"`
-	WER                     *float64                `json:"wer,omitempty"`
-	CER                     *float64                `json:"cer,omitempty"`
-	WordPrecision           *float64                `json:"word_precision,omitempty"`
-	WordRecall              *float64                `json:"word_recall,omitempty"`
-	WordF1                  *float64                `json:"word_f1,omitempty"`
-	NegationRecall          *float64                `json:"negation_recall,omitempty"`
-	NumberRecall            *float64                `json:"number_recall,omitempty"`
-	EmptyTranscripts        int                     `json:"empty_transcripts"`
-	FailedTranscripts       int                     `json:"failed_transcripts"`
-	MissedSpeech            int                     `json:"missed_speech"`
-	NoSpeechHallucinations  int                     `json:"no_speech_hallucinations"`
-	ClearlyWrongTranscripts int                     `json:"clearly_wrong_transcripts"`
-	EvidenceMatched         bool                    `json:"evidence_matched"`
-	Evidence                string                  `json:"evidence,omitempty"`
-	Transcripts             []TranscriptResult      `json:"transcripts"`
+	Name                    string                `json:"name"`
+	Backend                 transcribe.Descriptor `json:"backend"`
+	Runs                    []RunResult           `json:"runs"`
+	MedianASRSpeedX         float64               `json:"median_asr_speed_x"`
+	MedianPipelineSpeedX    float64               `json:"median_pipeline_speed_x"`
+	MedianColdStart         float64               `json:"median_cold_start_seconds"`
+	PeakRSSBytes            uint64                `json:"peak_rss_bytes"`
+	MeanProcessCPU          float64               `json:"mean_process_cpu_percent"`
+	PeakProcessCPU          float64               `json:"peak_process_cpu_percent"`
+	WER                     *float64              `json:"wer,omitempty"`
+	CER                     *float64              `json:"cer,omitempty"`
+	WordPrecision           *float64              `json:"word_precision,omitempty"`
+	WordRecall              *float64              `json:"word_recall,omitempty"`
+	WordF1                  *float64              `json:"word_f1,omitempty"`
+	NegationRecall          *float64              `json:"negation_recall,omitempty"`
+	NumberRecall            *float64              `json:"number_recall,omitempty"`
+	EmptyTranscripts        int                   `json:"empty_transcripts"`
+	FailedTranscripts       int                   `json:"failed_transcripts"`
+	MissedSpeech            int                   `json:"missed_speech"`
+	NoSpeechHallucinations  int                   `json:"no_speech_hallucinations"`
+	ClearlyWrongTranscripts int                   `json:"clearly_wrong_transcripts"`
+	EvidenceMatched         bool                  `json:"evidence_matched"`
+	Evidence                string                `json:"evidence,omitempty"`
+	Transcripts             []TranscriptResult    `json:"transcripts"`
 }
 
 type RunResult struct {
@@ -155,7 +152,31 @@ func LoadManifest(path string) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("sample %s: %w", sample.ID, err)
 		}
 	}
+	for _, variant := range manifest.Variants {
+		if err := validateVariant(variant); err != nil {
+			return Manifest{}, fmt.Errorf("variant %q: %w", variant.Name, err)
+		}
+	}
 	return manifest, nil
+}
+
+func validateVariant(variant Variant) error {
+	if strings.TrimSpace(variant.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if variant.Backend != transcribe.BackendWhisperCPP {
+		return fmt.Errorf("backend must be %q", transcribe.BackendWhisperCPP)
+	}
+	if variant.Accelerator != transcribe.AcceleratorMetal {
+		return fmt.Errorf("accelerator must be %q", transcribe.AcceleratorMetal)
+	}
+	if variant.Language != transcribe.ProductionLanguage {
+		return fmt.Errorf("language must be %q", transcribe.ProductionLanguage)
+	}
+	if variant.Threads != transcribe.ProductionThreads {
+		return fmt.Errorf("threads must be %d", transcribe.ProductionThreads)
+	}
+	return nil
 }
 
 func Run(ctx context.Context, manifest Manifest, runs int, workDir string) (Report, error) {
@@ -198,9 +219,8 @@ func runVariant(ctx context.Context, variant Variant, samples []Sample, runs int
 		return VariantResult{}, err
 	}
 	result := VariantResult{
-		Name:         variant.Name,
-		Backend:      opts.Descriptor(),
-		WorkerPolicy: opts.WorkerPolicy(),
+		Name:    variant.Name,
+		Backend: opts.Descriptor(),
 	}
 	var asrSpeeds, pipelineSpeeds, coldStarts []float64
 	var cpuWeighted float64
@@ -310,27 +330,16 @@ func runVariant(ctx context.Context, variant Variant, samples []Sample, runs int
 }
 
 func variantOptions(variant Variant) transcribe.Options {
-	opts := transcribe.Options{
-		Backend:             variant.Backend,
-		WhisperAccelerator:  variant.Accelerator,
-		WhisperThreads:      variant.Threads,
-		Language:            variant.Language,
-		VoskGrammarPath:     variant.VoskGrammarPath,
-		FFmpegCommand:       variant.FFmpegCommand,
-		Environment:         variant.Environment,
-		WhisperVADModelPath: variant.VADModelPath,
-		WhisperDecode:       variant.Decode,
-		WhisperSpeechGate:   variant.SpeechGate,
+	return transcribe.Options{
+		WhisperCommand:    variant.Command,
+		WhisperModelPath:  variant.ModelPath,
+		WhisperThreads:    variant.Threads,
+		Language:          variant.Language,
+		FFmpegCommand:     variant.FFmpegCommand,
+		Environment:       variant.Environment,
+		WhisperDecode:     variant.Decode,
+		WhisperSpeechGate: variant.SpeechGate,
 	}
-	switch variant.Backend {
-	case transcribe.BackendWhisperCPP:
-		opts.WhisperCommand = variant.Command
-		opts.WhisperModelPath = variant.ModelPath
-	case transcribe.BackendVosk:
-		opts.VoskCommand = variant.Command
-		opts.VoskModelPath = variant.ModelPath
-	}
-	return opts
 }
 
 func CorpusHash(samples []Sample) (string, error) {
@@ -605,7 +614,7 @@ func sampleProcess(pid int) (uint64, float64) {
 func GPUUtilizationAvailability() Availability {
 	if runtime.GOOS == "darwin" {
 		return Availability{
-			Reason: "powermetrics GPU sampling requires elevated privileges; runtime Metal/Core ML evidence is recorded instead",
+			Reason: "powermetrics GPU sampling requires elevated privileges; runtime Metal evidence is recorded instead",
 		}
 	}
 	return Availability{Reason: "GPU sampler is not configured on this platform"}

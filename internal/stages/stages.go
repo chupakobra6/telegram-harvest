@@ -22,7 +22,6 @@ type MediaPipelineMetrics struct {
 	Accelerator             string               `json:"accelerator,omitempty"`
 	Model                   string               `json:"model,omitempty"`
 	WorkerResource          string               `json:"worker_resource,omitempty"`
-	DynamicWorkers          bool                 `json:"dynamic_workers"`
 	Mode                    string               `json:"mode,omitempty"`
 	QueueCapacity           int                  `json:"queue_capacity"`
 	QueuePeak               int                  `json:"queue_peak"`
@@ -47,19 +46,7 @@ type MediaPipelineMetrics struct {
 	GPUUtilizationAvailable bool                 `json:"gpu_utilization_available"`
 	GPUUtilizationReason    string               `json:"gpu_utilization_reason,omitempty"`
 	EstimatedWorkerRSSBytes uint64               `json:"estimated_worker_rss_bytes,omitempty"`
-	ScaleDecisions          []MediaScaleDecision `json:"scale_decisions,omitempty"`
 	Workers                 []MediaWorkerMetrics `json:"workers,omitempty"`
-}
-
-type MediaScaleDecision struct {
-	At              time.Time `json:"at"`
-	Workers         int       `json:"workers"`
-	RemainingAudio  float64   `json:"remaining_audio_seconds"`
-	ExpectedSaving  float64   `json:"expected_saving_seconds,omitempty"`
-	AvailableMemory uint64    `json:"available_memory_bytes,omitempty"`
-	CPUUtilization  float64   `json:"cpu_utilization,omitempty"`
-	Action          string    `json:"action"`
-	Reason          string    `json:"reason,omitempty"`
 }
 
 type MediaWorkerMetrics struct {

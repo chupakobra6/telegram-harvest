@@ -21,14 +21,7 @@ import (
 )
 
 const (
-	asrWorkerAuto               = "auto"
-	defaultASRWorkerLimit       = 4
-	defaultWorkerRSSBytes       = 768 << 20
-	defaultSystemMemoryReserve  = 4 << 30
-	autoScaleSafetyMargin       = 1.5
-	autoScaleMinimumSaving      = 750 * time.Millisecond
-	autoScaleMinimumQueuedAudio = 30.0
-	autoScaleCPUUtilizationCeil = 0.80
+	mediaPipelineQueueCapacity = 2
 )
 
 type mediaPipelineJob struct {
@@ -39,7 +32,6 @@ type mediaPipelineJob struct {
 	Attachment       harvest.Attachment
 	AttachmentIndex  int
 	DownloadSeconds  float64
-	EstimatedAudio   float64
 	TranscribeOption transcribe.Options
 }
 
@@ -56,11 +48,8 @@ type mediaPipelineResourceSnapshot struct {
 }
 
 type mediaPipelineConfig struct {
-	Mode            string
-	MaxWorkers      int
 	QueueCapacity   int
 	Backend         transcribe.Descriptor
-	WorkerPolicy    transcribe.WorkerPolicy
 	RunnerFactory   func() harvest.Transcriber
 	SampleResources func() mediaPipelineResourceSnapshot
 	SampleRSS       func(int) uint64
@@ -73,9 +62,8 @@ type mediaPipeline struct {
 	opts   harvest.HistoryOptions
 	cfg    mediaPipelineConfig
 
-	jobs    chan mediaPipelineJob
-	wg      sync.WaitGroup
-	drained chan struct{}
+	jobs chan mediaPipelineJob
+	wg   sync.WaitGroup
 
 	mu                sync.Mutex
 	closing           bool
@@ -91,20 +79,12 @@ type mediaPipeline struct {
 	jobsDeduplicated  int
 	jobsCompleted     int
 	jobsFailed        int
-	queuedAudio       float64
 	activeJobs        int
 	peakActiveJobs    int
 	totalAudio        float64
 	totalASR          float64
-	totalStartup      float64
-	startupSamples    int
 	workerRSS         uint64
 	lastResources     mediaPipelineResourceSnapshot
-	scaleDecisions    []stages.MediaScaleDecision
-	activeWorkers     int
-	drainedOnce       sync.Once
-	scaleWG           sync.WaitGroup
-	scaleMu           sync.Mutex
 	resourceDone      chan struct{}
 	resourceWG        sync.WaitGroup
 	resourceStopOnce  sync.Once
@@ -115,43 +95,19 @@ type mediaPipeline struct {
 
 type mediaPipelineWorker struct {
 	id      int
-	start   chan struct{}
-	active  bool
 	runner  harvest.Transcriber
 	metrics stages.MediaWorkerMetrics
-}
-
-func ParseASRWorkerMode(value string) (mode string, workers int, err error) {
-	mode = strings.ToLower(strings.TrimSpace(value))
-	if mode == "" {
-		mode = asrWorkerAuto
-	}
-	if mode == asrWorkerAuto {
-		return mode, defaultASRWorkerLimit, nil
-	}
-	workers, err = strconv.Atoi(mode)
-	if err != nil || workers < 1 || workers > defaultASRWorkerLimit {
-		return "", 0, fmt.Errorf("--asr-workers must be auto or an integer from 1 to %d", defaultASRWorkerLimit)
-	}
-	return mode, workers, nil
 }
 
 func newMediaPipeline(ctx context.Context, opts harvest.HistoryOptions) (*mediaPipeline, error) {
 	if !opts.TranscribeMedia {
 		return nil, nil
 	}
-	mode, workers, err := ParseASRWorkerMode(opts.ASRWorkerMode)
-	if err != nil {
-		return nil, err
-	}
 	factory := opts.TranscriberFactory
 	transcribeOpts := transcribeOptions(opts)
 	descriptor := transcribeOpts.Descriptor()
-	policy := transcribeOpts.WorkerPolicy()
 	if factory == nil && opts.Transcriber != nil {
 		runner := opts.Transcriber
-		mode = "1"
-		workers = 1
 		factory = func() harvest.Transcriber { return runner }
 	}
 	if factory == nil {
@@ -162,18 +118,9 @@ func newMediaPipeline(ctx context.Context, opts harvest.HistoryOptions) (*mediaP
 			return transcribe.NewManagedRunner(transcribeOpts)
 		}
 	}
-	if mode == asrWorkerAuto {
-		workers = policy.AutoMaxWorkers
-		if workers < 1 {
-			workers = 1
-		}
-	}
 	return newMediaPipelineWithConfig(ctx, opts, mediaPipelineConfig{
-		Mode:            mode,
-		MaxWorkers:      workers,
-		QueueCapacity:   2 * workers,
+		QueueCapacity:   mediaPipelineQueueCapacity,
 		Backend:         descriptor,
-		WorkerPolicy:    policy,
 		RunnerFactory:   factory,
 		SampleResources: sampleMediaPipelineResources,
 		SampleRSS:       sampleProcessRSS,
@@ -182,18 +129,8 @@ func newMediaPipeline(ctx context.Context, opts harvest.HistoryOptions) (*mediaP
 }
 
 func newMediaPipelineWithConfig(ctx context.Context, opts harvest.HistoryOptions, cfg mediaPipelineConfig) (*mediaPipeline, error) {
-	if cfg.MaxWorkers < 1 {
-		return nil, fmt.Errorf("media pipeline max workers must be positive")
-	}
 	if cfg.QueueCapacity < 1 {
-		cfg.QueueCapacity = 2 * cfg.MaxWorkers
-	}
-	if cfg.WorkerPolicy.AutoMaxWorkers == 0 {
-		cfg.WorkerPolicy = transcribe.WorkerPolicy{
-			Resource:       "cpu",
-			AutoMaxWorkers: cfg.MaxWorkers,
-			Dynamic:        true,
-		}
+		cfg.QueueCapacity = mediaPipelineQueueCapacity
 	}
 	if cfg.RunnerFactory == nil {
 		return nil, fmt.Errorf("media pipeline runner factory is required")
@@ -214,26 +151,16 @@ func newMediaPipelineWithConfig(ctx context.Context, opts harvest.HistoryOptions
 		opts:              opts,
 		cfg:               cfg,
 		jobs:              make(chan mediaPipelineJob, cfg.QueueCapacity),
-		drained:           make(chan struct{}),
 		results:           make(map[string]mediaPipelineResult),
 		claimed:           make(map[string]struct{}),
 		producerStartedAt: cfg.Now(),
 		resourceDone:      make(chan struct{}),
 	}
-	p.wg.Add(cfg.MaxWorkers)
-	for id := 1; id <= cfg.MaxWorkers; id++ {
-		worker := &mediaPipelineWorker{id: id, start: make(chan struct{})}
-		worker.metrics.ID = id
-		p.workers = append(p.workers, worker)
-		go p.runWorker(worker)
-	}
-	if cfg.Mode == asrWorkerAuto {
-		p.activateNextWorkerLocked()
-	} else {
-		for range cfg.MaxWorkers {
-			p.activateNextWorkerLocked()
-		}
-	}
+	worker := &mediaPipelineWorker{id: 1, runner: cfg.RunnerFactory()}
+	worker.metrics.ID = worker.id
+	p.workers = append(p.workers, worker)
+	p.wg.Add(1)
+	go p.runWorker(worker)
 	p.startResourceMonitor()
 	return p, nil
 }
@@ -265,9 +192,6 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 	if p == nil {
 		return fmt.Errorf("media pipeline is unavailable")
 	}
-	if job.EstimatedAudio <= 0 {
-		job.EstimatedAudio = 30
-	}
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
@@ -275,7 +199,6 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 		return fmt.Errorf("media pipeline is closed")
 	}
 	p.jobsSubmitted++
-	p.queuedAudio += job.EstimatedAudio
 	p.mu.Unlock()
 
 	select {
@@ -285,17 +208,9 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 			p.queuePeak = queued
 		}
 		p.mu.Unlock()
-		if p.cfg.Mode == asrWorkerAuto && p.cfg.WorkerPolicy.Dynamic {
-			p.scaleWG.Add(1)
-			go func() {
-				defer p.scaleWG.Done()
-				p.maybeScale()
-			}()
-		}
 		return nil
 	case <-p.ctx.Done():
 		p.mu.Lock()
-		p.queuedAudio -= job.EstimatedAudio
 		p.jobsSubmitted--
 		delete(p.claimed, job.Key)
 		p.mu.Unlock()
@@ -304,26 +219,8 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 	}
 }
 
-func (p *mediaPipeline) activateNextWorkerLocked() {
-	if p.activeWorkers >= len(p.workers) {
-		return
-	}
-	worker := p.workers[p.activeWorkers]
-	worker.active = true
-	worker.runner = p.cfg.RunnerFactory()
-	p.activeWorkers++
-	close(worker.start)
-}
-
 func (p *mediaPipeline) runWorker(worker *mediaPipelineWorker) {
 	defer p.wg.Done()
-	select {
-	case <-worker.start:
-	case <-p.drained:
-		return
-	case <-p.ctx.Done():
-		return
-	}
 	defer func() {
 		if closer, ok := worker.runner.(interface{ Close() error }); ok {
 			if err := closer.Close(); err != nil {
@@ -354,13 +251,11 @@ func (p *mediaPipeline) runWorker(worker *mediaPipelineWorker) {
 		p.mu.Lock()
 		worker.metrics.BusySeconds += busy.Seconds()
 		p.mu.Unlock()
-		p.maybeScale()
 	}
 }
 
 func (p *mediaPipeline) markJobStarted(job mediaPipelineJob) {
 	p.mu.Lock()
-	p.queuedAudio = math.Max(0, p.queuedAudio-job.EstimatedAudio)
 	p.activeJobs++
 	if p.activeJobs > p.peakActiveJobs {
 		p.peakActiveJobs = p.activeJobs
@@ -429,10 +324,6 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 	p.activeJobs = max(0, p.activeJobs-1)
 	p.totalAudio += audioSeconds
 	p.totalASR += result.Result.ASRDuration.Seconds()
-	p.totalStartup += result.Result.ModelColdStartDuration.Seconds()
-	if result.Result.ModelColdStartDuration > 0 {
-		p.startupSamples++
-	}
 	if result.Err != nil {
 		p.jobsFailed++
 		worker.metrics.Failures++
@@ -452,90 +343,6 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 		}
 	}
 	p.completedAt = p.cfg.Now()
-	if p.closing && p.jobsCompleted >= p.jobsSubmitted {
-		p.drainedOnce.Do(func() { close(p.drained) })
-	}
-}
-
-func (p *mediaPipeline) maybeScale() {
-	p.scaleMu.Lock()
-	defer p.scaleMu.Unlock()
-	p.mu.Lock()
-	idleWorkers := p.activeWorkers - p.activeJobs
-	if p.cfg.Mode != asrWorkerAuto || !p.cfg.WorkerPolicy.Dynamic || p.activeWorkers >= p.cfg.MaxWorkers || len(p.jobs) <= idleWorkers {
-		p.mu.Unlock()
-		return
-	}
-	workers := p.activeWorkers
-	remainingAudio := p.queuedAudio
-	speed := speedRatio(p.totalAudio, p.totalASR)
-	startup := p.totalStartup / float64(max(1, p.startupSamples))
-	workerRSS := p.workerRSS
-	p.mu.Unlock()
-
-	if remainingAudio < autoScaleMinimumQueuedAudio {
-		p.mu.Lock()
-		if len(p.scaleDecisions) < 32 {
-			p.scaleDecisions = append(p.scaleDecisions, stages.MediaScaleDecision{
-				At:             p.cfg.Now(),
-				Workers:        workers,
-				RemainingAudio: remainingAudio,
-				Action:         "hold",
-				Reason:         "queued_audio_below_minimum",
-			})
-		}
-		p.mu.Unlock()
-		return
-	}
-	if speed <= 0 {
-		speed = 4
-	}
-	if startup <= 0 {
-		startup = 2
-	}
-	remainingWork := remainingAudio / speed
-	expectedSaving := remainingWork/float64(workers) - remainingWork/float64(workers+1)
-	if p.totalAudio == 0 && workers == 1 {
-		// The current worker is already busy, so a second worker can consume
-		// queued work immediately. Use a conservative bootstrap prior until
-		// the first measured result is available.
-		expectedSaving = remainingWork
-	}
-	resources := p.cfg.SampleResources()
-	rssEstimate := workerRSS
-	if rssEstimate == 0 {
-		rssEstimate = defaultWorkerRSSBytes
-	}
-	action := "hold"
-	reason := ""
-	if expectedSaving <= startup*autoScaleSafetyMargin+autoScaleMinimumSaving.Seconds() {
-		reason = "expected_saving_below_startup_cost"
-	} else if resources.CPUUtilization > autoScaleCPUUtilizationCeil {
-		reason = "cpu_headroom"
-	} else if resources.AvailableMemoryBytes > 0 && resources.AvailableMemoryBytes < rssEstimate+defaultSystemMemoryReserve {
-		reason = "memory_headroom"
-	} else {
-		action = "grow"
-	}
-	decision := stages.MediaScaleDecision{
-		At:              p.cfg.Now(),
-		Workers:         workers,
-		RemainingAudio:  remainingAudio,
-		ExpectedSaving:  expectedSaving,
-		AvailableMemory: resources.AvailableMemoryBytes,
-		CPUUtilization:  resources.CPUUtilization,
-		Action:          action,
-		Reason:          reason,
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.lastResources = resources
-	if len(p.scaleDecisions) < 32 {
-		p.scaleDecisions = append(p.scaleDecisions, decision)
-	}
-	if action == "grow" && p.activeWorkers == workers && p.activeWorkers < p.cfg.MaxWorkers && p.queuedAudio > 0 {
-		p.activateNextWorkerLocked()
-	}
 }
 
 func (p *mediaPipeline) waitAndApply(records []harvest.MessageRecord) error {
@@ -550,11 +357,7 @@ func (p *mediaPipeline) waitAndApply(records []harvest.MessageRecord) error {
 	p.closing = true
 	p.producerCompleted = p.cfg.Now()
 	close(p.jobs)
-	if p.jobsCompleted >= p.jobsSubmitted {
-		p.drainedOnce.Do(func() { close(p.drained) })
-	}
 	p.mu.Unlock()
-	p.scaleWG.Wait()
 	p.wg.Wait()
 	p.stopResourceMonitor()
 	p.cancel()
@@ -657,9 +460,9 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 	if overlap < 0 || p.startedAt.IsZero() {
 		overlap = 0
 	}
-	workers := make([]stages.MediaWorkerMetrics, 0, p.activeWorkers)
+	workers := make([]stages.MediaWorkerMetrics, 0, 1)
 	var speechGateSeconds float64
-	for _, worker := range p.workers[:p.activeWorkers] {
+	for _, worker := range p.workers {
 		metrics := worker.metrics
 		if metrics.Jobs == 0 {
 			continue
@@ -668,17 +471,20 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		speechGateSeconds += metrics.SpeechGateSeconds
 		workers = append(workers, metrics)
 	}
+	workersActivated := 0
+	if p.jobsSubmitted > 0 {
+		workersActivated = 1
+	}
 	return stages.MediaPipelineMetrics{
 		Backend:                 p.cfg.Backend.Backend,
 		Accelerator:             p.cfg.Backend.Accelerator,
 		Model:                   p.cfg.Backend.Model,
-		WorkerResource:          p.cfg.WorkerPolicy.Resource,
-		DynamicWorkers:          p.cfg.WorkerPolicy.Dynamic,
-		Mode:                    p.cfg.Mode,
+		WorkerResource:          "gpu",
+		Mode:                    "single-gpu",
 		QueueCapacity:           cap(p.jobs),
 		QueuePeak:               p.queuePeak,
-		WorkersRequested:        p.cfg.MaxWorkers,
-		WorkersActivated:        p.activeWorkers,
+		WorkersRequested:        1,
+		WorkersActivated:        workersActivated,
 		WorkersPeak:             p.peakActiveJobs,
 		JobsSubmitted:           p.jobsSubmitted,
 		JobsDeduplicated:        p.jobsDeduplicated,
@@ -695,9 +501,8 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		SystemCPUMean:           ratioOrZero(p.resourceCPUTotal, float64(p.resourceSamples)),
 		SystemCPUPeak:           p.resourceCPUPeak,
 		GPUUtilizationAvailable: false,
-		GPUUtilizationReason:    gpuUtilizationUnavailableReason(p.cfg.WorkerPolicy.Resource),
+		GPUUtilizationReason:    gpuUtilizationUnavailableReason("gpu"),
 		EstimatedWorkerRSSBytes: p.workerRSS,
-		ScaleDecisions:          append([]stages.MediaScaleDecision(nil), p.scaleDecisions...),
 		Workers:                 workers,
 	}
 }

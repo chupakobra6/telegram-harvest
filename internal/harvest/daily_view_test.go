@@ -31,7 +31,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 					DownloadError:    "skipped: document size 215.0 MiB exceeds document cap 10.0 MiB",
 					TranscriptPath:   filepath.Join(dir, "voice.txt"),
 					TranscriptCached: true,
-					TranscriptError:  "ffmpeg: exit status 234: Output file does not contain any stream Error opening output file /tmp/.vosk.wav",
+					TranscriptError:  "ffmpeg: exit status 234: Output file does not contain any stream Error opening output file /tmp/.asr.wav",
 					Transcript:       "Поговорил про итоги дня",
 				},
 			},
@@ -128,7 +128,7 @@ func TestWriteDailyMarkdownRendersOutgoingTimelineAndTranscripts(t *testing.T) {
 		"transcript_error",
 		"ffmpeg:",
 		"Output file does not contain any stream",
-		".vosk.wav",
+		".asr.wav",
 	} {
 		if strings.Contains(content, unwanted) {
 			t.Fatalf("markdown includes %q:\n%s", unwanted, content)

@@ -30,7 +30,6 @@ func TestNumericPeerCandidatesSupportsTelegramChannelIDs(t *testing.T) {
 
 func TestTranscribeOptionsPinsDailyWhisperProfile(t *testing.T) {
 	opts := transcribeOptions(harvest.HistoryOptions{
-		ASRBackend:          transcribe.BackendWhisperCPP,
 		WhisperCommand:      "whisper-server",
 		WhisperModelPath:    "ggml-large-v3-turbo-q5_0.bin",
 		WhisperGateFilePath: "ggml-silero-v6.2.0.bin",
@@ -581,12 +580,12 @@ func TestRunTranscriberUsesExplicitRunnerWithoutCommandConfig(t *testing.T) {
 }
 
 func TestTranscriptErrorMessageClassifiesNoAudioStream(t *testing.T) {
-	err := transcriptErrorMessage(errString("ffmpeg: exit status 234: [out#0/wav @ 0x123] Output file does not contain any stream Error opening output file /tmp/.vosk-123.wav"))
+	err := transcriptErrorMessage(errString("ffmpeg: exit status 234: [out#0/wav @ 0x123] Output file does not contain any stream Error opening output file /tmp/.asr-123.wav"))
 	if err != "skipped: media has no audio stream" {
 		t.Fatalf("error = %q", err)
 	}
-	other := transcriptErrorMessage(errString("vosk session: model load failed"))
-	if other != "vosk session: model load failed" {
+	other := transcriptErrorMessage(errString("whisper.cpp session: model load failed"))
+	if other != "whisper.cpp session: model load failed" {
 		t.Fatalf("other error = %q", other)
 	}
 }
@@ -1042,27 +1041,18 @@ func TestRPCTimeoutsAreConservativeForHistoryReads(t *testing.T) {
 	}
 }
 
-func TestTranscriptCachePathIsIsolatedByASRBackend(t *testing.T) {
+func TestTranscriptCachePathIsIsolatedByWhisperModel(t *testing.T) {
 	record := harvest.MessageRecord{
 		Source:    "telegram",
 		MessageID: 42,
 		Chat:      harvest.Chat{ID: 7},
 	}
 	attachment := harvest.Attachment{Kind: "voice", MediaID: "document:99"}
-	vosk := transcribe.Options{
-		Backend:       transcribe.BackendVosk,
-		VoskCommand:   "vosk",
-		VoskModelPath: "/models/vosk",
-	}
-	whisper := transcribe.Options{
-		Backend:            transcribe.BackendWhisperCPP,
-		WhisperCommand:     "whisper-server",
-		WhisperModelPath:   "/models/ggml-small.bin",
-		WhisperAccelerator: transcribe.AcceleratorMetal,
-	}
-	voskPath := transcriptCachePath("transcripts", vosk.CacheIdentity(), record, 0, attachment)
-	whisperPath := transcriptCachePath("transcripts", whisper.CacheIdentity(), record, 0, attachment)
-	if voskPath == whisperPath {
-		t.Fatalf("cache paths collide: %s", voskPath)
+	small := transcribe.Options{WhisperCommand: "whisper-server", WhisperModelPath: "/models/ggml-small.bin"}
+	turbo := transcribe.Options{WhisperCommand: "whisper-server", WhisperModelPath: "/models/ggml-large-v3-turbo-q5_0.bin"}
+	smallPath := transcriptCachePath("transcripts", small.CacheIdentity(), record, 0, attachment)
+	turboPath := transcriptCachePath("transcripts", turbo.CacheIdentity(), record, 0, attachment)
+	if smallPath == turboPath {
+		t.Fatalf("cache paths collide: %s", smallPath)
 	}
 }

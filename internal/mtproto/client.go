@@ -2266,7 +2266,6 @@ func (s *Session) transcribeAttachmentMedia(
 			Attachment:       *attachment,
 			AttachmentIndex:  index,
 			DownloadSeconds:  downloadSeconds,
-			EstimatedAudio:   attachment.DurationSeconds,
 			TranscribeOption: transcribeOpts,
 		}
 		if err := pipeline.enqueue(job); err != nil {
@@ -2544,25 +2543,13 @@ func createTemporaryMediaPath(mediaDir string, fileName string) (string, error) 
 }
 
 func transcribeOptions(opts harvest.HistoryOptions) transcribe.Options {
-	result := transcribe.Options{
-		CommandTemplate:    opts.TranscribeCommand,
-		Backend:            opts.ASRBackend,
-		VoskCommand:        opts.VoskCommand,
-		VoskModelPath:      opts.VoskModelPath,
-		VoskGrammarPath:    opts.VoskGrammarPath,
-		WhisperCommand:     opts.WhisperCommand,
-		WhisperModelPath:   opts.WhisperModelPath,
-		WhisperAccelerator: opts.WhisperAccelerator,
-		WhisperThreads:     opts.WhisperThreads,
-		Language:           opts.ASRLanguage,
-		FFmpegCommand:      opts.FFmpegCommand,
-		StageTiming:        opts.StageTiming,
-	}
-	if strings.EqualFold(opts.ASRBackend, transcribe.BackendWhisperCPP) {
-		result.WhisperDecode = transcribe.ProductionWhisperDecode()
-		result.WhisperSpeechGate = transcribe.ProductionWhisperSpeechGate(opts.WhisperGateFilePath)
-	}
-	return result
+	return transcribe.ProductionOptions(
+		opts.WhisperCommand,
+		opts.WhisperModelPath,
+		opts.WhisperGateFilePath,
+		opts.FFmpegCommand,
+		opts.StageTiming,
+	)
 }
 
 func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, int64, bool) {

@@ -3,7 +3,7 @@
 Локальный read-only CLI для сбора Telegram-данных через MTProto user authorization.
 Проект рассчитан на два практических сценария:
 
-- **daily reports** - личные исходящие сообщения и настроенные chat-scoped источники за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через выбранный ASR backend;
+- **daily reports** - личные исходящие сообщения и настроенные chat-scoped источники за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через production Whisper pipeline;
 - **study harvest** - выгрузка, синк и агентские Markdown-представления для учебных чатов из allowlist.
 
 CLI один и тот же для всех сценариев. Аккаунт выбирается профилем `main` или `study`, а не отдельными account-specific командами.
@@ -17,7 +17,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
-| ASR | Общий backend contract поддерживает Vosk CPU и долгоживущий whisper.cpp server с Metal или Metal + Core ML; worker policy выбирается по типу ресурса. |
+| ASR | Один долгоживущий whisper.cpp large-v3-turbo q5_0 server на Metal, whole-file Silero gate и один GPU worker. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
 | Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. RPC идут последовательно и с pacing. |
@@ -122,7 +122,7 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 
 ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации текущего прогона: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Дневной файл перезаписывается следующим прогоном этой даты и может остаться частичным после interruption.
 
-Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, requested/activated/peak workers, startup/RSS/ASR speed, CPU evidence и решения auto-controller. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time: локальные стадии перекрываются с Telegram и между собой.
+Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, startup/RSS/ASR speed и CPU evidence. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time, потому что локальная обработка перекрывается с Telegram download.
 
 Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
 
@@ -133,7 +133,6 @@ go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --progress
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe-video=phone
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --asr-workers=2 # diagnostic override
 go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
@@ -192,53 +191,13 @@ go run ./cmd/telegram-harvest --profile main daily-download-media \
   --out-dir media-manual
 ```
 
-## ASR backends
+## ASR pipeline
 
-Штатный daily-профиль на этой машине — `whisper.cpp large-v3-turbo q5_0 + Metal`, `beam_size=5` и отдельный whole-file Silero speech gate. Профиль зафиксирован в коде: агенту не нужно подбирать decoder/gate-флаги. Vosk сохранён как CPU fallback и benchmark baseline.
+Единственный production-профиль — `whisper.cpp large-v3-turbo q5_0 + Metal`, русский язык, четыре CPU helper threads, `beam_size=5` и отдельный whole-file Silero speech gate. Эти параметры зафиксированы в коде. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
 
-`internal/transcribe` предоставляет единый managed-runner contract, descriptor, cache identity и worker policy:
+Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan/download остаётся единственным последовательным paced producer. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 
-- `vosk`: CPU backend; `auto` может динамически вырасти от одного до четырёх независимых процессов, если backlog и ресурсы доказывают пользу;
-- `whispercpp`: один долгоживущий локальный `whisper-server`; модель загружается один раз, а WAV отправляются на loopback HTTP. Для Metal и Metal + Core ML безопасный `auto` всегда использует один GPU worker;
-- custom command: одноразовый внешний hook с одним worker.
-
-Явные `--asr-workers=2..4` остаются диагностическим override. Для Whisper они позволяют поставить эксперимент, но не являются штатным режимом: процессы конкурируют за один GPU и unified memory.
-
-Transcript cache включает backend, accelerator, model/quantization, язык, threads, decode profile, speech-gate profile и Vosk grammar. Поэтому результаты Vosk, Metal, Core ML, разных моделей и настроек не смешиваются. Смена backend один раз создаст новый cache namespace; готовый transcript по-прежнему публикуется атомарно.
-
-### Vosk CPU fallback
-
-Daily-транскрибация использует локальный Vosk helper на Go:
-
-```bash
-make vosk-transcribe
-```
-
-Ожидаемая настройка:
-
-```dotenv
-TG_HARVEST_DAILY_VOSK_COMMAND=bin/vosk-transcribe
-TG_HARVEST_DAILY_VOSK_MODEL_PATH=models/vosk-model-small-ru-0.22
-TG_HARVEST_DAILY_FFMPEG_COMMAND=ffmpeg
-
-# Если libvosk не лежит в /opt/homebrew/lib или /usr/local/lib:
-TG_HARVEST_DAILY_VOSK_LIBRARY_PATH=.state/vosk-runtime/libvosk.dylib
-```
-
-Worker protocol (the first response is emitted only after the model and optional grammar are loaded):
-
-```text
-vosk-transcribe --session <model-dir> [grammar-json-path]
-{"ready":true}
-{"id":1,"wav_path":"/tmp/.vosk-123.wav"}
-{"id":1,"text":"recognized text"}
-```
-
-Это гибридный режим без постоянного демона. Telegram producer один: история и media downloads остаются строго последовательными и paced. После скачивания отсутствующее медиа попадает в bounded queue, а локальные workers параллельно выполняют `ffmpeg → ASR`. Результаты присоединяются к исходным сообщениям по cache path перед сортировкой и публикацией, поэтому порядок завершения workers не меняет JSONL/Markdown.
-
-По умолчанию `--asr-workers=auto`: запуск начинается с одного worker, затем controller может постепенно активировать до четырех. Он расширяет пул только при реальном queued audio backlog, ожидаемой выгоде больше startup cost, CPU ниже защитного порога и достаточной доступной памяти с системным резервом. Фактический RSS Vosk worker измеряется после загрузки модели. Уже активированный worker сохраняется до конца запуска; дребезга create/kill нет. Значения `1..4` предназначены для диагностики и benchmark, обычному агенту их задавать не нужно.
-
-Каждый Vosk worker имеет собственный process, модель и session protocol. Transcript cache проверяется до download, одинаковый in-flight media key распознается один раз, а готовый transcript публикуется через `temp → fsync/close → rename`. Если все транскрипты уже есть в кэше, ASR process не стартует и timing report показывает `pipeline_workers=0`.
+Несколько Whisper-процессов не запускаются: на Apple Silicon они конкурируют за один GPU и unified memory, а измеренный production workload этого не требует. Transcript cache включает runtime/model/quantization, язык, threads, decode, gate и post-filter; готовый transcript публикуется через `temp → fsync/close → rename`. Cache проверяется до media download, поэтому повторный catch-up не запускает ASR для уже известных вложений.
 
 Generic `video` по умолчанию идет через preflight `--transcribe-video=phone`: только вертикальные телефонные видео с Telegram metadata, длительностью до 360 секунд, размером до 80 MiB и разрешением не выше 1080x1920. Горизонтальные фильмы/длинные ролики скипаются до скачивания и попадают в ASR log со skip reason. Режимы:
 
@@ -248,23 +207,7 @@ Generic `video` по умолчанию идет через preflight `--transcr
 --transcribe-video=off   # never transcribe generic video
 ```
 
-Поддерживаемые настройки:
-
-```dotenv
-TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH=
-```
-
-Кастомный ASR hook можно задать явно:
-
-```dotenv
-TG_HARVEST_DAILY_TRANSCRIBE_CMD=whisper-cli --language ru --input {input} --output {output}
-```
-
-Такой hook запускается per attachment и не использует Vosk session protocol.
-
-Vosk helper использует `libvosk`/Kaldi только на CPU. Metal к нему намеренно не добавляется.
-
-### whisper.cpp Metal / Core ML
+### whisper.cpp Metal runtime
 
 whisper.cpp собирается из официального checkout. Пример Metal-сборки:
 
@@ -284,40 +227,36 @@ cmake --build .state/asr-runtime/whisper.cpp/build-metal -j 12 \
 Настройка daily:
 
 ```dotenv
-TG_HARVEST_DAILY_ASR_BACKEND=whispercpp
 TG_HARVEST_DAILY_WHISPER_COMMAND=.state/asr-runtime/whisper.cpp/build-metal/bin/whisper-server
 TG_HARVEST_DAILY_WHISPER_MODEL_PATH=.state/asr-runtime/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin
-TG_HARVEST_DAILY_WHISPER_ACCELERATOR=metal
-TG_HARVEST_DAILY_WHISPER_THREADS=4
-TG_HARVEST_DAILY_ASR_LANGUAGE=ru
 TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH=.state/asr-runtime/whisper.cpp/models/ggml-silero-v6.2.0.bin
+TG_HARVEST_DAILY_FFMPEG_COMMAND=ffmpeg
 ```
 
 Daily всегда использует один GPU worker, `beam_size=5` и Silero с threshold `0.5`, minimum speech `250 ms`, minimum silence `100 ms`, padding `30 ms`. Gate запускается после ffmpeg и только отвечает «есть ли в файле речь»; исходный WAV целиком отправляется в Whisper. Это убирает non-speech hallucinations, не рискуя обрезать отрицания или начало/конец фразы. Известные точные terminal boilerplate-фразы Whisper (`Продолжение следует`, `Субтитры сделал DimaTorzok` и подобные) удаляются только отдельной последней строкой и записываются в diagnostics; совпадение внутри нормального предложения не трогается.
 
-Core ML требует encoder `ggml-<model>-encoder.mlmodelc` рядом с GGML model и отдельную сборку с `-DWHISPER_COREML=ON`. Runtime evidence должен одновременно содержать `COREML = 1`, загрузку Core ML model и Metal device. Одного имени конфигурации недостаточно: benchmark проверяет фактические логи.
+Runtime обязан подтвердить `ggml_metal_init: found device`; отсутствие Metal или неожиданная активация Core ML останавливает ASR вместо тихого перехода на другой pipeline.
 
-Инженерный benchmark запускается отдельным developer tool, не добавляя второй пользовательский catch-up flow:
+Инженерный benchmark сравнивает только Whisper-варианты decoder/model/gate и не добавляет второй пользовательский catch-up flow:
 
 ```bash
 go run ./cmd/asr-benchmark \
-  --manifest .state/asr-benchmark/manifest.json \
-  --out .state/asr-benchmark/results.json \
+  --manifest /path/to/manifest.json \
+  --out /path/to/results.json \
   --runs 3
 ```
 
 ## Производительность daily
 
-Контрольный cold-cache день 2026-07-25 содержал 210 сообщений и три ASR jobs общей длительностью 170.284 с. Старый последовательный flow занял 94.22 с; auto pipeline — 54.95 и 55.61 с на двух повторах, то есть примерно 1.70–1.71× быстрее. Fixed 1 worker занял 60.66 с, fixed 2 — 54.56 с, fixed 4 — 55.06 с. Auto выбрал два workers; четыре не дали дополнительной пользы, потому что critical path снова определялся последовательной Telegram-работой.
+Контрольный current-head E2E на дне с 211 сообщениями и тремя ASR jobs общей длительностью 170.284 с занял 85.888 с: ASR speed `17.08×`, media pipeline speed `13.39×`, 0 FloodWait и 0 потерянных сообщений. Финальный повтор на выборке последних пяти голосовых дал `15.70×` ASR speed и `15.02×` pipeline speed. Подробные сравнения качества и воспроизводимые условия находятся в [`docs/performance.md`](docs/performance.md).
 
 | Нагрузка дня | Оценка |
 | --- | ---: |
 | Почти без ASR | 1.5-2 минуты |
 | Обычный день с voice/round-video | 2.5-6 минут |
 | Тяжелый день с десятками voice/round-video/phone-video ASR | 6-8 минут |
-| 19 дней с локальным Vosk CPU (старая baseline-оценка) | около 1 часа |
 
-Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в CPU ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
+Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
 Daily пропускает per-chat history для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.
 
 Для полноты daily использует только `messages.getHistory` и уже локально оставляет self/outgoing и настроенных дополнительных отправителей. `messages.search` намеренно не используется: реальный пустой-query поиск по self воспроизводимо пропустил существующее исходящее сообщение. History pagination завершается по временной границе, safe checkpoint `MinID`, пустой странице или явному hard limit, но не только потому, что Telegram вернул короткую страницу.
@@ -376,7 +315,7 @@ agent-view/
 
 Study `dump`/`sync` не транскрибируют audio/video. Они сохраняют inspectable материалы вроде photos/images/documents при включенном `--download-media`.
 
-Для явно запрошенной полной выгрузки одного чата основного аккаунта bounded `dump` может подключить тот же Vosk session worker и phone-video policy, что и daily:
+Для явно запрошенной полной выгрузки одного чата основного аккаунта bounded `dump` использует тот же production Whisper pipeline и phone-video policy, что и daily:
 
 ```bash
 make dump PROFILE=main CHAT=1234567890 \
@@ -413,7 +352,6 @@ make help
 make setup
 make fmt
 make test
-make vosk-transcribe
 go run ./cmd/telegram-harvest --help
 go run ./cmd/telegram-harvest --profile main daily --help
 go run ./cmd/telegram-harvest --profile main daily-catchup --help
@@ -424,12 +362,11 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --help
 | Путь | Назначение |
 | --- | --- |
 | `cmd/telegram-harvest` | CLI entrypoint и wiring команд. |
-| `cmd/asr-benchmark` | Developer-only воспроизводимый benchmark ASR backends на локальном corpus manifest. |
-| `cmd/vosk-transcribe` | Go/cgo Vosk helper с one-shot и session режимами. |
+| `cmd/asr-benchmark` | Developer-only воспроизводимый benchmark Whisper model/decode/gate вариантов на локальном corpus manifest. |
 | `internal/config` | `.env`, профили, defaults, allowlist и runtime paths. |
 | `internal/mtproto` | Telegram transport, login, dialogs/history/topics/daily reads. |
 | `internal/harvest` | JSONL model, sync state, daily Markdown, compact и agent views. |
-| `internal/transcribe` | Общий ASR descriptor/cache/policy contract, Vosk session runner, whisper.cpp server runner и custom hook. |
+| `internal/transcribe` | Production Whisper profile, descriptor/cache contract, speech gate и long-lived whisper.cpp server runner. |
 | `internal/asrbench` | Corpus hashing, cold repetitions, process resources, WER/CER и error/hallucination metrics. |
 | `internal/runlock` | Per-session lock по файлу вида `.sessions/<session>.json.runtime.lock`, чтобы не запускать два MTProto процесса на одну session file и не блокировать другой аккаунт. |
 | `reports/daily` | Локальные Markdown-отчеты для пользователя, ignored by git. |

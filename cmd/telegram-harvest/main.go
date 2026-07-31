@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -56,7 +55,6 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	if strings.TrimSpace(profile) == "" {
 		return printError(stderr, 2, fmt.Errorf("--profile main|study is required"))
 	}
-	includeDailyRuntime := command == "daily" || command == "daily-catchup"
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
 		return printError(stderr, 1, err)
@@ -66,6 +64,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return printError(stderr, 1, err)
 	}
 	cfg = cfg.WithRoot(projectRoot)
+	includeDailyRuntime := cfg.Mode == config.ModeMain
 	client := mtproto.New(cfg)
 
 	switch command {
@@ -197,8 +196,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  --profile main|study  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
-	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off] [--asr-workers auto|1..4]")
-	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off] [--asr-workers auto|1..4]")
+	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
+	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
@@ -215,6 +214,9 @@ func printUsage(out io.Writer) {
 }
 
 func printError(stderr io.Writer, code int, err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	fmt.Fprintln(stderr, err)
 	return code
 }
@@ -261,16 +263,13 @@ func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client, inclu
 func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
 	defaults := dailyRuntimeDefaults()
 	fmt.Fprintf(out, "daily_transcribe_default=%t\n", defaults.TranscribeMedia)
-	fmt.Fprintf(out, "daily_transcribe_command_set=%t\n", strings.TrimSpace(defaults.TranscribeCommand) != "")
-	fmt.Fprintf(out, "daily_asr_backend=%s\n", defaults.ASRBackend)
-	fmt.Fprintf(out, "daily_vosk_command=%s\n", defaults.VoskCommand)
-	fmt.Fprintf(out, "daily_vosk_model_path=%s\n", defaults.VoskModelPath)
-	fmt.Fprintf(out, "daily_vosk_grammar_path=%s\n", defaults.VoskGrammarPath)
+	fmt.Fprintf(out, "daily_asr_backend=%s\n", transcribe.BackendWhisperCPP)
 	fmt.Fprintf(out, "daily_whisper_command=%s\n", defaults.WhisperCommand)
 	fmt.Fprintf(out, "daily_whisper_model_path=%s\n", defaults.WhisperModelPath)
-	fmt.Fprintf(out, "daily_whisper_accelerator=%s\n", defaults.WhisperAccelerator)
+	fmt.Fprintf(out, "daily_whisper_accelerator=%s\n", transcribe.AcceleratorMetal)
 	fmt.Fprintf(out, "daily_whisper_speech_gate_model_path=%s\n", defaults.WhisperGateFilePath)
-	fmt.Fprintf(out, "daily_asr_language=%s\n", defaults.ASRLanguage)
+	fmt.Fprintf(out, "daily_asr_language=%s\n", transcribe.ProductionLanguage)
+	fmt.Fprintf(out, "daily_asr_workers=1\n")
 	fmt.Fprintf(out, "daily_ffmpeg_command=%s\n", defaults.FFmpegCommand)
 	if !includeChecks {
 		return
@@ -280,43 +279,20 @@ func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
 	} else {
 		fmt.Fprintf(out, "daily_ffmpeg_status=missing\n")
 	}
-	if strings.TrimSpace(defaults.VoskCommand) == "" {
-		fmt.Fprintf(out, "daily_vosk_command_status=missing\n")
-	} else if resolved, ok := resolveCommand(defaults.VoskCommand); ok {
-		fmt.Fprintf(out, "daily_vosk_command_status=ok:%s\n", resolved)
+	if resolved, ok := resolveCommand(defaults.WhisperCommand); ok {
+		fmt.Fprintf(out, "daily_whisper_command_status=ok:%s\n", resolved)
 	} else {
-		fmt.Fprintf(out, "daily_vosk_command_status=missing\n")
+		fmt.Fprintf(out, "daily_whisper_command_status=missing\n")
 	}
-	if strings.TrimSpace(defaults.VoskModelPath) == "" {
-		fmt.Fprintf(out, "daily_vosk_model_status=missing\n")
-	} else if fileExists(defaults.VoskModelPath) {
-		fmt.Fprintf(out, "daily_vosk_model_status=ok\n")
+	if fileExists(defaults.WhisperModelPath) {
+		fmt.Fprintf(out, "daily_whisper_model_status=ok\n")
 	} else {
-		fmt.Fprintf(out, "daily_vosk_model_status=missing\n")
+		fmt.Fprintf(out, "daily_whisper_model_status=missing\n")
 	}
-	if strings.TrimSpace(defaults.VoskGrammarPath) == "" {
-		fmt.Fprintf(out, "daily_vosk_grammar_status=not_set\n")
-	} else if fileExists(defaults.VoskGrammarPath) {
-		fmt.Fprintf(out, "daily_vosk_grammar_status=ok\n")
+	if fileExists(defaults.WhisperGateFilePath) {
+		fmt.Fprintf(out, "daily_whisper_speech_gate_status=ok\n")
 	} else {
-		fmt.Fprintf(out, "daily_vosk_grammar_status=missing\n")
-	}
-	if defaults.ASRBackend == transcribe.BackendWhisperCPP {
-		if resolved, ok := resolveCommand(defaults.WhisperCommand); ok {
-			fmt.Fprintf(out, "daily_whisper_command_status=ok:%s\n", resolved)
-		} else {
-			fmt.Fprintf(out, "daily_whisper_command_status=missing\n")
-		}
-		if fileExists(defaults.WhisperModelPath) {
-			fmt.Fprintf(out, "daily_whisper_model_status=ok\n")
-		} else {
-			fmt.Fprintf(out, "daily_whisper_model_status=missing\n")
-		}
-		if fileExists(defaults.WhisperGateFilePath) {
-			fmt.Fprintf(out, "daily_whisper_speech_gate_status=ok\n")
-		} else {
-			fmt.Fprintf(out, "daily_whisper_speech_gate_status=missing\n")
-		}
+		fmt.Fprintf(out, "daily_whisper_speech_gate_status=missing\n")
 	}
 }
 
@@ -496,11 +472,9 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
 	transcribeMedia := fs.Bool("transcribe", false, "transcribe voice/audio/video media; cached transcripts skip media download")
 	transcribeVideo := fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off")
-	transcribeCommand := fs.String("transcribe-cmd", defaults.TranscribeCommand,
-		"custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}")
-	voskCommand := fs.String("vosk-command", defaults.VoskCommand, "Vosk session worker command, called as: command --session <model> [grammar]")
-	voskModelPath := fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory")
-	voskGrammarPath := fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path")
+	whisperCommand := fs.String("whisper-command", defaults.WhisperCommand, "whisper.cpp Metal server command")
+	whisperModelPath := fs.String("whisper-model", defaults.WhisperModelPath, "whisper.cpp large-v3-turbo q5_0 model file")
+	whisperGateFilePath := fs.String("whisper-speech-gate-model", defaults.WhisperGateFilePath, "Silero model for the whole-file speech gate")
 	ffmpegCommand := fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion")
 	transcriptDir := fs.String("transcript-dir", "transcripts", "transcript output directory, relative to state dir unless absolute")
 	asrLogPath := fs.String("asr-log", "", "optional ASR event JSONL output path, relative to state dir unless absolute")
@@ -539,10 +513,9 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		TopicTitle:          *topicTitle,
 		TranscribeMedia:     *transcribeMedia,
 		VideoTranscribeMode: *transcribeVideo,
-		TranscribeCommand:   *transcribeCommand,
-		VoskCommand:         *voskCommand,
-		VoskModelPath:       *voskModelPath,
-		VoskGrammarPath:     *voskGrammarPath,
+		WhisperCommand:      *whisperCommand,
+		WhisperModelPath:    *whisperModelPath,
+		WhisperGateFilePath: *whisperGateFilePath,
 		FFmpegCommand:       *ffmpegCommand,
 	}
 	if *downloadMedia {
@@ -558,14 +531,11 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		history.Limit = 0
 		history.MaxBatches = 0
 	}
-	var managedTranscriber transcribe.ManagedRunner
 	if *transcribeMedia {
 		transcribeOpts := dailyTranscribeOptions(history)
 		if !transcribeOpts.Configured() {
 			return fmt.Errorf("--transcribe requires a configured transcriber")
 		}
-		managedTranscriber = transcribe.NewManagedRunner(transcribeOpts)
-		history.Transcriber = managedTranscriber
 	}
 	var asrLogFile *os.File
 	if strings.TrimSpace(*asrLogPath) != "" {
@@ -606,11 +576,6 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	})
 	if asrLogFile != nil {
 		if closeErr := asrLogFile.Close(); runErr == nil && closeErr != nil {
-			runErr = closeErr
-		}
-	}
-	if managedTranscriber != nil {
-		if closeErr := managedTranscriber.Close(); runErr == nil && closeErr != nil {
 			runErr = closeErr
 		}
 	}
@@ -861,46 +826,27 @@ type dailyOptionFlags struct {
 	mediaLimits         mediaLimitFlags
 	transcribeMedia     *bool
 	transcribeVideo     *string
-	transcribeCommand   *string
-	asrBackend          *string
-	voskCommand         *string
-	voskModelPath       *string
-	voskGrammarPath     *string
 	whisperCommand      *string
 	whisperModelPath    *string
-	whisperAccelerator  *string
-	whisperThreads      *int
 	whisperGateFilePath *string
-	asrLanguage         *string
 	ffmpegCommand       *string
-	asrWorkers          *string
 	transcriptDir       *string
 	progress            *bool
 }
 
 func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOptionFlags {
 	flags := dailyOptionFlags{
-		dialogLimit:     fs.Int("dialog-limit", dailyDialogLimitDefault(), "maximum dialogs to scan"),
-		limit:           fs.Int("limit", 0, "maximum newest records to write after filtering; 0 means all"),
-		includeService:  fs.Bool("include-service", false, "include Telegram service messages"),
-		downloadMedia:   fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription"),
-		mediaDir:        fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute"),
-		transcribeMedia: fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download"),
-		transcribeVideo: fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off"),
-		transcribeCommand: fs.String("transcribe-cmd", defaults.TranscribeCommand,
-			"custom shell command template override; supports {input}, {output}, {output_dir}, {output_base}"),
-		asrBackend:          fs.String("asr-backend", defaults.ASRBackend, "ASR backend: vosk or whispercpp"),
-		voskCommand:         fs.String("vosk-command", defaults.VoskCommand, "Vosk session worker command, called as: command --session <model> [grammar]"),
-		voskModelPath:       fs.String("vosk-model", defaults.VoskModelPath, "Vosk model directory"),
-		voskGrammarPath:     fs.String("vosk-grammar", defaults.VoskGrammarPath, "optional Vosk grammar JSON path"),
-		whisperCommand:      fs.String("whisper-command", defaults.WhisperCommand, "whisper.cpp server command"),
-		whisperModelPath:    fs.String("whisper-model", defaults.WhisperModelPath, "whisper.cpp multilingual model file"),
-		whisperAccelerator:  fs.String("whisper-accelerator", defaults.WhisperAccelerator, "whisper.cpp accelerator: metal, metal-coreml, or cpu"),
-		whisperThreads:      fs.Int("whisper-threads", defaults.WhisperThreads, "whisper.cpp CPU thread count"),
+		dialogLimit:         fs.Int("dialog-limit", dailyDialogLimitDefault(), "maximum dialogs to scan"),
+		limit:               fs.Int("limit", 0, "maximum newest records to write after filtering; 0 means all"),
+		includeService:      fs.Bool("include-service", false, "include Telegram service messages"),
+		downloadMedia:       fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription"),
+		mediaDir:            fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute"),
+		transcribeMedia:     fs.Bool("transcribe", defaults.TranscribeMedia, "transcribe voice/audio/video media; cached transcripts skip media download"),
+		transcribeVideo:     fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off"),
+		whisperCommand:      fs.String("whisper-command", defaults.WhisperCommand, "whisper.cpp Metal server command"),
+		whisperModelPath:    fs.String("whisper-model", defaults.WhisperModelPath, "whisper.cpp large-v3-turbo q5_0 model file"),
 		whisperGateFilePath: fs.String("whisper-speech-gate-model", defaults.WhisperGateFilePath, "required Silero model for the production whole-file speech gate"),
-		asrLanguage:         fs.String("asr-language", defaults.ASRLanguage, "spoken language code"),
 		ffmpegCommand:       fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion"),
-		asrWorkers:          fs.String("asr-workers", "auto", "ASR worker mode: auto or diagnostic fixed count 1..4"),
 		transcriptDir:       fs.String("transcript-dir", "transcripts", "transcript output directory, relative to state dir unless absolute"),
 		progress:            fs.Bool("progress", false, "print per-dialog progress"),
 	}
@@ -922,19 +868,10 @@ func (f dailyOptionFlags) values() dailyOptions {
 		MaxGenericVideoBytes: harvest.DefaultMaxGenericVideoBytes,
 		TranscribeMedia:      *f.transcribeMedia,
 		VideoTranscribeMode:  *f.transcribeVideo,
-		TranscribeCommand:    *f.transcribeCommand,
-		ASRBackend:           *f.asrBackend,
-		VoskCommand:          *f.voskCommand,
-		VoskModelPath:        *f.voskModelPath,
-		VoskGrammarPath:      *f.voskGrammarPath,
 		WhisperCommand:       *f.whisperCommand,
 		WhisperModelPath:     *f.whisperModelPath,
-		WhisperAccelerator:   *f.whisperAccelerator,
-		WhisperThreads:       *f.whisperThreads,
 		WhisperGateFilePath:  *f.whisperGateFilePath,
-		ASRLanguage:          *f.asrLanguage,
 		FFmpegCommand:        *f.ffmpegCommand,
-		ASRWorkerMode:        *f.asrWorkers,
 		TranscriptDir:        *f.transcriptDir,
 		Progress:             *f.progress,
 	}
@@ -953,19 +890,10 @@ type dailyOptions struct {
 	MaxGenericVideoBytes int64
 	TranscribeMedia      bool
 	VideoTranscribeMode  string
-	TranscribeCommand    string
-	ASRBackend           string
-	VoskCommand          string
-	VoskModelPath        string
-	VoskGrammarPath      string
 	WhisperCommand       string
 	WhisperModelPath     string
-	WhisperAccelerator   string
-	WhisperThreads       int
 	WhisperGateFilePath  string
-	ASRLanguage          string
 	FFmpegCommand        string
-	ASRWorkerMode        string
 	TranscriptDir        string
 	Progress             bool
 }
@@ -1154,26 +1082,14 @@ func validateDailyOptions(opts dailyOptions) error {
 	default:
 		return fmt.Errorf("--transcribe-video must be one of: %s, %s, %s", harvest.VideoTranscribePhone, harvest.VideoTranscribeAll, harvest.VideoTranscribeOff)
 	}
-	if _, _, err := mtproto.ParseASRWorkerMode(opts.ASRWorkerMode); err != nil {
-		return err
-	}
 	if opts.TranscribeMedia {
-		transcribeOpts := transcribe.Options{
-			CommandTemplate:    opts.TranscribeCommand,
-			Backend:            opts.ASRBackend,
-			VoskCommand:        opts.VoskCommand,
-			VoskModelPath:      opts.VoskModelPath,
-			VoskGrammarPath:    opts.VoskGrammarPath,
-			WhisperCommand:     opts.WhisperCommand,
-			WhisperModelPath:   opts.WhisperModelPath,
-			WhisperAccelerator: opts.WhisperAccelerator,
-			WhisperThreads:     opts.WhisperThreads,
-			Language:           opts.ASRLanguage,
-		}
-		if strings.EqualFold(opts.ASRBackend, transcribe.BackendWhisperCPP) {
-			transcribeOpts.WhisperDecode = transcribe.ProductionWhisperDecode()
-			transcribeOpts.WhisperSpeechGate = transcribe.ProductionWhisperSpeechGate(opts.WhisperGateFilePath)
-		}
+		transcribeOpts := transcribe.ProductionOptions(
+			opts.WhisperCommand,
+			opts.WhisperModelPath,
+			opts.WhisperGateFilePath,
+			opts.FFmpegCommand,
+			nil,
+		)
 		if err := transcribeOpts.Validate(); err != nil {
 			return err
 		}
@@ -1188,19 +1104,10 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 		MaxBatches:           0,
 		DownloadMedia:        opts.DownloadMedia,
 		TranscribeMedia:      opts.TranscribeMedia,
-		TranscribeCommand:    opts.TranscribeCommand,
-		ASRBackend:           opts.ASRBackend,
-		VoskCommand:          opts.VoskCommand,
-		VoskModelPath:        opts.VoskModelPath,
-		VoskGrammarPath:      opts.VoskGrammarPath,
 		WhisperCommand:       opts.WhisperCommand,
 		WhisperModelPath:     opts.WhisperModelPath,
-		WhisperAccelerator:   opts.WhisperAccelerator,
-		WhisperThreads:       opts.WhisperThreads,
 		WhisperGateFilePath:  opts.WhisperGateFilePath,
-		ASRLanguage:          opts.ASRLanguage,
 		FFmpegCommand:        opts.FFmpegCommand,
-		ASRWorkerMode:        opts.ASRWorkerMode,
 		MaxPhotoBytes:        opts.MaxPhotoBytes,
 		MaxDocumentBytes:     opts.MaxDocumentBytes,
 		MaxAudioBytes:        opts.MaxAudioBytes,
@@ -2052,63 +1959,24 @@ func dailyDialogCheckpointScopeFingerprint(cfg config.Config, opts dailyOptions)
 }
 
 func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
-	result := transcribe.Options{
-		CommandTemplate:    opts.TranscribeCommand,
-		Backend:            opts.ASRBackend,
-		VoskCommand:        opts.VoskCommand,
-		VoskModelPath:      opts.VoskModelPath,
-		VoskGrammarPath:    opts.VoskGrammarPath,
-		WhisperCommand:     opts.WhisperCommand,
-		WhisperModelPath:   opts.WhisperModelPath,
-		WhisperAccelerator: opts.WhisperAccelerator,
-		WhisperThreads:     opts.WhisperThreads,
-		Language:           opts.ASRLanguage,
-		FFmpegCommand:      opts.FFmpegCommand,
-		StageTiming:        opts.StageTiming,
-	}
-	if strings.EqualFold(opts.ASRBackend, transcribe.BackendWhisperCPP) {
-		result.WhisperDecode = transcribe.ProductionWhisperDecode()
-		result.WhisperSpeechGate = transcribe.ProductionWhisperSpeechGate(opts.WhisperGateFilePath)
-	}
-	return result
+	return transcribe.ProductionOptions(
+		opts.WhisperCommand,
+		opts.WhisperModelPath,
+		opts.WhisperGateFilePath,
+		opts.FFmpegCommand,
+		opts.StageTiming,
+	)
 }
 
 type dailyRuntimeConfig struct {
 	TranscribeMedia     bool
-	TranscribeCommand   string
-	ASRBackend          string
-	VoskCommand         string
-	VoskModelPath       string
-	VoskGrammarPath     string
 	WhisperCommand      string
 	WhisperModelPath    string
-	WhisperAccelerator  string
-	WhisperThreads      int
 	WhisperGateFilePath string
-	ASRLanguage         string
 	FFmpegCommand       string
 }
 
 func dailyRuntimeDefaults() dailyRuntimeConfig {
-	transcribeCommand := firstEnvValue("TG_HARVEST_DAILY_TRANSCRIBE_CMD")
-	asrBackend := strings.ToLower(firstEnvValue("TG_HARVEST_DAILY_ASR_BACKEND"))
-	if asrBackend == "" {
-		asrBackend = transcribe.BackendVosk
-	}
-	voskCommand := firstEnvValue("TG_HARVEST_DAILY_VOSK_COMMAND")
-	if voskCommand == "" {
-		if candidate := defaultLocalVoskCommandPath(); candidate != "" {
-			voskCommand = candidate
-		} else if resolved, err := exec.LookPath("vosk-transcribe"); err == nil {
-			voskCommand = resolved
-		}
-	}
-	voskModelPath := firstEnvValue("TG_HARVEST_DAILY_VOSK_MODEL_PATH")
-	if voskModelPath == "" {
-		if candidate := defaultLocalVoskModelPath(); candidate != "" {
-			voskModelPath = candidate
-		}
-	}
 	ffmpegCommand := firstEnvValue("TG_HARVEST_DAILY_FFMPEG_COMMAND")
 	if ffmpegCommand == "" {
 		ffmpegCommand = transcribe.DefaultFFmpegCommand
@@ -2125,42 +1993,14 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 	if whisperSpeechGatePath == "" {
 		whisperSpeechGatePath = defaultLocalWhisperSpeechGateModelPath()
 	}
-	whisperAccelerator := strings.ToLower(firstEnvValue("TG_HARVEST_DAILY_WHISPER_ACCELERATOR"))
-	if whisperAccelerator == "" {
-		whisperAccelerator = transcribe.AcceleratorMetal
-	}
-	asrLanguage := strings.ToLower(firstEnvValue("TG_HARVEST_DAILY_ASR_LANGUAGE"))
-	if asrLanguage == "" {
-		asrLanguage = "ru"
-	}
-	whisperThreads := 4
-	if raw := firstEnvValue("TG_HARVEST_DAILY_WHISPER_THREADS"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			whisperThreads = parsed
-		}
-	}
-	configured := strings.TrimSpace(transcribeCommand) != ""
-	switch asrBackend {
-	case transcribe.BackendWhisperCPP:
-		configured = strings.TrimSpace(whisperCommand) != "" &&
-			strings.TrimSpace(whisperModelPath) != "" &&
-			strings.TrimSpace(whisperSpeechGatePath) != ""
-	case transcribe.BackendVosk:
-		configured = strings.TrimSpace(voskCommand) != "" && strings.TrimSpace(voskModelPath) != ""
-	}
+	configured := strings.TrimSpace(whisperCommand) != "" &&
+		strings.TrimSpace(whisperModelPath) != "" &&
+		strings.TrimSpace(whisperSpeechGatePath) != ""
 	return dailyRuntimeConfig{
 		TranscribeMedia:     configured,
-		TranscribeCommand:   transcribeCommand,
-		ASRBackend:          asrBackend,
-		VoskCommand:         voskCommand,
-		VoskModelPath:       voskModelPath,
-		VoskGrammarPath:     firstEnvValue("TG_HARVEST_DAILY_VOSK_GRAMMAR_PATH"),
 		WhisperCommand:      whisperCommand,
 		WhisperModelPath:    whisperModelPath,
-		WhisperAccelerator:  whisperAccelerator,
-		WhisperThreads:      whisperThreads,
 		WhisperGateFilePath: whisperSpeechGatePath,
-		ASRLanguage:         asrLanguage,
 		FFmpegCommand:       ffmpegCommand,
 	}
 }
@@ -2170,13 +2010,8 @@ func defaultLocalWhisperCommandPath() string {
 	if projectRoot == "" {
 		return ""
 	}
-	accelerator := strings.ToLower(firstEnvValue("TG_HARVEST_DAILY_WHISPER_ACCELERATOR"))
-	name := "whisper-server-metal"
-	if accelerator == transcribe.AcceleratorMetalCoreML {
-		name = "whisper-server-coreml"
-	}
 	candidates := []string{
-		filepath.Join(projectRoot, "bin", name),
+		filepath.Join(projectRoot, "bin", "whisper-server-metal"),
 		filepath.Join(projectRoot, ".state", "asr-runtime", "whisper.cpp", "build-metal", "bin", "whisper-server"),
 	}
 	for _, candidate := range candidates {
@@ -2205,30 +2040,6 @@ func defaultLocalWhisperSpeechGateModelPath() string {
 		return ""
 	}
 	candidate := filepath.Join(projectRoot, ".state", "asr-runtime", "whisper.cpp", "models", "ggml-silero-v6.2.0.bin")
-	if fileExists(candidate) {
-		return candidate
-	}
-	return ""
-}
-
-func defaultLocalVoskCommandPath() string {
-	projectRoot := detectProjectRoot()
-	if projectRoot == "" {
-		return ""
-	}
-	candidate := filepath.Join(projectRoot, "bin", "vosk-transcribe")
-	if fileExists(candidate) {
-		return candidate
-	}
-	return ""
-}
-
-func defaultLocalVoskModelPath() string {
-	projectRoot := detectProjectRoot()
-	if projectRoot == "" {
-		return ""
-	}
-	candidate := filepath.Join(projectRoot, "models", "vosk-model-small-ru-0.22")
 	if fileExists(candidate) {
 		return candidate
 	}

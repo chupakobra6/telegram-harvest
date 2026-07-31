@@ -40,6 +40,23 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 	}
 }
 
+func TestRunCommandHelpExitsSuccessfully(t *testing.T) {
+	code, stdout, stderr := runCommand(t, []string{"--profile", "main", "daily", "--help"}, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{"-transcribe", "-whisper-command", "-whisper-model", "-whisper-speech-gate-model"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("daily help missing %q:\n%s", want, stdout)
+		}
+	}
+	for _, removed := range []string{"-asr-backend", "-asr-workers", "-vosk-command", "-transcribe-cmd"} {
+		if strings.Contains(stdout, removed) {
+			t.Fatalf("daily help exposes removed flag %q:\n%s", removed, stdout)
+		}
+	}
+}
+
 func TestRunRejectsTelegramDesktopImportCommand(t *testing.T) {
 	code, _, stderr := runCommand(t, []string{"import-tdesktop"}, nil)
 	if code != 2 {
@@ -86,12 +103,13 @@ func TestRunPrintConfigUsesEnvAndRootedPaths(t *testing.T) {
 func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
-		"TG_HARVEST_DAILY_APP_ID":          "77",
-		"TG_HARVEST_DAILY_APP_HASH":        "main-hash",
-		"TG_HARVEST_DAILY_STATE_DIR":       filepath.Join(dir, "main-state"),
-		"TG_HARVEST_DAILY_SESSION_PATH":    filepath.Join(dir, "main-session.json"),
-		"TG_HARVEST_DAILY_VOSK_COMMAND":    "/tmp/vosk-transcribe",
-		"TG_HARVEST_DAILY_VOSK_MODEL_PATH": filepath.Join(dir, "vosk-model-small-ru-0.22"),
+		"TG_HARVEST_DAILY_APP_ID":                         "77",
+		"TG_HARVEST_DAILY_APP_HASH":                       "main-hash",
+		"TG_HARVEST_DAILY_STATE_DIR":                      filepath.Join(dir, "main-state"),
+		"TG_HARVEST_DAILY_SESSION_PATH":                   filepath.Join(dir, "main-session.json"),
+		"TG_HARVEST_DAILY_WHISPER_COMMAND":                "/tmp/whisper-server",
+		"TG_HARVEST_DAILY_WHISPER_MODEL_PATH":             filepath.Join(dir, "ggml-large-v3-turbo-q5_0.bin"),
+		"TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH": filepath.Join(dir, "ggml-silero-v6.2.0.bin"),
 	}
 	code, stdout, stderr := runCommand(t, []string{"print-config", "--profile", "main"}, env)
 	if code != 0 {
@@ -102,6 +120,10 @@ func TestRunPrintConfigCanSelectMainProfile(t *testing.T) {
 		"app_id_set=true",
 		"state_dir=" + filepath.Join(dir, "main-state"),
 		"session=" + filepath.Join(dir, "main-session.json"),
+		"daily_asr_backend=whispercpp",
+		"daily_whisper_accelerator=metal",
+		"daily_asr_language=ru",
+		"daily_asr_workers=1",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("main print-config missing %q:\n%s", want, stdout)
@@ -357,31 +379,13 @@ func TestValidateDailyOptionsRejectsInvalidVideoTranscribeMode(t *testing.T) {
 	}
 }
 
-func TestValidateDailyOptionsAcceptsAutoAndDiagnosticASRWorkers(t *testing.T) {
-	for _, mode := range []string{"", "auto", "1", "2", "3", "4"} {
-		if err := validateDailyOptions(dailyOptions{VideoTranscribeMode: "phone", ASRWorkerMode: mode}); err != nil {
-			t.Fatalf("mode %q: %v", mode, err)
-		}
-	}
-	for _, mode := range []string{"0", "5", "many"} {
-		err := validateDailyOptions(dailyOptions{VideoTranscribeMode: "phone", ASRWorkerMode: mode})
-		if err == nil || !strings.Contains(err.Error(), "--asr-workers") {
-			t.Fatalf("mode %q error = %v", mode, err)
-		}
-	}
-}
-
-func TestValidateDailyOptionsChecksSelectedASRBackend(t *testing.T) {
+func TestValidateDailyOptionsChecksProductionWhisperRuntime(t *testing.T) {
 	valid := dailyOptions{
 		TranscribeMedia:     true,
 		VideoTranscribeMode: harvest.VideoTranscribePhone,
-		ASRWorkerMode:       "auto",
-		ASRBackend:          transcribe.BackendWhisperCPP,
 		WhisperCommand:      "whisper-server",
-		WhisperModelPath:    "ggml-small.bin",
+		WhisperModelPath:    "ggml-large-v3-turbo-q5_0.bin",
 		WhisperGateFilePath: "ggml-silero-v6.2.0.bin",
-		WhisperAccelerator:  transcribe.AcceleratorMetal,
-		ASRLanguage:         "ru",
 	}
 	if err := validateDailyOptions(valid); err != nil {
 		t.Fatal(err)
@@ -400,7 +404,6 @@ func TestValidateDailyOptionsChecksSelectedASRBackend(t *testing.T) {
 
 func TestDailyTranscribeOptionsUsesOnlyPinnedWhisperProfile(t *testing.T) {
 	whisper := dailyTranscribeOptions(harvest.HistoryOptions{
-		ASRBackend:          transcribe.BackendWhisperCPP,
 		WhisperCommand:      "whisper-server",
 		WhisperModelPath:    "ggml-large-v3-turbo-q5_0.bin",
 		WhisperGateFilePath: "ggml-silero-v6.2.0.bin",
@@ -409,10 +412,8 @@ func TestDailyTranscribeOptionsUsesOnlyPinnedWhisperProfile(t *testing.T) {
 	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 || descriptor.SpeechGate == nil {
 		t.Fatalf("daily whisper descriptor = %#v", descriptor)
 	}
-
-	vosk := dailyTranscribeOptions(harvest.HistoryOptions{ASRBackend: transcribe.BackendVosk})
-	if vosk.WhisperSpeechGate.Enabled || vosk.WhisperDecode.BeamSize != nil {
-		t.Fatalf("Vosk received Whisper production settings: %#v", vosk)
+	if descriptor.Backend != transcribe.BackendWhisperCPP || descriptor.Accelerator != transcribe.AcceleratorMetal {
+		t.Fatalf("daily whisper backend = %#v", descriptor)
 	}
 }
 

@@ -134,20 +134,20 @@ func TestDailyStageTimingReportUsesOverlappingPipelineMetrics(t *testing.T) {
 	collector.Observe(stages.ASR, 8*time.Second)
 	collector.ObserveAudioDuration(40)
 	collector.ObserveMediaPipeline(stages.MediaPipelineMetrics{
-		Mode:             "2",
-		WorkersRequested: 2,
-		WorkersPeak:      2,
-		SpanSeconds:      5,
+		Mode:             "single-gpu",
+		WorkersRequested: 1,
+		WorkersPeak:      1,
+		SpanSeconds:      10,
 		OverlapSeconds:   4,
-		PoolSpeedX:       8,
+		PoolSpeedX:       4,
 		WorkerWorkSpeedX: 5,
 	})
 	collector.startedAt = time.Now().UTC().Add(-12 * time.Second)
 	report := collector.Report(nil)
-	if report.MediaPipeline == nil || report.MediaPipeline.WorkersPeak != 2 {
+	if report.MediaPipeline == nil || report.MediaPipeline.WorkersPeak != 1 {
 		t.Fatalf("pipeline = %+v", report.MediaPipeline)
 	}
-	if report.ASRSpeedX != 5 || report.PipelineSpeedX != 8 {
+	if report.ASRSpeedX != 5 || report.PipelineSpeedX != 4 {
 		t.Fatalf("speeds = asr %.2f pipeline %.2f", report.ASRSpeedX, report.PipelineSpeedX)
 	}
 	if report.StageWorkSeconds != 18 {

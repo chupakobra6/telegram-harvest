@@ -26,6 +26,8 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = "--port" ]; then port="$2"; shift 2; continue; fi
   shift
 done
+printf 'ggml_metal_init: found device 0\n' >&2
+printf 'WHISPER : COREML = 0\n' >&2
 GO_WANT_WHISPER_HELPER=1 exec %q -test.run=TestWhisperServerRunnerKeepsModelSession -- "$port"
 `, os.Args[0])
 	if err := os.WriteFile(command, []byte(script), 0o700); err != nil {
@@ -40,13 +42,11 @@ GO_WANT_WHISPER_HELPER=1 exec %q -test.run=TestWhisperServerRunnerKeepsModelSess
 		t.Fatal(err)
 	}
 	runner := &WhisperServerRunner{opts: Options{
-		Backend:            BackendWhisperCPP,
-		WhisperCommand:     command,
-		WhisperModelPath:   filepath.Join(dir, "model.bin"),
-		WhisperAccelerator: AcceleratorCPU,
-		WhisperThreads:     4,
-		Language:           "ru",
-		FFmpegCommand:      ffmpeg,
+		WhisperCommand:   command,
+		WhisperModelPath: filepath.Join(dir, "model.bin"),
+		WhisperThreads:   4,
+		Language:         "ru",
+		FFmpegCommand:    ffmpeg,
 	}}
 	defer runner.Close()
 
@@ -67,7 +67,7 @@ GO_WANT_WHISPER_HELPER=1 exec %q -test.run=TestWhisperServerRunnerKeepsModelSess
 	if second.ModelColdStartDuration != 0 {
 		t.Fatalf("second cold start = %s, want zero", second.ModelColdStartDuration)
 	}
-	if first.Backend.Accelerator != AcceleratorCPU || first.Backend.Backend != BackendWhisperCPP {
+	if first.Backend.Accelerator != AcceleratorMetal || first.Backend.Backend != BackendWhisperCPP {
 		t.Fatalf("backend = %+v", first.Backend)
 	}
 	if first.Diagnostics == nil || first.Diagnostics.Segments != 1 ||
@@ -130,7 +130,7 @@ func TestWhisperSpeechGateAppliesMinSpeechAfterMinSilence(t *testing.T) {
 			MinSilenceDurationMS: &minSilence,
 		},
 	}
-	args := whisperSpeechGateArgs(opts, opts.WhisperSpeechGate.normalized(opts), "input.wav")
+	args := whisperSpeechGateArgs(opts, opts.WhisperSpeechGate.normalized(), "input.wav")
 	index := func(flag string) int {
 		for current, value := range args {
 			if value == flag {
