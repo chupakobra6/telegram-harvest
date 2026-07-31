@@ -22,7 +22,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | ASR | Один долгоживущий whisper.cpp large-v3-turbo q5_0 server на Metal, whole-file Silero gate и один GPU worker. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
-| Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. RPC идут последовательно и с pacing. |
+| Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. History и выбор файлов идут последовательно и с pacing; внутри одного достаточно большого файла downloader использует не более двух chunk workers. |
 
 ## Быстрый старт
 
@@ -32,6 +32,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 cd telegram-harvest
 cp .env.example .env
 make setup
+make build
 make test
 ```
 
@@ -79,7 +80,7 @@ go run ./cmd/telegram-harvest --profile main  <command>
 go run ./cmd/telegram-harvest --profile study <command>
 ```
 
-Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study`.
+Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study`. Первый Make-запуск собирает `bin/telegram-harvest`; следующие запуски переиспользуют бинарник, пока не изменятся Go sources, `go.mod` или `go.sum`.
 
 ```bash
 make doctor PROFILE=main
@@ -126,7 +127,7 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 
 ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации текущего прогона: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Дневной файл перезаписывается следующим прогоном этой даты и может остаться частичным после interruption.
 
-Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, startup/RSS/ASR speed и CPU evidence. `telegram_rpc` хранит static spacing, calls, scheduled wait, операции и transport floods; `history_pagination` — data/empty/sparse pages и checkpoint proof decisions. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time, потому что локальная обработка перекрывается с Telegram download.
+Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `download_transport` хранит policy, число файлов и байт, сумму transfer wall, throughput, выбранные chunk workers, retries, failures, downloader FloodWait и transport floods; `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, startup/RSS/ASR speed и CPU evidence. `telegram_rpc` хранит static spacing, calls, scheduled wait, операции и transport floods; `history_pagination` — data/empty/sparse pages и checkpoint proof decisions. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time, потому что локальная обработка перекрывается с Telegram download.
 
 Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
 
@@ -149,7 +150,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup
 
 `daily-catchup` смотрит последние дневные Markdown-отчеты в `reports/daily`, берет день после самого свежего `YYYY-MM-DD.md` и строит все недостающие отчеты до текущей даты не включительно. Весь новый диапазон читается из Telegram одним последовательным range-scan, после чего записи разделяются по московским дням и атомарно публикуются в отдельные JSONL/Markdown. `00-latest-catchup.md` не участвует в определении последней даты. Если сегодня 2026-06-07, а последний дневной отчет — 2026-06-02, команда построит 2026-06-03 ... 2026-06-06 и объединит их в один файл. Существующие дневные Markdown не перезаписываются; их даты также исключаются из media/ASR-обработки range-scan.
 
-После полного успешного запуска `.state/daily/dialog-checkpoint.json` запоминает Telegram account, daily scope, наблюдаемый `top_message_id` и безопасный `verified_message_id` каждого dialog. Следующий обычный автоматический catch-up не вызывает history RPC только для dialog, чей неизменившийся head был целиком покрыт предыдущим диапазоном (`head_fully_verified=true`). Если вчерашний catch-up уже видел сегодняшний head через `get_dialogs`, такой dialog обязательно сканируется с безопасным `MinID=verified_message_id`, даже когда head численно не изменился. Изменившиеся и новые dialog также проверяются последовательно. Любой ручной `--from`, разрыв дат, исторический запуск, смена аккаунта/scope, поврежденный state, аномальный head, неполный scan или ошибка включает полный fallback. Checkpoint заменяется атомарно только после успешной публикации `00-latest-catchup.md`.
+После полного успешного запуска `.state/daily/dialog-checkpoint.json` запоминает Telegram account, daily scope, наблюдаемый `top_message_id` и безопасный `verified_message_id` каждого dialog. Граница берётся из всех реально прочитанных raw-сообщений строго до exclusive end диапазона, а не только из self/Trackmate records, попавших в отчет. Следующий обычный автоматический catch-up не вызывает history RPC только для dialog, чей неизменившийся head был целиком покрыт предыдущим диапазоном (`head_fully_verified=true`). Если вчерашний catch-up уже видел сегодняшний head через `get_dialogs`, такой dialog обязательно сканируется с безопасным `MinID=verified_message_id`, даже когда head численно не изменился. Изменившиеся и новые dialog также проверяются последовательно. Любой ручной `--from`, разрыв дат, исторический запуск, смена аккаунта/scope, поврежденный state, аномальный head, неполный scan или ошибка включает полный fallback. Checkpoint заменяется атомарно только после успешной публикации `00-latest-catchup.md`.
 
 Для первого catch-up без предыдущих отчетов передай явный старт:
 
@@ -195,11 +196,13 @@ go run ./cmd/telegram-harvest --profile main daily-download-media \
   --out-dir media-manual
 ```
 
+Downloader выбирает chunk concurrency автоматически по размеру: файлы меньше 1 MiB скачиваются одним worker, от 1 MiB — двумя. Одновременно активен только один Telegram-файл; четыре workers не используются в production, потому что live-матрица дала с ними реальный FloodWait. CPU/RAM не участвуют в этом выборе: это сетевые chunk workers с bounded 512 KiB parts, а безопасная граница определяется Telegram transport evidence, не загрузкой локальной машины.
+
 ## ASR pipeline
 
 Единственный production-профиль — `whisper.cpp large-v3-turbo q5_0 + Metal`, русский язык, четыре CPU helper threads, `beam_size=5` и отдельный whole-file Silero speech gate. Эти параметры зафиксированы в коде. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
 
-Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan/download остаётся единственным последовательным paced producer. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
+Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; bounded chunk parallelism существует только внутри текущего файла. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 
 Несколько Whisper-процессов не запускаются: на Apple Silicon они конкурируют за один GPU и unified memory, а измеренный production workload этого не требует. Transcript cache включает runtime/model/quantization, язык, threads, decode, gate и post-filter; готовый transcript публикуется через `temp → fsync/close → rename`. Cache проверяется до media download, поэтому повторный catch-up не запускает ASR для уже известных вложений.
 

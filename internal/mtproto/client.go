@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chupakobra6/telegram-harvest/internal/config"
@@ -26,6 +27,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
+	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -81,9 +83,10 @@ type Session struct {
 }
 
 type DownloadMediaOptions struct {
-	MediaDir  string
-	Index     int
-	Overwrite bool
+	MediaDir       string
+	Index          int
+	Overwrite      bool
+	DownloadTiming stages.DownloadTransferObserver
 }
 
 type DownloadMediaResult struct {
@@ -516,7 +519,7 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 	if strings.TrimSpace(mediaDir) == "" {
 		mediaDir = "media-manual"
 	}
-	s.saveAttachmentFile(ctx, &record, 0, location, fileName, mediaDir, opts.Overwrite, nil)
+	s.saveAttachmentFile(ctx, &record, 0, location, fileName, mediaDir, opts.Overwrite, nil, opts.DownloadTiming)
 	result := DownloadMediaResult{Record: record, Attachment: record.Attachments[0]}
 	if result.Attachment.DownloadError != "" {
 		return result, errors.New(result.Attachment.DownloadError)
@@ -699,14 +702,12 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 			}
 			continue
 		}
+		if dialogStats.Complete {
+			applyDailyHistoryBoundary(&stats.DialogHeads[headIndex], dialogPlan, dialogStats, opts.End)
+		}
 		if len(dialogRecords) > 0 {
 			stats.DialogsWithRecords++
 			records = append(records, dialogRecords...)
-			for _, record := range dialogRecords {
-				if record.MessageID > stats.DialogHeads[headIndex].VerifiedMessageID {
-					stats.DialogHeads[headIndex].VerifiedMessageID = record.MessageID
-				}
-			}
 		}
 		if !dialogStats.Complete {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogIncomplete(chat, dialogOpts.History.MaxBatches))
@@ -837,6 +838,41 @@ func planDailyDialogScan(chat harvest.Chat, checkpoint harvest.DailyDialogCheckp
 	return plan
 }
 
+func applyDailyHistoryBoundary(head *harvest.DailyDialogHead, plan dailyDialogScanPlan, history harvest.HistoryStats, rangeEnd time.Time) {
+	if head == nil || !history.Complete {
+		return
+	}
+	snapshotTopID := head.TopMessageID
+	if history.ObservedTopMessageID > head.TopMessageID {
+		head.TopMessageID = history.ObservedTopMessageID
+	}
+	// A scanned dialog must confirm the getDialogs snapshot (or a newer raced
+	// head) with a dated raw history message. Otherwise publishing the snapshot
+	// as verified could make the next unchanged-dialog check skip unseen data.
+	if (snapshotTopID > 0 && history.ObservedTopMessageID < snapshotTopID) ||
+		(history.ObservedTopMessageID > 0 && history.ObservedTopMessageAt.IsZero()) {
+		head.VerifiedMessageID = 0
+		head.HeadFullyVerified = false
+		return
+	}
+	head.HeadFullyVerified = history.ObservedTopMessageID > 0 &&
+		history.ObservedTopMessageID == head.TopMessageID &&
+		history.ObservedTopMessageAt.Before(rangeEnd)
+	verifiedMessageID := max(plan.MinID, history.ScannedThroughMessageID)
+	if head.HeadFullyVerified {
+		verifiedMessageID = head.TopMessageID
+	}
+	if verifiedMessageID > head.TopMessageID {
+		// A newer history response can race the earlier dialog snapshot. The
+		// message was observed directly, so advance the observed head instead
+		// of publishing an internally impossible checkpoint.
+		head.TopMessageID = verifiedMessageID
+	}
+	if verifiedMessageID > head.VerifiedMessageID {
+		head.VerifiedMessageID = verifiedMessageID
+	}
+}
+
 func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarget, opts harvest.HistoryOptions, emit func(harvest.MessageRecord) error, topicByID map[int]harvest.Topic) (harvest.Chat, harvest.HistoryStats, error) {
 	offsetID := opts.StartOffsetID
 	stats := harvest.HistoryStats{}
@@ -948,6 +984,29 @@ func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarge
 	return target.Chat, stats, nil
 }
 
+func observeDailyHistoryMessage(stats *harvest.HistoryStats, message tg.MessageClass, rangeEnd time.Time) {
+	if stats == nil {
+		return
+	}
+	id := messageID(message)
+	date := messageDate(message)
+	if id > stats.ObservedTopMessageID {
+		stats.ObservedTopMessageID = id
+		stats.ObservedTopMessageAt = time.Time{}
+		if date > 0 {
+			stats.ObservedTopMessageAt = time.Unix(int64(date), 0).UTC()
+		}
+	}
+	if id <= stats.ScannedThroughMessageID || date <= 0 {
+		return
+	}
+	messageAt := time.Unix(int64(date), 0).UTC()
+	if !rangeEnd.IsZero() && !messageAt.Before(rangeEnd) {
+		return
+	}
+	stats.ScannedThroughMessageID = id
+}
+
 func historyProgress(stats harvest.HistoryStats, batchRecords int, nextOffsetID int, done bool) harvest.HistoryProgress {
 	return harvest.HistoryProgress{
 		BatchRecords: batchRecords,
@@ -1026,7 +1085,7 @@ func (s *Session) collectDailyHistory(
 ) ([]harvest.MessageRecord, harvest.HistoryStats, error) {
 	topicByID := map[int]harvest.Topic{}
 	records := make([]harvest.MessageRecord, 0)
-	stats := harvest.HistoryStats{}
+	stats := harvest.HistoryStats{ScannedThroughMessageID: opts.History.MinID}
 	offsetID := 0
 	previousPageShort := false
 	shadowProofPending := false
@@ -1064,6 +1123,7 @@ func (s *Session) collectDailyHistory(
 		reachedStart := false
 		reachedMinID := false
 		for _, msgClass := range messages {
+			observeDailyHistoryMessage(&stats, msgClass, opts.End)
 			if id := messageID(msgClass); id > 0 && (minMessageID == 0 || id < minMessageID) {
 				minMessageID = id
 			}
@@ -2286,7 +2346,7 @@ func (s *Session) downloadAttachment(
 		record.Attachments[index].DownloadError = "media dir is empty"
 		return
 	}
-	s.saveAttachmentFile(ctx, record, index, location, fileName, opts.MediaDir, false, opts.StageTiming)
+	s.saveAttachmentFile(ctx, record, index, location, fileName, opts.MediaDir, false, opts.StageTiming, opts.DownloadTiming)
 }
 
 func (s *Session) saveAttachmentFile(
@@ -2298,6 +2358,7 @@ func (s *Session) saveAttachmentFile(
 	mediaDir string,
 	overwrite bool,
 	stageTiming stages.Observer,
+	downloadTiming stages.DownloadTransferObserver,
 ) {
 	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
 		return
@@ -2329,7 +2390,7 @@ func (s *Session) saveAttachmentFile(
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
 	defer cancel()
-	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, target); err != nil {
+	if err := s.downloadFile(downloadCtx, location, target, record.Attachments[index].Size, downloadTiming); err != nil {
 		_ = os.Remove(target)
 		record.Attachments[index].DownloadError = err.Error()
 		return
@@ -2413,7 +2474,7 @@ func (s *Session) transcribeAttachmentMedia(
 	downloadCtx, cancelDownload := context.WithTimeout(ctx, defaultDownloadTimeout)
 	defer cancelDownload()
 	downloadStart := time.Now()
-	if _, err := s.client.Download(location).WithThreads(1).ToPath(downloadCtx, tempPath); err != nil {
+	if err := s.downloadFile(downloadCtx, location, tempPath, attachment.Size, opts.DownloadTiming); err != nil {
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
 		if pipeline != nil {
@@ -2493,6 +2554,64 @@ func (s *Session) transcribeAttachmentMedia(
 	}
 	stages.ObserveAudioDuration(opts.AudioDurationTiming, audioDurationSeconds)
 	emitASRLog(opts, event)
+}
+
+func (s *Session) downloadFile(
+	ctx context.Context,
+	location tg.InputFileLocationClass,
+	target string,
+	expectedBytes int64,
+	observer stages.DownloadTransferObserver,
+) error {
+	threads := adaptiveDownloadThreads(expectedBytes)
+	startedAt := time.Now()
+	var retries atomic.Int64
+	var floodWaits atomic.Int64
+	var transportFloods atomic.Int64
+	builder := s.client.Download(location).
+		WithThreads(threads).
+		WithRetryHandler(func(event downloader.RetryEvent) {
+			retries.Add(1)
+			s.observeDownloadError("download_media_chunk_retry", event.Err, &floodWaits, &transportFloods)
+		})
+	_, downloadErr := builder.ToPath(ctx, target)
+	if downloadErr != nil {
+		s.observeDownloadError("download_media_final", downloadErr, &floodWaits, &transportFloods)
+	}
+	transferredBytes := localFileSize(target)
+	if downloadErr == nil && expectedBytes > 0 && transferredBytes != expectedBytes {
+		downloadErr = fmt.Errorf("downloaded media size = %d, expected %d", transferredBytes, expectedBytes)
+	}
+	if observer != nil {
+		observer(stages.DownloadTransferMetrics{
+			Policy:           adaptiveDownloadPolicyName,
+			ExpectedBytes:    expectedBytes,
+			TransferredBytes: transferredBytes,
+			Threads:          threads,
+			Seconds:          time.Since(startedAt).Seconds(),
+			Retries:          int(retries.Load()),
+			FloodWaits:       int(floodWaits.Load()),
+			TransportFloods:  int(transportFloods.Load()),
+			Failed:           downloadErr != nil,
+		})
+	}
+	return downloadErr
+}
+
+func (s *Session) observeDownloadError(operation string, err error, floodWaits, transportFloods *atomic.Int64) {
+	if delay, ok := tgerr.AsFloodWait(err); ok {
+		if floodWaits != nil {
+			floodWaits.Add(1)
+		}
+		s.noteFloodWait(operation, delay)
+		return
+	}
+	if isTransportFlood(err) {
+		if transportFloods != nil {
+			transportFloods.Add(1)
+		}
+		s.noteTransportFlood(operation, err)
+	}
 }
 
 func runTranscriber(ctx context.Context, runner harvest.Transcriber, opts transcribe.Options, inputPath string, outputPath string) (string, error) {

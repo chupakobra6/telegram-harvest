@@ -7,6 +7,31 @@
 
 ## Записи
 
+### Cold catch-up: adaptive download, raw checkpoint boundary и binary reuse
+
+ID источника: `S013`
+
+Исходный ввод:
+
+```text
+Адаптивно проверить и реализовать 1/2/4 workers для скачивания больших файлов,
+доказать хэшами/FloodWait/errors и показать ускорение; сохранять checkpoint-
+границу всех проверенных сообщений без риска пропуска; запускать переиспользуемый
+бинарник вместо go run. Основной сценарий — cold catch-up примерно раз в неделю.
+```
+
+Нормализация:
+- [x] основной performance-сценарий: недельный cold catch-up с новыми сообщениями и медиа;
+- [x] требование: adaptive single-file chunk workers выбираются по размеру и live evidence, а не по CPU/RAM;
+- [x] требование: 1/2/4/auto сравниваются на одинаковых media bytes по SHA-256, wall/download time, FloodWait и errors;
+- [x] требование: raw safe boundary учитывает отфильтрованные incoming, но не сообщения на/после exclusive end;
+- [x] ограничение: сомнение, incomplete/error или anomaly не публикуют ускоренный checkpoint;
+- [x] требование: Makefile строит ignored binary один раз и rebuild делает только при изменении source/module files;
+- [x] реализация, independent review и validation завершены.
+
+Конфликты:
+- S013 точечно расширяет прежний запрет CON-001: high-level producer и файлы остаются последовательными, но внутри одного большого файла разрешён bounded chunk parallelism после live safety matrix.
+
 ### Code review и repo polish
 
 ID источника: `S012`

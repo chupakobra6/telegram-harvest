@@ -16,6 +16,34 @@ const (
 type Observer func(Name, time.Duration)
 type AudioDurationObserver func(float64)
 type MediaPipelineObserver func(MediaPipelineMetrics)
+type DownloadTransferObserver func(DownloadTransferMetrics)
+
+type DownloadTransferMetrics struct {
+	Policy           string  `json:"policy,omitempty"`
+	ExpectedBytes    int64   `json:"expected_bytes,omitempty"`
+	TransferredBytes int64   `json:"transferred_bytes,omitempty"`
+	Threads          int     `json:"threads"`
+	Seconds          float64 `json:"seconds"`
+	Retries          int     `json:"retries"`
+	FloodWaits       int     `json:"flood_waits"`
+	TransportFloods  int     `json:"transport_floods"`
+	Failed           bool    `json:"failed"`
+}
+
+type DownloadTransportMetrics struct {
+	Policy                    string         `json:"policy,omitempty"`
+	Files                     int            `json:"files"`
+	Failed                    int            `json:"failed"`
+	ExpectedBytes             int64          `json:"expected_bytes"`
+	TransferredBytes          int64          `json:"transferred_bytes"`
+	Seconds                   float64        `json:"seconds"`
+	ThroughputMiBPerS         float64        `json:"throughput_mib_per_second"`
+	PeakThreads               int            `json:"peak_threads"`
+	ThreadDecisions           map[string]int `json:"thread_decisions,omitempty"`
+	Retries                   int            `json:"retries"`
+	DownloaderFloods          int            `json:"downloader_flood_waits"`
+	DownloaderTransportFloods int            `json:"downloader_transport_floods"`
+}
 
 type MediaPipelineMetrics struct {
 	Backend                 string               `json:"backend,omitempty"`

@@ -124,6 +124,44 @@ Daily использует один последовательный Telegram pr
 
 Current-head cold-cache E2E для дня 2026-07-25: 211 records, 21 attachments, 3 ASR jobs, 170.284 seconds audio, 0 FloodWait, 85.888 s wall. ASR speed — `17.08×`, media pipeline speed — `13.39×`; один non-speech файл остановлен gate. Warm-cache запуск не стартует `whisper-server`, потому что transcript cache проверяется до download.
 
+## Adaptive Telegram media download
+
+High-level producer и выбор файла остаются последовательными: одновременно скачивается ровно один Telegram-файл. Auto policy меняет только число внутренних chunk workers по известному Telegram size. CPU/RAM намеренно не участвуют в решении — workers ждут сеть и держат bounded 512 KiB parts; практический предел определяет Telegram transport.
+
+Большая матрица использовала одни и те же пять immutable Telegram media размером 6–64 MiB, всего 124 401 837 bytes. Для каждого варианта файлы скачивались заново; SHA-256 всех пяти файлов совпал между всеми вариантами.
+
+| Режим | Wall | Throughput | Retry | FloodWait | Решение |
+| --- | ---: | ---: | ---: | ---: | --- |
+| fixed 1 | 76.887 s | 1.54 MiB/s | 0 | 0 | baseline |
+| fixed 2 | 40.033 s | 2.96 MiB/s | 0 | 0 | safe candidate |
+| fixed 2, repeat | 38.684 s | 3.07 MiB/s | 0 | 0 | safe repeat |
+| fixed 4 | 22.983 s | 5.16 MiB/s | 1 | 1 | rejected |
+| final auto, cap 2 | 35.747 s | 3.32 MiB/s | 0 | 0 | production |
+
+Два workers ускорили большой corpus примерно в `1.92×` относительно одного. Четыре были быстрее, но получили реальный downloader FloodWait на 64 MiB media; retry восстановил файл и hash остался правильным, однако этот режим исключён из production.
+
+Отдельный threshold corpus включал пять файлов 0.3–3.8 MiB, всего 8 894 532 bytes. Fixed 1 занял 6.471 s (1.31 MiB/s), fixed 2 — 3.954 s (2.15 MiB/s), оба без retry/FloodWait и с одинаковыми hash. Итоговая code-owned policy оставляет файлы меньше 1 MiB на одном worker, а от 1 MiB использует два; production cap всегда равен двум. Diagnostic 1/2/4 использовались только в удалённом live harness и не добавлены в пользовательский CLI.
+
+Timing report сохраняет отдельный `download_transport`: expected/transferred bytes, sum transfer seconds, MiB/s, число файлов/failures, peak threads, decisions `1`/`2`, retries, downloader FloodWait и download-specific transport floods. Учитываются и внутренние retry events, и terminal downloader error. Дополнительно после успешной загрузки фактический размер обязан совпасть с Telegram metadata; иначе временный файл удаляется и публикация получает явную download error.
+
+Изолированный current-head cold daily 2026-07-30 обработал 270 records, 15 downloads и 27 892 564 bytes: 9 файлов выбрали один worker, 6 — два. Все expected/transferred bytes совпали, retry/FloodWait/Telegram errors — 0.
+
+| Метрика | Fixed-1 baseline | Final auto | Эффект |
+| --- | ---: | ---: | ---: |
+| Total wall | 46.885 s | 40.095 s | `1.17×`, −14.5% |
+| Download stage | 24.029 s | 16.399 s | `1.47×`, −31.8% |
+| Pipeline span | 35.982 s | 29.537 s | `1.22×`, −17.9% |
+
+Ключи всех 270 records и стабильный payload без живых dialog counters, локальных paths/cache flags и ASR text совпали. Один повторно вычисленный Whisper transcript отличался только пунктуацией и записью `12/13` словами; это ASR run-to-run variation, не изменение media bytes или Telegram scope.
+
+## Raw checkpoint boundary
+
+`verified_message_id` теперь продвигается максимальным raw message id, который реально пришёл из `getHistory` и находится строго до exclusive end диапазона. Sender/report filter применяется позже, поэтому чат только с чужими сообщениями больше не забывает уже проверенный хвост. Сообщение ровно на end или позже не двигает границу. Incomplete/error scan не применяет собранную границу; checkpoint по-прежнему публикуется только после атомарного merged report.
+
+Защита от пропусков не требует дополнительного production RPC: старые checkpoint остаются консервативными, а account/scope/date gap/corrupt state включают полный fallback. Если raw history не подтверждает snapshot `top_message_id` или возвращает head без даты, новый checkpoint сбрасывает verified boundary этого dialog в ноль и следующий запуск делает для него полный scan. Постоянный full shadow audit намеренно не выполняется — он удвоил бы часть Telegram work. Вместо этого boundary защищена behavior/failure/anomaly tests и отдельным isolated full-vs-checkpoint live audit.
+
+На bootstrap 2026-07-29 было 348 records, 36 history dialogs и 57 batches. Среди 29 частично покрытых dialog новая raw boundary оставила нулевую границу только у одного. Следующий день 2026-07-30 дал 270/270 одинаковых keys, 7/7 Trackmate и одинаковый стабильный JSONL payload в full и checkpoint runs, 0 FloodWait. Сравнение full, reconstructed legacy output-only boundary и raw boundary показало соответственно 38/39/42 batches и 25.248/25.959/25.172 s wall: на этом однодневном диапазоне raw boundary не дала измеримого ускорения и добавила четыре коротких proof-запроса для полных страниц, но wall не ухудшился. Её эффект ожидается на последующих активных/недельных диапазонах; correctness-польза уже доказана без заявления выдуманного speedup.
+
 ## Расширенный ASR benchmark на M4 Pro
 
 Корпус собран read-only из реальных исходящих Telegram-медиа за 2026-07-22..29: 28 voice и 14 коротких video/round-video, всего 42 файла и 2178.413 s (36.3 min) аудио. В 30 файлах есть речь; 12 роликов без полезной речи служат отдельным hallucination-control. Corpus hash: `d79e32bb0e7f2d1e05c2c5ee90584ed04827ef4d5f2aa10a62a47f6a6bb24c1a`.

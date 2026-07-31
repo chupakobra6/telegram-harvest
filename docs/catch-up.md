@@ -69,7 +69,8 @@ ZIP-архивы по умолчанию не создаются. В финал�
 - горизонтальные, слишком длинные и слишком большие generic video не отправляются в ASR;
 - bounded ASR pipeline использует один production Whisper large-v3-turbo q5_0 Metal worker; модель загружается один раз при первой ASR job и переиспользуется между днями;
 - кэш привязан к Telegram media id и runtime/model/decode/gate config, поэтому одно и то же медиа переиспользуется только при той же транскрипционной конфигурации;
-- Telegram scan/download остается единственным последовательным producer; он может скачать следующее медиа параллельно локальному `ffmpeg → speech gate → Whisper`, а collector применяет результаты перед публикацией в детерминированном порядке;
+- Telegram scan и выбор следующего файла остаются у единственного последовательного producer; внутри одного файла downloader использует один chunk worker до 1 MiB и два от 1 MiB, но одновременно два файла не скачиваются;
+- producer может скачать следующее медиа параллельно локальному `ffmpeg → speech gate → Whisper`, а collector применяет результаты перед публикацией в детерминированном порядке;
 - временные audio/video удаляются после обработки; пользовательские изображения и документы сохраняются только когда этого требует вид экспорта;
 - ASR/ffmpeg ошибки остаются в машинном логе и не подмешиваются в текст расшифровки.
 
@@ -84,8 +85,8 @@ ZIP-архивы по умолчанию не создаются. В финал�
 5. Проверить созданные даты, `complete=true`, дневные Markdown, `00-latest-catchup.md` и отсутствие технических ошибок в человекочитаемом тексте.
 6. Проверить, что настроенные дополнительные отправители представлены в релевантных днях, но сообщения остальных участников их чатов не попали в daily.
 7. Проверить ASR-статистику: cache/transcribed/skip/error, нулевые временные файлы и отсутствие зависшего helper-процесса.
-8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, ASR, render, stage work, audio seconds, ASR/pipeline speed, backend/model/accelerator, media pipeline span/overlap/workers/queue/resources, static RPC spacing/calls/wait/floods, history data/empty/sparse/proof counters и dialog checkpoint counters/fallback.
-9. Для успешного автоматического catch-up проверить `.state/daily/dialog-checkpoint.json`: `account_id`, `scope_fingerprint`, `verified_through`, `complete=true`, `top_message_id`, `verified_message_id` и `head_fully_verified`. Head из следующего, ещё не опубликованного дня не должен иметь `head_fully_verified=true`. `updated_at` не должен меняться после incomplete/error run или ошибки merged publish.
+8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, download transport bytes/throughput/thread decisions/retries/floods, ffmpeg, model cold-start, ASR, render, stage work, audio seconds, ASR/pipeline speed, backend/model/accelerator, media pipeline span/overlap/workers/queue/resources, static RPC spacing/calls/wait/floods, history data/empty/sparse/proof counters и dialog checkpoint counters/fallback.
+9. Для успешного автоматического catch-up проверить `.state/daily/dialog-checkpoint.json`: `account_id`, `scope_fingerprint`, `verified_through`, `complete=true`, `top_message_id`, `verified_message_id` и `head_fully_verified`. `verified_message_id` может продвигаться входящим raw-сообщением, не попавшим в отчет, но только если оно реально прочитано, находится строго до exclusive end и весь dialog scan завершен. Head из следующего, ещё не опубликованного дня не должен иметь `head_fully_verified=true`. `updated_at` не должен меняться после incomplete/error run или ошибки merged publish.
 10. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports, dialog checkpoint или кэш без явной причины.
 
 ## Критерий готовности

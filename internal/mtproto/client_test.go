@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,6 +285,158 @@ func TestDailyHistoryContinuesAfterSparsePage(t *testing.T) {
 	}
 	if len(records) != 2 || records[0].MessageID != 10 || records[1].MessageID != 20 {
 		t.Fatalf("records = %+v", records)
+	}
+}
+
+func TestDailyHistoryBoundaryIncludesFilteredRawMessagesBeforeExclusiveEnd(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 0, 1)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One", TopMessageID: 14}}
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   end,
+		History: harvest.HistoryOptions{
+			BatchSize: 100,
+			MinID:     7,
+		},
+	}
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		return &tg.MessagesMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 14, Date: int(end.Add(time.Hour).Unix()), FromID: &tg.PeerUser{UserID: 99}, PeerID: &tg.PeerUser{UserID: 1}, Message: "future"},
+			&tg.Message{ID: 13, Date: int(end.Unix()), FromID: &tg.PeerUser{UserID: 99}, PeerID: &tg.PeerUser{UserID: 1}, Message: "exclusive end"},
+			&tg.Message{ID: 12, Date: int(end.Add(-time.Hour).Unix()), FromID: &tg.PeerUser{UserID: 99}, PeerID: &tg.PeerUser{UserID: 1}, Message: "filtered incoming"},
+			&tg.Message{ID: 7, Date: int(start.Add(-time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "previous boundary"},
+		}}, nil
+	}
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 || !stats.Complete {
+		t.Fatalf("records=%d stats=%+v", len(records), stats)
+	}
+	if stats.ScannedThroughMessageID != 12 {
+		t.Fatalf("scanned boundary = %d, want filtered raw message 12", stats.ScannedThroughMessageID)
+	}
+	if stats.ObservedTopMessageID != 14 || !stats.ObservedTopMessageAt.Equal(end.Add(time.Hour)) {
+		t.Fatalf("observed top = %d at %s", stats.ObservedTopMessageID, stats.ObservedTopMessageAt)
+	}
+
+	head := dailyDialogHead(target.Chat, end)
+	applyDailyHistoryBoundary(&head, dailyDialogScanPlan{Kind: dailyDialogChanged, MinID: 7}, stats, end)
+	if head.VerifiedMessageID != 12 || head.HeadFullyVerified {
+		t.Fatalf("raw boundary was not applied safely: %+v", head)
+	}
+}
+
+func TestDailyHistoryBoundaryIsNotAppliedAfterIncompleteScan(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 0, 1)
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   end,
+		History: harvest.HistoryOptions{
+			BatchSize:  100,
+			MaxBatches: 1,
+			MinID:      7,
+		},
+	}
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		return &tg.MessagesMessages{Messages: []tg.MessageClass{
+			&tg.Message{ID: 12, Date: int(end.Add(-time.Hour).Unix()), FromID: &tg.PeerUser{UserID: 99}, PeerID: &tg.PeerUser{UserID: 1}},
+		}}, nil
+	}
+	_, stats, err := (&Session{}).collectDailyHistory(context.Background(), resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", TopMessageID: 12}}, opts, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Complete || stats.ScannedThroughMessageID != 12 {
+		t.Fatalf("unexpected incomplete stats: %+v", stats)
+	}
+	head := harvest.DailyDialogHead{ChatID: 1, ChatType: "user", TopMessageID: 12, VerifiedMessageID: 7}
+	applyDailyHistoryBoundary(&head, dailyDialogScanPlan{Kind: dailyDialogChanged, MinID: 7}, stats, end)
+	if head.VerifiedMessageID != 7 {
+		t.Fatalf("incomplete boundary advanced checkpoint: %+v", head)
+	}
+}
+
+func TestDailyHistoryBoundaryPreservesPreviousMinIDWhenRangeHasOnlyFutureMessages(t *testing.T) {
+	end := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	stats := harvest.HistoryStats{
+		Complete:                true,
+		ScannedThroughMessageID: 7,
+		ObservedTopMessageID:    12,
+		ObservedTopMessageAt:    end.Add(time.Hour),
+	}
+	head := harvest.DailyDialogHead{ChatID: 1, ChatType: "user", TopMessageID: 12}
+	applyDailyHistoryBoundary(&head, dailyDialogScanPlan{Kind: dailyDialogChanged, MinID: 7}, stats, end)
+	if head.VerifiedMessageID != 7 || head.HeadFullyVerified {
+		t.Fatalf("previous boundary was not preserved: %+v", head)
+	}
+}
+
+func TestDailyHistoryBoundaryHandlesHeadRaceWithoutClaimingFutureCoverage(t *testing.T) {
+	end := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	head := harvest.DailyDialogHead{ChatID: 1, ChatType: "user", TopMessageID: 13, VerifiedMessageID: 13, HeadFullyVerified: true}
+	stats := harvest.HistoryStats{
+		Complete:                true,
+		ScannedThroughMessageID: 13,
+		ObservedTopMessageID:    14,
+		ObservedTopMessageAt:    end.Add(time.Second),
+	}
+	applyDailyHistoryBoundary(&head, dailyDialogScanPlan{Kind: dailyDialogFull}, stats, end)
+	if head.TopMessageID != 14 || head.VerifiedMessageID != 13 || head.HeadFullyVerified {
+		t.Fatalf("raced future head was treated as covered: %+v", head)
+	}
+}
+
+func TestDailyHistoryBoundaryRejectsUnconfirmedSnapshotHead(t *testing.T) {
+	end := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		head    harvest.DailyDialogHead
+		history harvest.HistoryStats
+		wantTop int
+	}{
+		{
+			name: "history head below dialog snapshot",
+			head: harvest.DailyDialogHead{
+				ChatID: 1, ChatType: "user", TopMessageID: 14, VerifiedMessageID: 14, HeadFullyVerified: true,
+			},
+			history: harvest.HistoryStats{
+				Complete: true, ScannedThroughMessageID: 13, ObservedTopMessageID: 13, ObservedTopMessageAt: end.Add(-time.Hour),
+			},
+			wantTop: 14,
+		},
+		{
+			name: "newer history head without date",
+			head: harvest.DailyDialogHead{
+				ChatID: 1, ChatType: "user", TopMessageID: 14, VerifiedMessageID: 14, HeadFullyVerified: true,
+			},
+			history: harvest.HistoryStats{
+				Complete: true, ScannedThroughMessageID: 15, ObservedTopMessageID: 15,
+			},
+			wantTop: 15,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			head := test.head
+			applyDailyHistoryBoundary(&head, dailyDialogScanPlan{Kind: dailyDialogChanged, MinID: 10}, test.history, end)
+			if head.TopMessageID != test.wantTop || head.VerifiedMessageID != 0 || head.HeadFullyVerified {
+				t.Fatalf("unconfirmed history head became trusted: %+v", head)
+			}
+			plan := planDailyDialogScan(
+				harvest.Chat{ID: head.ChatID, Type: head.ChatType, TopMessageID: head.TopMessageID},
+				harvest.DailyDialogCheckpointDecision{
+					Enabled: true,
+					Dialogs: map[string]harvest.DailyDialogHead{harvest.DailyDialogHeadKey(head.ChatType, head.ChatID): head},
+				},
+			)
+			if plan.Kind != dailyDialogChanged || plan.MinID != 0 {
+				t.Fatalf("anomalous head did not force full per-dialog fallback: %+v", plan)
+			}
+		})
 	}
 }
 
@@ -788,6 +941,21 @@ func TestIsTransportFlood(t *testing.T) {
 	}
 	if isTransportFlood(errors.New("boom")) {
 		t.Fatal("did not expect generic error to be treated as transport flood")
+	}
+}
+
+func TestObserveDownloadErrorClassifiesFinalFloods(t *testing.T) {
+	session := &Session{rpcSpacing: 500 * time.Millisecond}
+	var floodWaits atomic.Int64
+	var transportFloods atomic.Int64
+
+	session.observeDownloadError("download_media_final", tgerr.New(420, "FLOOD_WAIT_2"), &floodWaits, &transportFloods)
+	if floodWaits.Load() != 1 || transportFloods.Load() != 0 || session.FloodWaits() != 1 {
+		t.Fatalf("flood wait was not classified: flood=%d transport=%d session=%d", floodWaits.Load(), transportFloods.Load(), session.FloodWaits())
+	}
+	session.observeDownloadError("download_media_final", errors.New("rpc failed: transport flood"), &floodWaits, &transportFloods)
+	if floodWaits.Load() != 1 || transportFloods.Load() != 1 || session.TransportFloods() != 1 {
+		t.Fatalf("transport flood was not classified: flood=%d transport=%d session=%d", floodWaits.Load(), transportFloods.Load(), session.TransportFloods())
 	}
 }
 

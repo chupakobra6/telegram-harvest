@@ -1013,6 +1013,7 @@ func runDailyJobsWithCheckpoint(
 	history := dailyHistoryOptions(cfg, opts)
 	if timings != nil {
 		history.StageTiming = timings.Observe
+		history.DownloadTiming = timings.ObserveDownloadTransfer
 		history.AudioDurationTiming = timings.ObserveAudioDuration
 		history.MediaPipelineTiming = timings.ObserveMediaPipeline
 	}

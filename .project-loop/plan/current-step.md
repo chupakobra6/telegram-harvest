@@ -4,24 +4,24 @@
 Обновлено: 2026-07-31
 
 ## Активный Шаг
-- id: `STEP-008`
+- id: `STEP-009`
 - status: `готово`
-- objective: Проверить correctness и архитектуру Telegram Harvest, закрыть безопасные findings и довести repository DX/validation до законченного состояния.
-- requirement IDs: `REQ-021`—`REQ-023`, `VAL-016`, `SCOPE-006`
-- owned paths: Go module/dependencies, `Makefile`, `.github/workflows/`, CLI help, README/AGENTS, ignore policy и минимальные локальные cleanup fixes.
-- validation: `make check`; `make audit`; `go test -race -count=1 ./...`; help/setup smoke; `git diff --check`; Project Loop validation.
-- done criteria: static/security findings закрыты; module graph tidy; setup/check/audit/CI согласованы; state-dir path contract однозначен; product behavior не изменён.
+- objective: Ускорить основной недельный cold catch-up за счёт доказанно безопасного adaptive single-file download parallelism, более полной raw checkpoint boundary и переиспользуемого Makefile binary.
+- requirement IDs: `REQ-024`—`REQ-026`, `VAL-017`—`VAL-019`, `CON-001`, `SCOPE-007`
+- owned paths: `internal/mtproto`, `internal/harvest`, daily timing/report plumbing, checkpoint tests/contracts, `Makefile`, README/performance/catch-up docs и Project Loop state.
+- validation: focused unit/failure tests; `make check`; `go test -race -count=1 ./...`; live 1/2/4/auto downloads с SHA-256/flood/error evidence; isolated full-vs-checkpoint JSONL comparison; Makefile reuse/rebuild smoke; `git diff --check`; Project Loop validation.
+- done criteria: auto policy выбрана по live evidence и не меняет bytes; raw boundary не может пропустить self/Trackmate и откатывается к full scan при сомнении; повторный Make target не пересобирает binary; cold benchmark показывает честный эффект или недоказанная concurrency остаётся на 1.
 
 ## Фокус Ревью
-- Telegram transport остаётся единственным последовательным paced producer.
-- Daily checkpoint, ASR pipeline, report publication и sender scope не меняются.
-- Исправляются фактические defects и friction, а не добавляются новые abstraction layers.
-- Крупные `main.go`/`client.go` оцениваются как организационный долг; механический split без снижения coupling не входит в polish.
+- History и выбор media остаются у одного producer; одновременно активен максимум один file download.
+- Chunk workers не выбираются по CPU/RAM: это сетевые workers, поэтому решение основано на размере файла и измеренном transport behavior.
+- Raw checkpoint boundary считается только по реально прочитанным сообщениям до exclusive end и публикуется только после полного успешного catch-up.
+- Не добавляются public tuning flags, альтернативные flow или новая ASR-конфигурация.
 
 ## Результат
-- Staticcheck finding `S1023` исправлен.
-- Минимальный toolchain поднят до Go 1.26.5, `x/net` до 0.53.0; Govulncheck: 0 reachable vulnerabilities.
-- Добавлены `make check`, `make audit` и GitHub CI с full/race/static/security validation.
-- `make setup` теперь только скачивает pinned dependencies и не мутирует `go.mod`/`go.sum`.
-- Help/README/AGENTS синхронизированы с реальным state-dir-relative path contract; `.state/.state` guidance удалён.
-- Private default artifacts дополнительно защищены `.gitignore`.
+- Production download auto policy: `<1 MiB → 1`, `>=1 MiB → 2`, hard cap 2; high-level producer и active file остаются одиночными.
+- Большой corpus: fixed 2 примерно `1.92×` быстрее fixed 1 без FloodWait; fixed 4 отклонён после реального FloodWait; все SHA-256 совпали.
+- Cold daily E2E: `46.885 → 40.095 s` (`−14.5%` total), download `24.029 → 16.399 s` (`−31.8%`), 270/270 records.
+- Raw boundary учитывает все прочитанные сообщения до exclusive end; неподтверждённый head обнуляет dialog boundary и гарантирует следующий `MinID=0` fallback.
+- Make переиспользует ignored binary и rebuild на content/add/delete source changes.
+- `make check`, full race, Staticcheck, Govulncheck, Project Loop validation и independent rereview зелёные.

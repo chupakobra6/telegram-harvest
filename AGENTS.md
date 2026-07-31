@@ -8,7 +8,7 @@
 
 ## Safety
 - Read-only is a hard boundary: do not add commands that send messages, click buttons, delete messages, pin/unpin, join chats, mark chats read, or mutate Telegram state.
-- Keep Telegram API calls sequential and paced. Do not add concurrent history crawlers.
+- Keep history crawlers and high-level media selection sequential and paced. The only allowed Telegram concurrency is the measured bounded chunk parallelism inside one active file: one worker below 1 MiB, two workers from 1 MiB, production cap two.
 - Treat `.env`, `.sessions/`, `.state/`, dumps, and chat exports as private local data.
 - Never print app hashes, passwords, session data, or full phone numbers.
 - Do not keep broad dumps of other people's messages in repo-local `.state/`; daily full-dialog scans may emit only outgoing/self records and explicitly configured sender IDs scoped to their configured chat IDs.
@@ -18,10 +18,11 @@
 - Format: `make fmt`
 - Standard validation: `make check`
 - Static/security audit: `make audit`
-- Doctor: `go run ./cmd/telegram-harvest --profile <main|study> doctor`
-- Login: `go run ./cmd/telegram-harvest --profile <main|study> login`
-- Daily harvest: `go run ./cmd/telegram-harvest --profile main daily --date yesterday`
-- Daily catch-up through yesterday: `go run ./cmd/telegram-harvest --profile main daily-catchup`
+- Build reusable CLI: `make build`; Make commands rebuild `bin/telegram-harvest` only when Go/module inputs change.
+- Doctor: `make doctor PROFILE=<main|study>`
+- Login: `make login PROFILE=<main|study>`
+- Daily harvest: `make daily PROFILE=main DATE=yesterday`
+- Daily catch-up through yesterday: `make daily-catchup PROFILE=main`
 - List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
 - List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
 - Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out chat.jsonl` (relative outputs resolve inside the selected profile state dir)
@@ -40,9 +41,9 @@
 - A successful `daily-catchup` must atomically publish `reports/daily/00-latest-catchup.md` from every daily report in that run's range. Treat individual `YYYY-MM-DD.md` files as the sources and the merged file as the handoff view.
 - `daily-catchup` must collect all missing days through one sequential Telegram range scan, then partition records into day reports. Do not reintroduce one full dialog/chat scan per day.
 - Daily dialog collection must use `messages.getHistory` and filter self/additional senders locally. Do not use `messages.search` as a completeness source: an empty-query self search reproducibly omitted a real outgoing message. A short history page alone is not a proven range boundary. Early completion is allowed only for a valid checkpoint-bounded first page whose exact response metadata, known head and exclusive `MinID` jointly prove the whole window; every other flow stops only at the date boundary, empty page or configured hard limit.
-- The daily dialog checkpoint may skip history only for an automatic catch-up range contiguous with the last complete checkpoint, on the same Telegram account and identical daily scope, when the dialog `top_message_id` is unchanged and that head was fully covered by the previous range. A head from the next unpublished day must be scanned from its safe `verified_message_id`, never skipped. Explicit `--from`, gaps, historical ranges, state/account/scope mismatch, anomalous heads, incomplete scans, and errors must use the safe full-scan fallback. Publish the checkpoint only after the merged catch-up Markdown succeeds.
+- The daily dialog checkpoint may skip history only for an automatic catch-up range contiguous with the last complete checkpoint, on the same Telegram account and identical daily scope, when the dialog `top_message_id` is unchanged and that head was fully covered by the previous range. Its safe `verified_message_id` comes from every raw history message actually read strictly before the exclusive range end, before sender/report filtering; incomplete scans never advance it. A head from the next unpublished day must be scanned from that boundary, never skipped. Explicit `--from`, gaps, historical ranges, state/account/scope mismatch, anomalous heads, incomplete scans, and errors must use the safe full-scan fallback. Publish the checkpoint only after the merged catch-up Markdown succeeds.
 - `daily` and `daily-catchup` must directly measure Telegram scan, download, ffmpeg, model cold-start, backend-neutral ASR, and render, then atomically preserve a unique per-run JSON under `.state/daily/timings/`. Do not reconstruct historical stage timings from replaceable daily ASR logs.
-- Daily media concurrency is local-only: one producer owns all MTProto history/download calls, while a bounded queue feeds independent `ffmpeg → ASR` workers. Apply all results before deterministic sort/render; never let workers own or call the Telegram client.
+- Daily media keeps one producer and one active file download. The downloader may use at most two concurrent Telegram chunk requests inside that file according to the code-owned size policy; the bounded local queue feeds independent `ffmpeg → ASR` workers. Apply all results before deterministic sort/render; never let ASR workers own or call the Telegram client.
 - `--asr-workers=auto` is the normal daily mode and its policy is backend-specific. Vosk CPU may grow from one to at most four only for proven queued benefit plus CPU/memory headroom. whisper.cpp Metal/Core ML stays at one GPU worker; fixed `1..4` values are diagnostic overrides.
 - Transcript cache identity must include backend, model/quantization, accelerator, language and material decode settings. Publication must be atomic; in-flight media keys must be deduplicated, and temporary source/WAV/transcript files cleaned on success, failure, cancellation, and interruption.
 

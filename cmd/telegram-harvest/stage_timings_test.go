@@ -23,6 +23,13 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	first.Observe(stages.ASR, 4*time.Second)
 	first.Observe(stages.Render, 500*time.Millisecond)
 	first.ObserveAudioDuration(24)
+	first.ObserveDownloadTransfer(stages.DownloadTransferMetrics{
+		Policy:           "size-tiered",
+		ExpectedBytes:    8 << 20,
+		TransferredBytes: 8 << 20,
+		Threads:          2,
+		Seconds:          2,
+	})
 	first.ObserveDialogCheckpoint(
 		harvest.DailyDialogCheckpointDecision{Enabled: true},
 		harvest.OutgoingStats{
@@ -105,6 +112,9 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 		decoded.TelegramRPC.ScheduledWaitSeconds != 5.5 || decoded.TelegramRPC.Operations["get_history"] != 7 {
 		t.Fatalf("telegram RPC metrics = %+v", decoded.TelegramRPC)
 	}
+	if decoded.DownloadTransport.Files != 1 || decoded.DownloadTransport.PeakThreads != 2 || decoded.DownloadTransport.ThroughputMiBPerS != 4 {
+		t.Fatalf("download transport = %+v", decoded.DownloadTransport)
+	}
 	if decoded.StageWorkSeconds <= 0 {
 		t.Fatalf("stage work = %f, want positive work total", decoded.StageWorkSeconds)
 	}
@@ -116,6 +126,42 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 	}
 	if filepath.Dir(firstPath) != filepath.Join(stateDir, "timings") {
 		t.Fatalf("report dir = %s", filepath.Dir(firstPath))
+	}
+}
+
+func TestDailyStageTimingReportAggregatesDownloadTransport(t *testing.T) {
+	collector := newDailyStageTimingCollector("daily", "2026-07-30", "2026-07-31")
+	collector.ObserveDownloadTransfer(stages.DownloadTransferMetrics{
+		Policy:           "size-tiered-cap2",
+		ExpectedBytes:    512 << 10,
+		TransferredBytes: 512 << 10,
+		Threads:          1,
+		Seconds:          1,
+	})
+	collector.ObserveDownloadTransfer(stages.DownloadTransferMetrics{
+		Policy:           "size-tiered-cap2",
+		ExpectedBytes:    8 << 20,
+		TransferredBytes: 7 << 20,
+		Threads:          2,
+		Seconds:          2,
+		Retries:          2,
+		FloodWaits:       1,
+		TransportFloods:  1,
+		Failed:           true,
+	})
+
+	metrics := collector.Report(nil).DownloadTransport
+	if metrics.Policy != "size-tiered-cap2" || metrics.Files != 2 || metrics.Failed != 1 {
+		t.Fatalf("download summary = %+v", metrics)
+	}
+	if metrics.ExpectedBytes != (8<<20)+(512<<10) || metrics.TransferredBytes != (7<<20)+(512<<10) {
+		t.Fatalf("download bytes = %+v", metrics)
+	}
+	if metrics.Seconds != 3 || metrics.PeakThreads != 2 || metrics.ThreadDecisions["1"] != 1 || metrics.ThreadDecisions["2"] != 1 {
+		t.Fatalf("download decisions = %+v", metrics)
+	}
+	if metrics.Retries != 2 || metrics.DownloaderFloods != 1 || metrics.DownloaderTransportFloods != 1 || metrics.ThroughputMiBPerS != 2.5 {
+		t.Fatalf("download transport evidence = %+v", metrics)
 	}
 }
 
@@ -131,6 +177,7 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 		"audio=", "asr_speed=", "pipeline_speed=", "checkpoint_enabled=", "checkpoint_history_dialogs=",
 		"checkpoint_unchanged=", "checkpoint_changed=", "checkpoint_new=", "checkpoint_fallback=",
 		"stage_work=", "pipeline_mode=", "pipeline_span=", "pipeline_overlap=", "pipeline_workers=", "pipeline_queue_peak=", "total=", "report=",
+		"download_files=", "download_bytes=", "download_mib_s=", "download_peak_threads=", "download_retries=", "download_floods=", "download_transport_floods=",
 		"rpc_spacing_ms=", "rpc_calls=", "rpc_wait=", "transport_floods=", "history_data_pages=", "history_empty_proof_pages=", "history_sparse_continuations=",
 		"checkpoint_proof_candidates=", "checkpoint_proof_stops=", "checkpoint_proof_shadow_confirmed=", "checkpoint_proof_shadow_rejected=",
 	} {

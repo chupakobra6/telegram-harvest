@@ -168,6 +168,7 @@ type HistoryOptions struct {
 	Progress              func(HistoryProgress) error
 	ASRLog                func(ASRLogEvent) error
 	StageTiming           stages.Observer
+	DownloadTiming        stages.DownloadTransferObserver
 	AudioDurationTiming   stages.AudioDurationObserver
 	MediaPipelineTiming   stages.MediaPipelineObserver
 	DialogCheckpoint      DailyDialogCheckpointDecision
@@ -191,6 +192,9 @@ type HistoryStats struct {
 	Records                        int            `json:"records"`
 	FirstID                        int            `json:"first_id,omitempty"`
 	LastID                         int            `json:"last_id,omitempty"`
+	ScannedThroughMessageID        int            `json:"scanned_through_message_id,omitempty"`
+	ObservedTopMessageID           int            `json:"observed_top_message_id,omitempty"`
+	ObservedTopMessageAt           time.Time      `json:"observed_top_message_at,omitempty"`
 	Batches                        int            `json:"batches"`
 	DataPages                      int            `json:"data_pages"`
 	EmptyProofPages                int            `json:"empty_proof_pages"`

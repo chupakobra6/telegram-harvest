@@ -28,24 +28,25 @@ type dailyStageSeconds struct {
 }
 
 type dailyStageTimingReport struct {
-	RunID             string                        `json:"run_id"`
-	Command           string                        `json:"command"`
-	StartDate         string                        `json:"start_date,omitempty"`
-	EndDate           string                        `json:"end_date,omitempty"`
-	StartedAt         time.Time                     `json:"started_at"`
-	CompletedAt       time.Time                     `json:"completed_at"`
-	Success           bool                          `json:"success"`
-	Error             string                        `json:"error,omitempty"`
-	Stages            dailyStageSeconds             `json:"stages_seconds"`
-	AudioSeconds      float64                       `json:"audio_seconds"`
-	ASRSpeedX         float64                       `json:"asr_speed_x"`
-	PipelineSpeedX    float64                       `json:"pipeline_speed_x"`
-	MediaPipeline     *stages.MediaPipelineMetrics  `json:"media_pipeline,omitempty"`
-	DialogCheckpoint  dailyDialogCheckpointMetrics  `json:"dialog_checkpoint"`
-	HistoryPagination dailyHistoryPaginationMetrics `json:"history_pagination"`
-	TelegramRPC       harvest.RPCPacingStats        `json:"telegram_rpc"`
-	StageWorkSeconds  float64                       `json:"stage_work_seconds"`
-	TotalSeconds      float64                       `json:"total_seconds"`
+	RunID             string                          `json:"run_id"`
+	Command           string                          `json:"command"`
+	StartDate         string                          `json:"start_date,omitempty"`
+	EndDate           string                          `json:"end_date,omitempty"`
+	StartedAt         time.Time                       `json:"started_at"`
+	CompletedAt       time.Time                       `json:"completed_at"`
+	Success           bool                            `json:"success"`
+	Error             string                          `json:"error,omitempty"`
+	Stages            dailyStageSeconds               `json:"stages_seconds"`
+	AudioSeconds      float64                         `json:"audio_seconds"`
+	ASRSpeedX         float64                         `json:"asr_speed_x"`
+	PipelineSpeedX    float64                         `json:"pipeline_speed_x"`
+	MediaPipeline     *stages.MediaPipelineMetrics    `json:"media_pipeline,omitempty"`
+	DownloadTransport stages.DownloadTransportMetrics `json:"download_transport"`
+	DialogCheckpoint  dailyDialogCheckpointMetrics    `json:"dialog_checkpoint"`
+	HistoryPagination dailyHistoryPaginationMetrics   `json:"history_pagination"`
+	TelegramRPC       harvest.RPCPacingStats          `json:"telegram_rpc"`
+	StageWorkSeconds  float64                         `json:"stage_work_seconds"`
+	TotalSeconds      float64                         `json:"total_seconds"`
 }
 
 type dailyDialogCheckpointMetrics struct {
@@ -80,6 +81,7 @@ type dailyStageTimingCollector struct {
 	durations         map[stages.Name]time.Duration
 	audioSeconds      float64
 	mediaPipeline     *stages.MediaPipelineMetrics
+	downloadTransport stages.DownloadTransportMetrics
 	dialogCheckpoint  dailyDialogCheckpointMetrics
 	historyPagination dailyHistoryPaginationMetrics
 	telegramRPC       harvest.RPCPacingStats
@@ -123,6 +125,32 @@ func (c *dailyStageTimingCollector) ObserveMediaPipeline(metrics stages.MediaPip
 	defer c.mu.Unlock()
 	copy := metrics
 	c.mediaPipeline = &copy
+}
+
+func (c *dailyStageTimingCollector) ObserveDownloadTransfer(metrics stages.DownloadTransferMetrics) {
+	if c == nil || metrics.Threads < 1 || metrics.Seconds < 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.downloadTransport.ThreadDecisions == nil {
+		c.downloadTransport.ThreadDecisions = make(map[string]int, 3)
+	}
+	c.downloadTransport.Policy = metrics.Policy
+	c.downloadTransport.Files++
+	if metrics.Failed {
+		c.downloadTransport.Failed++
+	}
+	c.downloadTransport.ExpectedBytes += metrics.ExpectedBytes
+	c.downloadTransport.TransferredBytes += metrics.TransferredBytes
+	c.downloadTransport.Seconds += metrics.Seconds
+	if metrics.Threads > c.downloadTransport.PeakThreads {
+		c.downloadTransport.PeakThreads = metrics.Threads
+	}
+	c.downloadTransport.ThreadDecisions[fmt.Sprintf("%d", metrics.Threads)]++
+	c.downloadTransport.Retries += metrics.Retries
+	c.downloadTransport.DownloaderFloods += metrics.FloodWaits
+	c.downloadTransport.DownloaderTransportFloods += metrics.TransportFloods
 }
 
 func (c *dailyStageTimingCollector) ObserveDialogCheckpoint(decision harvest.DailyDialogCheckpointDecision, stats harvest.OutgoingStats) {
@@ -192,6 +220,10 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 	total := completedAt.Sub(c.startedAt).Seconds()
 	asrSpeedX := speedRatio(c.audioSeconds, stageSeconds.ASR)
 	pipelineSpeedX := speedRatio(c.audioSeconds, stageSeconds.ModelColdStart+stageSeconds.FFmpeg+stageSeconds.ASR)
+	downloadTransport := c.downloadTransport
+	if downloadTransport.Seconds > 0 && downloadTransport.TransferredBytes > 0 {
+		downloadTransport.ThroughputMiBPerS = float64(downloadTransport.TransferredBytes) / (1024 * 1024) / downloadTransport.Seconds
+	}
 	if c.mediaPipeline != nil {
 		asrSpeedX = c.mediaPipeline.WorkerWorkSpeedX
 		pipelineSpeedX = c.mediaPipeline.PoolSpeedX
@@ -209,6 +241,7 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		ASRSpeedX:         asrSpeedX,
 		PipelineSpeedX:    pipelineSpeedX,
 		MediaPipeline:     c.mediaPipeline,
+		DownloadTransport: downloadTransport,
 		DialogCheckpoint:  c.dialogCheckpoint,
 		HistoryPagination: c.historyPagination,
 		TelegramRPC:       c.telegramRPC,
@@ -245,9 +278,16 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			pipelineQueuePeak = report.MediaPipeline.QueuePeak
 		}
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs download_files=%d download_bytes=%d download_mib_s=%.2f download_peak_threads=%d download_retries=%d download_floods=%d download_transport_floods=%d ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
+			report.DownloadTransport.Files,
+			report.DownloadTransport.TransferredBytes,
+			report.DownloadTransport.ThroughputMiBPerS,
+			report.DownloadTransport.PeakThreads,
+			report.DownloadTransport.Retries,
+			report.DownloadTransport.DownloaderFloods,
+			report.DownloadTransport.DownloaderTransportFloods,
 			report.Stages.FFmpeg,
 			report.Stages.ModelColdStart,
 			report.Stages.ASR,

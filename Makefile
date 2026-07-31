@@ -1,5 +1,7 @@
-CLI := go run ./cmd/telegram-harvest
+CLI := bin/telegram-harvest
 GO_FILES := $(shell find cmd internal -type f -name '*.go' | sort)
+GO_SOURCE_SET := $(shell printf '%s\n' '$(GO_FILES)' | cksum | awk '{print $$1 "-" $$2}')
+GO_SOURCE_STAMP := bin/.go-sources-$(GO_SOURCE_SET)
 PROFILE ?=
 PROFILE_ARG = --profile "$(PROFILE)"
 REQUIRE_PROFILE = @test -n "$(strip $(PROFILE))" || { printf "PROFILE=main|study is required\n"; exit 2; }
@@ -11,11 +13,12 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt fmt-check test check audit doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build fmt fmt-check test check audit doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
 	@printf "  make setup   # download pinned Go dependencies\\n"
+	@printf "  make build   # build the reusable local CLI binary\\n"
 	@printf "  make fmt     # gofmt project files\\n"
 	@printf "  make test    # go test ./...\\n"
 	@printf "  make check   # formatting, module, vet, and test validation\\n"
@@ -38,6 +41,17 @@ help:
 setup:
 	go mod download
 
+build: $(CLI)
+
+$(GO_SOURCE_STAMP):
+	@mkdir -p "$(dir $@)"
+	@rm -f bin/.go-sources-*
+	@touch "$@"
+
+$(CLI): $(GO_SOURCE_STAMP) $(GO_FILES) go.mod go.sum
+	@mkdir -p "$(dir $@)"
+	go build -trimpath -o "$@" ./cmd/telegram-harvest
+
 fmt:
 	gofmt -w $(GO_FILES)
 
@@ -56,6 +70,8 @@ check: fmt-check
 audit:
 	go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view: $(CLI)
 
 doctor:
 	$(REQUIRE_PROFILE)
