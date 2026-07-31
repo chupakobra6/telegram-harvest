@@ -14,11 +14,9 @@ const (
 	DefaultStateDir        = ".state"
 	DefaultMainSessionPath = ".sessions/main.json"
 	DefaultMainStateDir    = ".state/daily"
-	// Conservative study-profile pacing retained until that account is calibrated.
-	DefaultRPCSpacingMS = 700
-	// Static main/daily floor selected by live sequential calibration. Lower
+	// Static floor selected by live sequential calibration. Lower
 	// 400-450 ms candidates produced FloodWait under a sustained 103-RPC burst.
-	DefaultMainRPCSpacingMS = 500
+	DefaultRPCSpacingMS = 500
 	// Project cap for Telegram history/search requests.
 	DefaultBatchSize = 100
 	// One full history batch for non-backfill reads; use --all for exhaustive scans.
@@ -109,10 +107,6 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 			return Config{}, fmt.Errorf("%s: %w", envKeys(mode, "ADDITIONAL_SENDERS")[0], err)
 		}
 	}
-	rpcSpacingMS := DefaultRPCSpacingMS
-	if mode == ModeMain {
-		rpcSpacingMS = DefaultMainRPCSpacingMS
-	}
 	return Config{
 		Mode:                   mode,
 		AppID:                  appID,
@@ -123,7 +117,7 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 		StateDir:               defaultString(firstEnv(envKeys(mode, "STATE_DIR")...), defaultStateDir),
 		AllowedChats:           splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...)),
 		DailyAdditionalSenders: additionalSenders,
-		RPCSpacing:             time.Duration(rpcSpacingMS) * time.Millisecond,
+		RPCSpacing:             time.Duration(DefaultRPCSpacingMS) * time.Millisecond,
 	}, nil
 }
 

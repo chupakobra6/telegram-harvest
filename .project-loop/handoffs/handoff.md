@@ -6,7 +6,7 @@
 ## Цель
 
 - Убрать лишний пустой history proof RPC только при доказанной полноте checkpoint range.
-- Выбрать статический безопасный pacing для main/daily без FloodWait, ошибок и потери сообщений.
+- Выбрать единый статический безопасный pacing для main/daily и study без runtime-регулятора.
 
 ## Текущий Шаг
 
@@ -21,7 +21,7 @@
 - Shadow mode проверяет candidate следующим запросом и умеет фиксировать как confirmation, так и contradiction; production auto использует enforced proof только при `DialogCheckpoint.Enabled`.
 - Timing JSON/CLI получили `history_pagination` и `telegram_rpc`: static spacing, calls, scheduled wait, operation counts и transport floods.
 - RPC scheduler остался один, последовательный и под mutex; Telegram crawlers/download RPC не распараллелены.
-- Main/daily spacing изменён с 700 до 500 ms. Study сохраняет прежние 700 ms, потому что этот аккаунт не участвовал в калибровке. Runtime-adaptive controller и новые env/CLI knobs не добавлялись.
+- Единый spacing для main/daily и study изменён с 700 до 500 ms. Калибровка выполнялась на main; применение того же default к study — прямое решение пользователя. Runtime-adaptive controller, профильное разветвление и новые env/CLI knobs не добавлялись.
 
 ## Live Evidence
 

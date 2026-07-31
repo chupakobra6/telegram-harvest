@@ -163,8 +163,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 
 | Параметр | Значение | Причина |
 | --- | ---: | --- |
-| Main/daily RPC spacing | 500 ms | Статический code-owned floor: три 103-RPC прогона прошли без FloodWait, тогда как 400 ms и повторный 450 ms упёрлись в накопительный лимит. |
-| Study RPC spacing | 700 ms | Профиль не участвовал в этой account-specific калибровке и сохраняет прежний консервативный default. |
+| RPC spacing (`main` и `study`) | 500 ms | Единый статический code-owned floor: три 103-RPC прогона прошли без FloodWait, тогда как 400 ms и повторный 450 ms упёрлись в накопительный лимит. |
 | History batch size | 100 | Кодовый cap для одного Telegram history request. |
 | Default history limit | 100 | Обычный `dump`/incremental `sync` читает один batch; полный backfill делается через `--all`. |
 

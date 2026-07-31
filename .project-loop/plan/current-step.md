@@ -39,5 +39,5 @@
 - STEP-006 завершён; блокеров нет.
 - STEP-007 live shadow: 4/4 proof candidates подтверждены пустой следующей страницей, 0 rejected; enforced сократил 21→17 history batches и вернул побайтно тот же 45-record JSONL.
 - Main pacing matrix на 211-record/103-RPC historical run: 700 ms 74.998 s; 600 ms 66.503 s; 550 ms 61.058 s; 500 ms median 57.336 s; 400 ms и повторный 450 ms дали FloodWait.
-- Production: main/daily 500 ms, study остаётся 700 ms без непроверенного расширения. Integrated CLI: 211 records, 98 history batches, 0 FloodWait, 56.783 s; normalized SHA совпал с 700-ms baseline.
+- Production: единый 500 ms default для main/daily и study по прямому решению пользователя; профильное разветвление удалено. Integrated CLI на main: 211 records, 98 history batches, 0 FloodWait, 56.783 s; normalized SHA совпал с 700-ms baseline.
 - Full, vet, race, diff и Project Loop validation зелёные; временный harness и `/tmp` evidence удалены.
