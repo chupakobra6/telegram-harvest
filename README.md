@@ -1,5 +1,7 @@
 # Telegram Harvest
 
+[![CI](https://github.com/chupakobra6/telegram-harvest/actions/workflows/ci.yml/badge.svg)](https://github.com/chupakobra6/telegram-harvest/actions/workflows/ci.yml)
+
 Локальный read-only CLI для сбора Telegram-данных через MTProto user authorization.
 Проект рассчитан на два практических сценария:
 
@@ -23,6 +25,8 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. RPC идут последовательно и с pacing. |
 
 ## Быстрый старт
+
+Требуется Go 1.26.5 или новее. Для daily ASR также нужны `ffmpeg`, Metal-сборка `whisper-server` и две локальные модели; `doctor` показывает готовность каждого компонента.
 
 ```bash
 cd telegram-harvest
@@ -308,10 +312,11 @@ go run ./cmd/telegram-harvest --profile study sync \
 .state/study-main.jsonl
 .state/study-main.state.json
 .state/messages.jsonl
-messages.jsonl
-messages.toon
-agent-view/
+.state/messages.toon
+.state/agent-view/
 ```
+
+Все относительные `--out`, `--in`, `--merged-out`, `--media-dir` и `--out-dir` в low-level командах разрешаются внутри state-dir выбранного профиля. Абсолютный путь используется без изменений.
 
 Study `dump`/`sync` не транскрибируют audio/video. Они сохраняют inspectable материалы вроде photos/images/documents при включенном `--download-media`.
 
@@ -340,7 +345,7 @@ make refresh-agent-view PROFILE=study
 
 Обычный путь чтения для агента:
 
-1. Открыть `agent-view/README.md`.
+1. Открыть `.state/agent-view/README.md` (или соответствующий каталог внутри настроенного study state-dir).
 2. Для общего/latest-вопроса открыть `all-recent.md`.
 3. Если известен чат или тема, идти в конкретный chat/topic каталог.
 4. Открывать дневные Markdown-файлы, а raw JSONL использовать только для audit/debug.
@@ -352,6 +357,8 @@ make help
 make setup
 make fmt
 make test
+make check
+make audit
 go run ./cmd/telegram-harvest --help
 go run ./cmd/telegram-harvest --profile main daily --help
 go run ./cmd/telegram-harvest --profile main daily-catchup --help
@@ -376,5 +383,5 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --help
 - Telegram operations read-only: никаких send/click/delete/join/pin/mark-read.
 - Broad daily scan пишет только outgoing/self messages и явно настроенных sender IDs строго в их настроенных chat IDs.
 - Study scope ограничивается `TG_HARVEST_STUDY_ALLOWED_CHATS`, когда allowlist задан.
-- `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, dumps и generated views приватные и не коммитятся.
+- `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, дефолтные `chat.jsonl`/`media-manual` и generated views приватные и не коммитятся.
 - Live Telegram поведение проверяется вручную после логина; автоматические тесты покрывают локальную логику, config, state, rendering и helpers.

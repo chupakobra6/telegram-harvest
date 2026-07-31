@@ -7,6 +7,26 @@
 
 ## Записи
 
+### Code review и repo polish
+
+ID источника: `S012`
+
+Исходный ввод:
+
+```text
+проверь корректность кода и архитектуры соответствие правильному коду и чисттоте кода сделай ревью и репо полишь
+```
+
+Нормализация:
+- [x] требование: проверить correctness, architecture boundaries, duplication и code cleanliness;
+- [x] требование: исправить безопасные findings, а не ограничиваться текстовым отчётом;
+- [x] требование: отполировать setup, validation, help/docs, private artifacts и GitHub CI;
+- [x] ограничение: не менять Telegram/report/ASR behavior и не делать широкий cosmetic refactor;
+- [x] validation: full/race/static/security/module/help checks;
+- [x] реализация и validation завершены.
+
+Конфликты: отсутствуют.
+
 ### Единый RPC pacing для всех профилей
 
 ID источника: `S011`

@@ -1,4 +1,5 @@
 CLI := go run ./cmd/telegram-harvest
+GO_FILES := $(shell find cmd internal -type f -name '*.go' | sort)
 PROFILE ?=
 PROFILE_ARG = --profile "$(PROFILE)"
 REQUIRE_PROFILE = @test -n "$(strip $(PROFILE))" || { printf "PROFILE=main|study is required\n"; exit 2; }
@@ -10,13 +11,15 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt test doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup fmt fmt-check test check audit doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
-	@printf "  make setup   # go mod tidy\\n"
+	@printf "  make setup   # download pinned Go dependencies\\n"
 	@printf "  make fmt     # gofmt project files\\n"
 	@printf "  make test    # go test ./...\\n"
+	@printf "  make check   # formatting, module, vet, and test validation\\n"
+	@printf "  make audit   # static analysis and reachable vulnerability scan\\n"
 	@printf "  make doctor PROFILE=main|study # show config/session status\\n"
 	@printf "  make login PROFILE=main|study  # create MTProto user session\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
@@ -30,16 +33,29 @@ help:
 	@printf "  make compact PROFILE=study # low-level: compact an existing JSONL for agents\\n"
 	@printf "  make agent-view PROFILE=study # low-level: build Markdown navigation from JSONL\\n"
 	@printf "  make refresh-agent-view PROFILE=study # update Markdown navigation and messages.toon\\n"
-	@printf "  make clean   # remove generated local artifacts except .env and session\\n"
+	@printf "  make clean   # remove rebuildable caches/views; keep reports, .env, and sessions\\n"
 
 setup:
-	go mod tidy
+	go mod download
 
 fmt:
-	gofmt -w ./cmd ./internal
+	gofmt -w $(GO_FILES)
+
+fmt-check:
+	@unformatted="$$(gofmt -l $(GO_FILES))"; test -z "$$unformatted" || { printf "Unformatted Go files:\\n%s\\n" "$$unformatted"; exit 1; }
 
 test:
 	go test ./...
+
+check: fmt-check
+	go mod tidy -diff
+	go mod verify
+	go vet ./...
+	go test ./...
+
+audit:
+	go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
 doctor:
 	$(REQUIRE_PROFILE)

@@ -9,7 +9,9 @@ artifacts/
 /telegram-harvest
 messages.jsonl
 messages.toon
+chat.jsonl
 agent-view/
 media/
 media-refresh/
+media-manual/
 *.log

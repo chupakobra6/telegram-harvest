@@ -1097,7 +1097,6 @@ func (s *Session) collectDailyHistory(
 			case harvest.CheckpointProofEnforced:
 				stats.CheckpointProofStops++
 				stats.Complete = true
-				break
 			case harvest.CheckpointProofShadow:
 				shadowProofPending = true
 			}

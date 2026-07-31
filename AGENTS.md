@@ -14,21 +14,22 @@
 - Do not keep broad dumps of other people's messages in repo-local `.state/`; daily full-dialog scans may emit only outgoing/self records and explicitly configured sender IDs scoped to their configured chat IDs.
 
 ## Commands
-- Install/update dependencies: `go mod tidy`
-- Format: `gofmt -w ./cmd ./internal`
-- Tests: `go test ./...`
+- Install pinned dependencies: `make setup`
+- Format: `make fmt`
+- Standard validation: `make check`
+- Static/security audit: `make audit`
 - Doctor: `go run ./cmd/telegram-harvest --profile <main|study> doctor`
 - Login: `go run ./cmd/telegram-harvest --profile <main|study> login`
 - Daily harvest: `go run ./cmd/telegram-harvest --profile main daily --date yesterday`
 - Daily catch-up through yesterday: `go run ./cmd/telegram-harvest --profile main daily-catchup`
 - List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
 - List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
-- Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out .state/chat.jsonl`
+- Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out chat.jsonl` (relative outputs resolve inside the selected profile state dir)
 - Start full sync: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
 - Incremental sync after full sync completion: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
 - Compact agent view: `go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
-- Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
+- Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it writes under the profile state dir, updates incrementally when possible, and accepts `--rebuild` for a full rewrite.
 
 ## Version control
 - The user has given standing approval to push completed Telegram Harvest commits. After relevant validation and a local commit, push the current branch to its configured upstream; do not open a pull request unless requested.

@@ -5,16 +5,23 @@
 
 ## Цель
 
-- Убрать лишний пустой history proof RPC только при доказанной полноте checkpoint range.
-- Выбрать единый статический безопасный pacing для main/daily и study без runtime-регулятора.
+- Проверить корректность и архитектуру Telegram Harvest.
+- Закрыть безопасные findings и выполнить repo polish без изменения product contracts.
 
 ## Текущий Шаг
 
-- active step: `STEP-007`
+- active step: `STEP-008`
 - status: `готово`
-- requirements: `REQ-018`—`REQ-020`, `VAL-014`—`VAL-015`, `CON-001`, `SCOPE-005`
+- requirements: `REQ-021`—`REQ-023`, `VAL-016`, `SCOPE-006`
 
 ## Реализовано
+
+- Удалён единственный Staticcheck finding: redundant `break` в checkpoint proof switch.
+- Go toolchain floor поднят с 1.26.0 до 1.26.5; `x/net` и связанные `x/crypto`/`x/sys`/`x/text` обновлены до исправленных версий.
+- `make setup` стал non-mutating; добавлены `make check` и pinned `make audit`.
+- Добавлен GitHub CI: standard check, Staticcheck, Govulncheck и full race suite.
+- CLI help, README и AGENTS приведены к одному state-dir-relative path contract; ошибочная рекомендация `.state/.state/chat.jsonl` устранена.
+- Дефолтные private `chat.jsonl` и `media-manual/` дополнительно игнорируются git.
 
 - `HistoryStats`/`OutgoingStats` различают data pages, empty proof pages, sparse continuations, checkpoint proof candidates/stops, shadow confirmations/rejections и причины безопасного fallback.
 - Early stop действует только на первой странице валидного checkpoint-запроса с `MinID > 0`, совпавшим известным head, уникальными ID строго выше `MinID` и exact Telegram response metadata. `inexact`, полный batch, offset/head/count anomaly, historical/first-run/gap/account/scope mismatch и любой flow без checkpoint продолжают старую pagination.
@@ -53,22 +60,23 @@
 
 ## Проверка
 
-- `go test -count=1 ./...` — зелёный.
-- `go vet ./...` — зелёный.
-- `go test -race -count=1 ./internal/mtproto ./internal/harvest ./internal/config ./cmd/telegram-harvest` — зелёный.
+- `make check` — зелёный: format, tidy diff, module verify, vet, full tests.
+- `make audit` — Staticcheck clean; Govulncheck: 0 reachable vulnerabilities.
+- `go test -race -count=1 ./...` — зелёный.
+- `make setup`, `make help`, CLI global/command help smoke — зелёные.
 - `git diff --check` — зелёный.
 - Project Loop validation — зелёный.
 
 ## Ревью И Риски
 
-- Findings после self-review закрыты: непроверенный 500-ms default не распространён на study; `count` Telegram history не ошибочно трактуется как размер bounded `MinID` window.
-- Proof намеренно консервативен: при любой неопределённости теряется только ускорение, а не сообщения.
-- Pacing account- и workload-specific; при будущих стабильных FloodWait на main floor нужно пересмотреть вверх, но автоматически колебать его на каждом запуске не следует.
-- ASR/backend/media quality и daily sender scope не менялись.
+- Blocking correctness/security findings отсутствуют после исправлений.
+- `cmd/telegram-harvest/main.go` и `internal/mtproto/client.go` велики, но текущие package boundaries корректны; механический split не уменьшил бы coupling и намеренно не сделан в polish-проходе.
+- 22 advisories остаются только в невызываемых transitive module symbols; symbol-level Govulncheck подтверждает 0 достижимых уязвимостей.
+- Telegram, checkpoint, ASR/backend/media quality, report contract и daily sender scope не менялись.
 
 ## Следующее Действие
 
-- Шаг завершён. Следующий обычный `daily-catchup` автоматически использует main spacing 500 ms и checkpoint proof; по timing report проверить реальные `checkpoint_proof_stops` на следующем новом полном дне.
+- Шаг завершён; обязательных дальнейших исправлений по ревью нет.
 
 ## Обновленные Источники Правды
 
