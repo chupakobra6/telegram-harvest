@@ -30,6 +30,9 @@
 - Compact agent view: `go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
 - Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it updates incrementally when possible, pass `--rebuild` to force a full rewrite.
 
+## Version control
+- The user has given standing approval to push completed Telegram Harvest commits. After relevant validation and a local commit, push the current branch to its configured upstream; do not open a pull request unless requested.
+
 ## Catch-up requests
 - Read `docs/catch-up.md` before handling a user request phrased as "catch-up" or "катчап". It is the canonical definition of daily scope, output rules, media handling, and completion checks.
 - A catch-up means the standard `main` profile daily catch-up through yesterday. Do not invent separate full-chat or full-account catch-up formats; `dump` and `sync` are low-level data primitives, not user-facing catch-up workflows.
