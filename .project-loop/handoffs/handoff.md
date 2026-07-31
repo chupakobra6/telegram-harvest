@@ -1,90 +1,87 @@
 # Handoff
 
 Проект: telegram-harvest
-Обновлено: 2026-07-30
+Обновлено: 2026-07-31
 
 ## Цель
-- Сохранить полный daily contract: общий ASR backend и history-only Telegram scan без воспроизводимых потерь `messages.search`.
+
+- Выбрать один daily ASR-профиль по расширенному корпусу реальных исходящих Telegram voice.
+- Улучшить сохранение содержания относительно Vosk и подавить Whisper hallucinations без нарезки/потери речи.
 
 ## Текущий Шаг
-- active step: `STEP-005`
+
+- active step: `STEP-006`
 - status: `готово`
 
 ## Завершено
-- `REQ-001`: каждый catch-up диапазон обслуживается одним последовательным `DumpOutgoingRange`.
-- `REQ-002`: сохранены daily scope, forwards, media/transcripts, дневные JSONL/Markdown и merged catch-up.
-- `REQ-003`: старый и новый flow измерены на диапазоне 2026-07-22—2026-07-29.
-- Ошибки/неполный range не публикуют новые пользовательские reports; ASR open/encode errors не теряются.
-- `REQ-004`: Telegram scan, download, ffmpeg, Vosk и render измеряются непосредственно у места выполнения, включая failed work.
-- `REQ-005`: каждый daily run сохраняет уникальный атомарный `.state/daily/timings/<run-id>-<command>.json`; данные не зависят от перезаписываемых ASR logs.
-- `REQ-006`: один последовательный Telegram producer перекрывается с bounded local `ffmpeg → Vosk` pipeline.
-- `REQ-007`: `auto` стартует с одного logical worker и активирует до четырех только при queued backlog, выгоде выше startup и CPU/memory headroom; fixed `1..4` — diagnostic override.
-- `REQ-008`: in-flight media dedup, atomic transcript cache и deterministic collector сохраняют content/order.
-- `REQ-009`: timing report хранит work-seconds отдельно от pipeline span/overlap и per-worker startup/RSS/jobs/audio/speed.
-- `REQ-010`: единый typed ASR contract реализован для Vosk, whisper.cpp и custom command; WAV upload в long-lived whisper-server потоковый.
-- `REQ-011`: auto policy backend-specific — динамический CPU pool для Vosk и ровно один GPU worker для Whisper Metal/Core ML.
-- `REQ-012`: Metal и Metal + Core ML собраны и проверяются по runtime evidence; model/quantization/accelerator/binary/decode config изолированы в transcript cache.
-- `REQ-013`: developer benchmark сравнивает 6 вариантов на одном real corpus по performance, resources, quality и failure/empty/hallucination counts.
-- `REQ-014`: daily `messages.search` удалён; все изменившиеся dialogs читаются через `getHistory`, sender scope фильтруется локально.
 
-## Измененные Файлы
-- `cmd/telegram-harvest/main.go`, `cmd/telegram-harvest/main_test.go`
-- `internal/mtproto/client.go`, `internal/mtproto/client_test.go`
-- `internal/harvest/model.go`, `internal/harvest/daily_view.go` и тесты
-- `internal/stages/stages.go`, `internal/transcribe/transcribe.go` и тесты
-- `cmd/telegram-harvest/stage_timings.go` и тесты
-- `README.md`, `AGENTS.md`, `docs/catch-up.md`, `docs/performance.md`
-- `.project-loop/`, `inbox/README.md`
-- `internal/mtproto/media_pipeline.go` и тесты, `internal/stages/stages.go`
-- `internal/transcribe/backend.go`, `internal/transcribe/whisper_server.go` и тесты
-- `internal/asrbench/`, `cmd/asr-benchmark/`
-- `internal/mtproto/client.go`, `internal/mtproto/client_test.go`
+- Собран приватный ignored corpus: 28 voice Игоря, 2 weak-speech video и 12 non-speech controls; 2178.413 s, hash `d79e32bb0e7f2d1e05c2c5ee90584ed04827ef4d5f2aa10a62a47f6a6bb24c1a`.
+- Voice покрывают 5.1–150.2 s, median 76.3 s; есть разговорная/техническая речь, числа, отрицания, английские термины, имена и разный фон.
+- whisper.cpp обновлён в ignored runtime до stable v1.9.1; сравнивались Vosk, small q5_1, turbo q5_0, full large-v3 q5_0 и 10 decoder/gate вариантов.
+- Benchmark хранит decode/gate descriptor, confidence diagnostics, speech-gate seconds и content precision/recall/F1, negation recall, number recall.
+- Выбран один production profile: `large-v3-turbo-q5_0 + Metal + beam_size=5`, один GPU worker.
+- Перед Whisper запускается whole-file Silero gate: threshold 0.5, minimum speech 250 ms, minimum silence 100 ms, pad 30 ms. Gate не режет и не объединяет WAV.
+- Исправлен upstream defect whisper.cpp v1.9.1: min-silence CLI argument перезаписывает min-speech; runner передаёт min-speech после min-silence, regression test фиксирует порядок.
+- Exact terminal filter удаляет только отдельную последнюю boilerplate-строку из проверенного набора и пишет удалённое в diagnostics. Совпадение внутри нормального предложения не трогается.
+- Daily ASR log и timing report получили speech-gate timings, confidence/gate decision и removed hallucinations.
+- Daily CLI/config/docs используют production profile; локальный `.env` переключён на Whisper turbo Metal + Silero.
+
+## Результаты
+
+### Качество
+
+Независимый full large-v3 q5_0 использован как silver reference только для 30 speech samples; это относительная, не human-ground-truth оценка.
+
+| Вариант | WER | CER | Content F1 | Negation recall | Number recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Vosk small RU | 36.14% | 19.65% | 78.75% | 96.58% | 46.27% |
+| Whisper small q5_1 greedy | 25.85% | 16.55% | 87.00% | 93.84% | 70.15% |
+| Whisper turbo q5_0 greedy | 11.64% | 7.57% | 94.89% | 97.95% | 85.07% |
+| **Whisper turbo q5_0 beam 5** | **10.58%** | **6.39%** | **94.61%** | **97.95%** | **94.03%** |
+
+Beam восстановил окончания, технические фразы и числа, которые greedy пропускал. Model no-speech threshold, `suppress_nst` и отключение fallback не остановили non-speech hallucinations; no-fallback дал repetition loop.
+
+### Производительность
+
+- Final full corpus ×3: pipeline `15.64× / 13.63× / 12.90×`, median `13.63×`; ASR median `13.98×`.
+- Peak RSS 927 MiB; mean process CPU 7.1%; cold-start median 0.278 s.
+- 0/30 missed speech, 0/12 non-speech false transcripts.
+- Два terminal boilerplate в speech-файлах удалены с diagnostics: `DimaTorzok`, `Продолжение следует`.
+
+### Live current-head
+
+- Isolated state: `/tmp/telegram-harvest-e2e-final.YMBawV`; пользовательские reports/latest не затронуты.
+- 2026-07-25: 211 records, 21 attachments, 2 полезных transcript и 1 gated non-speech, 98 history batches, 0 FloodWait, complete.
+- Wall 85.888 s; Telegram 72.342 s; audio 170.284 s; ASR 9.968 s / 17.08×; overlapping pipeline 13.39×; один GPU worker.
+- После удаления только mutable Telegram counters, local paths и ASR text normalized JSONL SHA-256 совпал с baseline: `25d5dd9f8a364efb11e1b0b1073b10e4e7417722df603aa370b4ac7de4dd6019`.
+- Live ASR log подтвердил gate true/false и удаление `Продолжение следует...`.
 
 ## Проверка
-- `gofmt`, `git diff --check`, `go test ./...`, `loopctl.py validate` — зелёные.
-- Baseline: 290.77 s, 1 742 records. Range: 60.28 s, 1 764 records; ускорение 4.82×, −79.3% wall time.
-- Повторные current-head range-runs: 55.25 s и 54.74 s.
-- Сверка: 0 baseline records потеряно, 22 исходящих добавлено, 0 semantic mismatches на общих records после исключения mutable Telegram counters.
-- Scope: 1 706 self/outgoing, 58 Trackmate, 0 other incoming; 0 FloodWait.
-- До pipeline stage timing live run зафиксировал Telegram 52.107 s, download/ffmpeg/Vosk 0 s на прогретом кэше, render 0.024 s и wall 53.396 s.
-- После pipeline timing JSON хранит все stage work fields, `stage_work_seconds`, wall total и отдельный `media_pipeline` span/overlap/resource object; invalid wall-minus-work arithmetic удалена.
-- Range-scan сохранен: один range, 70 Telegram batches, 1 764 records, 0 FloodWait.
-- Pipeline cold benchmark 2026-07-25: sequential 94.22 s; fixed1 60.66 s; fixed2 54.56 s; fixed4 55.06 s; auto 54.95 и 55.61 s.
-- Во всех cold runs: 210 records, 21 attachments, 3 ASR jobs, 170.284 s audio, 0 FloodWait; normalized JSONL и raw Markdown идентичны.
-- Warm cache: 44.90 s, download/ffmpeg/model/Vosk/span 0, workers peak 0, user CPU 0.05 s.
-- `go test ./...`, `go vet ./...`, focused `-race`, `TestMediaPipeline` ×20, `git diff --check`, Project Loop validation — зелёные.
-- ASR corpus: 3 Telegram media, 170.284 s, hash `ba03ca…16c4`; 6 variants × 3 fresh process runs.
-- Current benchmark: Vosk 6.06×; small Metal 39.02×; small Core ML 37.69×; small q5_1 Metal 48.63×; turbo q5_0 Metal 29.37×; turbo + VAD 36.26×.
-- Core ML small оказался на 4.7% медленнее plain Metal pipeline и потребовал примерно на 513 MiB больше peak RSS. VAD убрал non-speech hallucination, но порезал speech.
-- Выбран рекомендуемый quality-first профиль: large-v3-turbo-q5_0 Metal, один worker, без VAD. Built-in default остаётся Vosk из-за внешней установки whisper.cpp/model.
-- Финальный live daily: 54.383 s total, Telegram 41.851 s, ASR 5.793 s / 29.40×, pipeline 16.69×, 1 worker, 0 FloodWait.
-- History-only no-ASR live на 2026-07-25 вернул 211/211 baseline keys, включая `1221157785:415830`: 92 batches, 70.530 s, 0 FloodWait.
-- Full Whisper E2E вернул 211 records, 21 attachments, 3 transcripts: 81.083 s, 0 FloodWait, 0 missing/extra/semantic mismatches после штатной нормализации.
-- Прежний no-ASR search path занимал 43.335 s и 56 batches. Дополнительные 27.195 s — измеренная цена полноты на холодной исторической дате; checkpoint сохраняется для последовательного catch-up.
-- Добавлены tests для sparse history pages, false-complete при `max_batches`, non-advancing pagination и checkpoint Trackmate/self scope.
 
-## Агенты
-- `/root/range_scan_reviewer`: независимое ревью завершено, итог accepted без findings.
+- `go test ./...` — зелёный.
+- `go vet ./...` — зелёный.
+- `go test -race ./internal/transcribe ./internal/asrbench ./internal/mtproto ./cmd/telegram-harvest` — зелёный.
+- `go test ./internal/mtproto -run TestMediaPipeline -count=20` — зелёный.
+- `git diff --check` — зелёный.
+- Project Loop validation — зелёный.
 
-## Аудит Промптов
-- Создается при изменении prompts.
+## Риски И Ограничения
 
-## Пользовательские Дельты
-- Отдельный user-deltas stream создается для существенных свежих корректировок, решений или изменений области.
-
-## Риски И Блокеры
-- Блокеров нет. Изменяемые Telegram counters могут отличаться между последовательными чтениями.
-- Точный GPU utilization недоступен без elevated `powermetrics`; отчет честно хранит `available=false`, а Metal/Core ML activation подтверждается runtime logs.
-- Silver reference создан turbo-моделью, поэтому WER/CER являются относительным сравнением, не абсолютной human-annotated оценкой.
-- History-only безопаснее, но холодный исторический scan читает больше страниц. Это принятый trade-off; автоматический contiguous catch-up уменьшает его dialog checkpoint.
-- Технический ASR JSONL намеренно может остаться частичным при interruption; пользовательские report JSONL/Markdown атомарны.
-- Дневные ASR logs по-прежнему отражают текущий прогон; исторические performance figures теперь живут в отдельных immutable timing reports.
+- Silver reference не заменяет human transcription; full large-v3 иногда сам ошибается в редких словах.
+- Точный GPU utilization недоступен без elevated `powermetrics`; Metal activation подтверждена runtime evidence.
+- Terminal filter намеренно короткий и точный; он не пытается угадывать произвольные hallucinations.
+- Vosk остаётся CPU fallback/backend для benchmark, но active local daily profile один — выбранный Whisper.
+- Private audio/transcripts/results остаются только в ignored `.state`; во внешние API ничего не отправлялось.
 
 ## Следующее Действие
-- Шаг завершён. Следующее ускорение должно оптимизировать только доказанно безопасные history/checkpoint paths, не возвращая `messages.search`.
+
+- Шаг завершён. Расширять terminal filter или менять decoder/gate только после новых повторяемых ошибок на сохранённом локальном corpus.
 
 ## Обновленные Источники Правды
+
 - `requirements/source-map.md`
 - `requirements/checklist.md`
 - `plan/delivery-plan.md`
 - `plan/current-step.md`
+- `README.md`
+- `docs/performance.md`

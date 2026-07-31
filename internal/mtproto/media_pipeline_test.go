@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,16 +60,25 @@ func (r *pipelineRunnerHarness) RunDetailed(ctx context.Context, inputPath strin
 		return transcribe.Result{}, errors.New("synthetic ASR failure")
 	}
 	text := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+	speechGatePassed := true
 	return transcribe.Result{
 		Text:                   text,
 		Engine:                 "fake",
 		FFmpegDuration:         time.Millisecond,
+		SpeechGateDuration:     2 * time.Millisecond,
 		ModelColdStartDuration: 10 * time.Millisecond,
 		ASRDuration:            r.reportedASR,
 		TotalDuration:          r.delay,
 		InputBytes:             localFileSize(inputPath),
 		WAVDurationSeconds:     r.reportedAudio,
 		TranscriptBytes:        int64(len(text)),
+		Diagnostics: &transcribe.Diagnostics{
+			Segments:                      2,
+			MeanAverageLogProb:            -0.25,
+			MaximumNoSpeechProb:           0.1,
+			SpeechGatePassed:              &speechGatePassed,
+			RemovedTerminalHallucinations: []string{"Продолжение следует..."},
+		},
 	}, nil
 }
 
@@ -102,9 +112,11 @@ func TestMediaPipelineFixedWorkersCollectDeterministicallyAndAtomically(t *testi
 	dir := t.TempDir()
 	harness := &pipelineHarness{}
 	var observed stages.MediaPipelineMetrics
+	var events []harvest.ASRLogEvent
 	opts := harvest.HistoryOptions{
 		AudioDurationTiming: func(float64) {},
 		MediaPipelineTiming: func(metrics stages.MediaPipelineMetrics) { observed = metrics },
+		ASRLog:              func(event harvest.ASRLogEvent) error { events = append(events, event); return nil },
 	}
 	pipeline, err := newMediaPipelineWithConfig(context.Background(), opts, mediaPipelineConfig{
 		Mode:            "2",
@@ -170,6 +182,22 @@ func TestMediaPipelineFixedWorkersCollectDeterministicallyAndAtomically(t *testi
 	}
 	if observed.WorkersPeak != 2 || observed.JobsCompleted != 3 || observed.QueueCapacity != 4 || observed.AudioSeconds != 36 {
 		t.Fatalf("pipeline metrics = %+v", observed)
+	}
+	if math.Abs(observed.SpeechGateSeconds-0.006) > 1e-9 {
+		t.Fatalf("speech-gate seconds = %.3f, want 0.006", observed.SpeechGateSeconds)
+	}
+	var finalEvent *harvest.ASRLogEvent
+	for index := range events {
+		if events[index].Action == "transcribed" {
+			finalEvent = &events[index]
+			break
+		}
+	}
+	if finalEvent == nil || finalEvent.SpeechGatePassed == nil || !*finalEvent.SpeechGatePassed {
+		t.Fatalf("transcribed diagnostics event = %+v", finalEvent)
+	}
+	if finalEvent.ASRSegments != 2 || len(finalEvent.RemovedHallucinations) != 1 {
+		t.Fatalf("transcribed diagnostics event = %+v", finalEvent)
 	}
 	if matches, err := filepath.Glob(filepath.Join(dir, ".transcript-*.tmp")); err != nil || len(matches) != 0 {
 		t.Fatalf("temporary transcripts = %v, err=%v", matches, err)

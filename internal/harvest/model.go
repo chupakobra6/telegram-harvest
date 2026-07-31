@@ -168,7 +168,7 @@ type HistoryOptions struct {
 	WhisperModelPath      string
 	WhisperAccelerator    string
 	WhisperThreads        int
-	WhisperVADModelPath   string
+	WhisperGateFilePath   string
 	ASRLanguage           string
 	FFmpegCommand         string
 	Transcriber           Transcriber
@@ -276,6 +276,7 @@ type ASRLogEvent struct {
 	TranscriptCached      bool      `json:"transcript_cached,omitempty"`
 	DownloadSeconds       float64   `json:"download_seconds,omitempty"`
 	FFmpegSeconds         float64   `json:"ffmpeg_seconds,omitempty"`
+	SpeechGateSeconds     float64   `json:"speech_gate_seconds,omitempty"`
 	ModelColdStartSeconds float64   `json:"model_cold_start_seconds,omitempty"`
 	ASRSeconds            float64   `json:"asr_seconds,omitempty"`
 	TotalSeconds          float64   `json:"total_seconds,omitempty"`
@@ -284,5 +285,10 @@ type ASRLogEvent struct {
 	WAVDurationSeconds    float64   `json:"wav_duration_seconds,omitempty"`
 	TranscriptBytes       int64     `json:"transcript_bytes,omitempty"`
 	RealTimeFactor        float64   `json:"real_time_factor,omitempty"`
+	ASRSegments           int       `json:"asr_segments,omitempty"`
+	ASRMeanLogProbability float64   `json:"asr_mean_log_probability,omitempty"`
+	ASRMaxNoSpeechProb    float64   `json:"asr_max_no_speech_probability,omitempty"`
+	SpeechGatePassed      *bool     `json:"speech_gate_passed,omitempty"`
+	RemovedHallucinations []string  `json:"removed_terminal_hallucinations,omitempty"`
 	VideoTranscribeMode   string    `json:"video_transcribe_mode,omitempty"`
 }

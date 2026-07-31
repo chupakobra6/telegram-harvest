@@ -22,6 +22,18 @@ func TestBackendDescriptorAndCacheIdentitySeparateVariants(t *testing.T) {
 	english.Language = "en"
 	differentBinary := base
 	differentBinary.WhisperCommand = "/tmp/whisper-server-next"
+	beamSize := 5
+	beamSearch := base
+	beamSearch.WhisperDecode.BeamSize = &beamSize
+	noFallbackIncrement := 0.0
+	noFallback := base
+	noFallback.WhisperDecode.TemperatureIncrement = &noFallbackIncrement
+	speechGate := base
+	speechGate.WhisperSpeechGate = WhisperSpeechGateOptions{
+		Enabled:   true,
+		Command:   "/tmp/whisper-vad-speech-segments",
+		ModelPath: "/models/ggml-silero-v6.2.0.bin",
+	}
 
 	identities := map[string]bool{}
 	for name, opts := range map[string]Options{
@@ -30,6 +42,9 @@ func TestBackendDescriptorAndCacheIdentitySeparateVariants(t *testing.T) {
 		"quantized":        quantized,
 		"english":          english,
 		"different-binary": differentBinary,
+		"beam-search":      beamSearch,
+		"no-fallback":      noFallback,
+		"speech-gate":      speechGate,
 	} {
 		identity := opts.CacheIdentity()
 		if identity == "" {
@@ -43,11 +58,47 @@ func TestBackendDescriptorAndCacheIdentitySeparateVariants(t *testing.T) {
 	if got := quantized.Descriptor().Quantization; got != "q5_0" {
 		t.Fatalf("quantization = %q, want q5_0", got)
 	}
+	if got := beamSearch.Descriptor().Decode.BeamSize; got != 5 {
+		t.Fatalf("beam size = %d, want 5", got)
+	}
+	if got := noFallback.Descriptor().Decode.TemperatureIncrement; got != 0 {
+		t.Fatalf("temperature increment = %f, want 0", got)
+	}
+	if got := speechGate.Descriptor().SpeechGate.Model; got != "ggml-silero-v6.2.0.bin" {
+		t.Fatalf("speech gate model = %q", got)
+	}
 
 	commandA := Options{CommandTemplate: "engine-a {input} {output}"}
 	commandB := Options{CommandTemplate: "engine-b {input} {output}"}
 	if commandA.CacheIdentity() == commandB.CacheIdentity() {
 		t.Fatal("external command templates share a transcript cache identity")
+	}
+}
+
+func TestProductionWhisperProfileIsPinned(t *testing.T) {
+	opts := Options{
+		Backend:            BackendWhisperCPP,
+		WhisperCommand:     "whisper-server",
+		WhisperModelPath:   "ggml-large-v3-turbo-q5_0.bin",
+		WhisperAccelerator: AcceleratorMetal,
+		WhisperDecode:      ProductionWhisperDecode(),
+		WhisperSpeechGate:  ProductionWhisperSpeechGate("ggml-silero-v6.2.0.bin"),
+	}
+	if err := opts.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := opts.Descriptor()
+	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 {
+		t.Fatalf("production beam size = %#v, want 5", descriptor.Decode)
+	}
+	if descriptor.SpeechGate == nil {
+		t.Fatal("production speech gate is disabled")
+	}
+	if descriptor.SpeechGate.Threshold != 0.5 || descriptor.SpeechGate.MinSpeechDurationMS != 250 {
+		t.Fatalf("production speech gate = %#v", descriptor.SpeechGate)
+	}
+	if descriptor.PostFilter != whisperTerminalHallucinationProfile {
+		t.Fatalf("production post-filter = %q", descriptor.PostFilter)
 	}
 }
 
@@ -72,6 +123,11 @@ func TestValidateBackendConfiguration(t *testing.T) {
 		{name: "whisper", opts: Options{Backend: BackendWhisperCPP, WhisperCommand: "server", WhisperModelPath: "model", WhisperAccelerator: AcceleratorMetal}, ok: true},
 		{name: "missing whisper model", opts: Options{Backend: BackendWhisperCPP, WhisperCommand: "server"}, ok: false},
 		{name: "bad accelerator", opts: Options{Backend: BackendWhisperCPP, WhisperCommand: "server", WhisperModelPath: "model", WhisperAccelerator: "magic"}, ok: false},
+		{name: "bad no speech threshold", opts: whisperWithNoSpeechThreshold(1.1), ok: false},
+		{name: "missing gate model", opts: Options{
+			Backend: BackendWhisperCPP, WhisperCommand: "server", WhisperModelPath: "model",
+			WhisperSpeechGate: WhisperSpeechGateOptions{Enabled: true},
+		}, ok: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -80,6 +136,17 @@ func TestValidateBackendConfiguration(t *testing.T) {
 				t.Fatalf("Validate() error = %v, ok = %t", err, test.ok)
 			}
 		})
+	}
+}
+
+func whisperWithNoSpeechThreshold(value float64) Options {
+	return Options{
+		Backend:          BackendWhisperCPP,
+		WhisperCommand:   "server",
+		WhisperModelPath: "model",
+		WhisperDecode: WhisperDecodeOptions{
+			NoSpeechThreshold: &value,
+		},
 	}
 }
 

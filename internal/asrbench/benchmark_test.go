@@ -26,3 +26,26 @@ func TestQualityWithoutReferencesIsUnavailable(t *testing.T) {
 		t.Fatalf("quality = %v, %v", wer, cer)
 	}
 }
+
+func TestContentQualityExposesCriticalMeaningLoss(t *testing.T) {
+	samples := []Sample{{
+		ID:        "one",
+		Reference: "я сегодня не буду есть тысяча сто калорий",
+	}}
+	precision, recall, f1, negationRecall, numberRecall := ContentQuality(samples, []TranscriptResult{{
+		SampleID: "one",
+		Text:     "я сегодня буду есть тысяча калорий",
+	}})
+	if precision == nil || recall == nil || f1 == nil {
+		t.Fatalf("content metrics are unavailable: %v %v %v", precision, recall, f1)
+	}
+	if *negationRecall != 0 {
+		t.Fatalf("negation recall = %f, want 0", *negationRecall)
+	}
+	if *numberRecall != 0.5 {
+		t.Fatalf("number recall = %f, want 0.5", *numberRecall)
+	}
+	if *recall >= 1 {
+		t.Fatalf("word recall = %f, want a detected deletion", *recall)
+	}
+}

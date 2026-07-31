@@ -36,18 +36,20 @@ type Sample struct {
 }
 
 type Variant struct {
-	Name             string            `json:"name"`
-	Backend          string            `json:"backend"`
-	Command          string            `json:"command"`
-	ModelPath        string            `json:"model_path"`
-	Accelerator      string            `json:"accelerator,omitempty"`
-	Language         string            `json:"language,omitempty"`
-	Threads          int               `json:"threads,omitempty"`
-	VoskGrammarPath  string            `json:"vosk_grammar_path,omitempty"`
-	FFmpegCommand    string            `json:"ffmpeg_command,omitempty"`
-	ExpectedEvidence string            `json:"expected_evidence,omitempty"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	VADModelPath     string            `json:"vad_model_path,omitempty"`
+	Name             string                              `json:"name"`
+	Backend          string                              `json:"backend"`
+	Command          string                              `json:"command"`
+	ModelPath        string                              `json:"model_path"`
+	Accelerator      string                              `json:"accelerator,omitempty"`
+	Language         string                              `json:"language,omitempty"`
+	Threads          int                                 `json:"threads,omitempty"`
+	VoskGrammarPath  string                              `json:"vosk_grammar_path,omitempty"`
+	FFmpegCommand    string                              `json:"ffmpeg_command,omitempty"`
+	ExpectedEvidence string                              `json:"expected_evidence,omitempty"`
+	Environment      map[string]string                   `json:"environment,omitempty"`
+	VADModelPath     string                              `json:"vad_model_path,omitempty"`
+	Decode           transcribe.WhisperDecodeOptions     `json:"decode,omitempty"`
+	SpeechGate       transcribe.WhisperSpeechGateOptions `json:"speech_gate,omitempty"`
 }
 
 type Report struct {
@@ -81,6 +83,11 @@ type VariantResult struct {
 	PeakProcessCPU          float64                 `json:"peak_process_cpu_percent"`
 	WER                     *float64                `json:"wer,omitempty"`
 	CER                     *float64                `json:"cer,omitempty"`
+	WordPrecision           *float64                `json:"word_precision,omitempty"`
+	WordRecall              *float64                `json:"word_recall,omitempty"`
+	WordF1                  *float64                `json:"word_f1,omitempty"`
+	NegationRecall          *float64                `json:"negation_recall,omitempty"`
+	NumberRecall            *float64                `json:"number_recall,omitempty"`
 	EmptyTranscripts        int                     `json:"empty_transcripts"`
 	FailedTranscripts       int                     `json:"failed_transcripts"`
 	MissedSpeech            int                     `json:"missed_speech"`
@@ -92,22 +99,24 @@ type VariantResult struct {
 }
 
 type RunResult struct {
-	WallSeconds      float64 `json:"wall_seconds"`
-	AudioSeconds     float64 `json:"audio_seconds"`
-	FFmpegSeconds    float64 `json:"ffmpeg_seconds"`
-	ASRSeconds       float64 `json:"asr_seconds"`
-	ColdStartSeconds float64 `json:"cold_start_seconds"`
-	ASRSpeedX        float64 `json:"asr_speed_x"`
-	PipelineSpeedX   float64 `json:"pipeline_speed_x"`
-	PeakRSSBytes     uint64  `json:"peak_rss_bytes"`
-	MeanProcessCPU   float64 `json:"mean_process_cpu_percent"`
-	PeakProcessCPU   float64 `json:"peak_process_cpu_percent"`
+	WallSeconds       float64 `json:"wall_seconds"`
+	AudioSeconds      float64 `json:"audio_seconds"`
+	FFmpegSeconds     float64 `json:"ffmpeg_seconds"`
+	ASRSeconds        float64 `json:"asr_seconds"`
+	SpeechGateSeconds float64 `json:"speech_gate_seconds"`
+	ColdStartSeconds  float64 `json:"cold_start_seconds"`
+	ASRSpeedX         float64 `json:"asr_speed_x"`
+	PipelineSpeedX    float64 `json:"pipeline_speed_x"`
+	PeakRSSBytes      uint64  `json:"peak_rss_bytes"`
+	MeanProcessCPU    float64 `json:"mean_process_cpu_percent"`
+	PeakProcessCPU    float64 `json:"peak_process_cpu_percent"`
 }
 
 type TranscriptResult struct {
-	SampleID string `json:"sample_id"`
-	Text     string `json:"text,omitempty"`
-	Error    string `json:"error,omitempty"`
+	SampleID    string                  `json:"sample_id"`
+	Text        string                  `json:"text,omitempty"`
+	Error       string                  `json:"error,omitempty"`
+	Diagnostics *transcribe.Diagnostics `json:"diagnostics,omitempty"`
 }
 
 type processProvider interface {
@@ -210,7 +219,11 @@ func runVariant(ctx context.Context, variant Variant, samples []Sample, runs int
 		for sampleIndex, sample := range samples {
 			output := filepath.Join(runDir, fmt.Sprintf("%03d.txt", sampleIndex+1))
 			detailed, err := runner.RunDetailed(ctx, sample.InputPath, output)
-			transcript := TranscriptResult{SampleID: sample.ID, Text: strings.TrimSpace(detailed.Text)}
+			transcript := TranscriptResult{
+				SampleID:    sample.ID,
+				Text:        strings.TrimSpace(detailed.Text),
+				Diagnostics: detailed.Diagnostics,
+			}
 			if err != nil {
 				transcript.Error = err.Error()
 			}
@@ -218,6 +231,7 @@ func runVariant(ctx context.Context, variant Variant, samples []Sample, runs int
 			runResult.AudioSeconds += detailed.WAVDurationSeconds
 			runResult.FFmpegSeconds += detailed.FFmpegDuration.Seconds()
 			runResult.ASRSeconds += detailed.ASRDuration.Seconds()
+			runResult.SpeechGateSeconds += detailed.SpeechGateDuration.Seconds()
 			runResult.ColdStartSeconds += detailed.ModelColdStartDuration.Seconds()
 		}
 		runResult.WallSeconds = time.Since(startedAt).Seconds()
@@ -290,6 +304,8 @@ func runVariant(ctx context.Context, variant Variant, samples []Sample, runs int
 		}
 	}
 	result.WER, result.CER = Quality(samples, result.Transcripts)
+	result.WordPrecision, result.WordRecall, result.WordF1,
+		result.NegationRecall, result.NumberRecall = ContentQuality(samples, result.Transcripts)
 	return result, nil
 }
 
@@ -303,6 +319,8 @@ func variantOptions(variant Variant) transcribe.Options {
 		FFmpegCommand:       variant.FFmpegCommand,
 		Environment:         variant.Environment,
 		WhisperVADModelPath: variant.VADModelPath,
+		WhisperDecode:       variant.Decode,
+		WhisperSpeechGate:   variant.SpeechGate,
 	}
 	switch variant.Backend {
 	case transcribe.BackendWhisperCPP:
@@ -356,6 +374,112 @@ func Quality(samples []Sample, transcripts []TranscriptResult) (*float64, *float
 	wer := float64(editDistance(referenceWords, hypothesisWords)) / float64(len(referenceWords))
 	cer := float64(editDistance(referenceRunes, hypothesisRunes)) / float64(len(referenceRunes))
 	return &wer, &cer
+}
+
+// ContentQuality complements order-sensitive WER with multiset word overlap.
+// Exact recalls for negations and number concepts expose small but potentially
+// meaning-changing deletions that aggregate WER can hide.
+func ContentQuality(samples []Sample, transcripts []TranscriptResult) (
+	precision *float64,
+	recall *float64,
+	f1 *float64,
+	negationRecall *float64,
+	numberRecall *float64,
+) {
+	byID := make(map[string]TranscriptResult, len(transcripts))
+	for _, transcript := range transcripts {
+		byID[transcript.SampleID] = transcript
+	}
+	referenceCounts := map[string]int{}
+	hypothesisCounts := map[string]int{}
+	referenceNegations := map[string]int{}
+	hypothesisNegations := map[string]int{}
+	referenceNumbers := map[string]int{}
+	hypothesisNumbers := map[string]int{}
+	for _, sample := range samples {
+		if strings.TrimSpace(sample.Reference) == "" {
+			continue
+		}
+		countQualityTokens(strings.Fields(Normalize(sample.Reference)), referenceCounts, referenceNegations, referenceNumbers)
+		countQualityTokens(strings.Fields(Normalize(byID[sample.ID].Text)), hypothesisCounts, hypothesisNegations, hypothesisNumbers)
+	}
+	if sumCounts(referenceCounts) == 0 {
+		return nil, nil, nil, nil, nil
+	}
+	matches := overlapCounts(referenceCounts, hypothesisCounts)
+	precisionValue := ratio(float64(matches), float64(sumCounts(hypothesisCounts)))
+	recallValue := ratio(float64(matches), float64(sumCounts(referenceCounts)))
+	f1Value := 0.0
+	if precisionValue+recallValue > 0 {
+		f1Value = 2 * precisionValue * recallValue / (precisionValue + recallValue)
+	}
+	precision = &precisionValue
+	recall = &recallValue
+	f1 = &f1Value
+	if total := sumCounts(referenceNegations); total > 0 {
+		value := float64(overlapCounts(referenceNegations, hypothesisNegations)) / float64(total)
+		negationRecall = &value
+	}
+	if total := sumCounts(referenceNumbers); total > 0 {
+		value := float64(overlapCounts(referenceNumbers, hypothesisNumbers)) / float64(total)
+		numberRecall = &value
+	}
+	return precision, recall, f1, negationRecall, numberRecall
+}
+
+func countQualityTokens(tokens []string, all, negations, numbers map[string]int) {
+	for _, token := range tokens {
+		all[token]++
+		if isNegation(token) {
+			negations[token]++
+		}
+		if isNumberConcept(token) {
+			numbers[token]++
+		}
+	}
+}
+
+func overlapCounts(left, right map[string]int) int {
+	total := 0
+	for token, count := range left {
+		total += min(count, right[token])
+	}
+	return total
+}
+
+func sumCounts(counts map[string]int) int {
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	return total
+}
+
+func isNegation(token string) bool {
+	switch token {
+	case "не", "нет", "ни", "без", "нельзя", "никогда", "ничего", "никто":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNumberConcept(token string) bool {
+	if strings.IndexFunc(token, func(current rune) bool { return !unicode.IsDigit(current) }) == -1 {
+		return token != ""
+	}
+	switch token {
+	case "ноль", "один", "одна", "одно", "два", "две", "три", "четыре", "пять",
+		"шесть", "семь", "восемь", "девять", "десять", "одиннадцать", "двенадцать",
+		"тринадцать", "четырнадцать", "пятнадцать", "шестнадцать", "семнадцать",
+		"восемнадцать", "девятнадцать", "двадцать", "тридцать", "сорок", "пятьдесят",
+		"шестьдесят", "семьдесят", "восемьдесят", "девяносто", "сто", "двести",
+		"триста", "четыреста", "пятьсот", "шестьсот", "семьсот", "восемьсот",
+		"девятьсот", "тысяча", "тысячи", "тысяч", "миллион", "миллиона", "миллионов":
+		return true
+	default:
+		return false
+	}
 }
 
 func Normalize(value string) string {

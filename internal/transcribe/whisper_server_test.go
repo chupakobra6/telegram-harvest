@@ -70,8 +70,100 @@ GO_WANT_WHISPER_HELPER=1 exec %q -test.run=TestWhisperServerRunnerKeepsModelSess
 	if first.Backend.Accelerator != AcceleratorCPU || first.Backend.Backend != BackendWhisperCPP {
 		t.Fatalf("backend = %+v", first.Backend)
 	}
+	if first.Diagnostics == nil || first.Diagnostics.Segments != 1 ||
+		first.Diagnostics.MeanAverageLogProb != -0.25 ||
+		first.Diagnostics.MaximumNoSpeechProb != 0.1 {
+		t.Fatalf("diagnostics = %+v", first.Diagnostics)
+	}
 	if runner.ProcessID() <= 0 {
 		t.Fatal("whisper process is not running")
+	}
+}
+
+func TestWhisperSpeechGateParsesPresenceWithoutTrimmingAudio(t *testing.T) {
+	dir := t.TempDir()
+	command := filepath.Join(dir, "fake-vad")
+	script := `#!/bin/sh
+if [ "$FAKE_GATE_RESULT" = "speech" ]; then
+  printf 'Detected 2 speech segments:\n'
+else
+  printf 'Detected 0 speech segments:\n'
+fi
+`
+	if err := os.WriteFile(command, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		WhisperCommand: "server",
+		WhisperSpeechGate: WhisperSpeechGateOptions{
+			Enabled:   true,
+			Command:   command,
+			ModelPath: "silero.bin",
+		},
+		Environment: map[string]string{"FAKE_GATE_RESULT": "speech"},
+	}
+	hasSpeech, err := runWhisperSpeechGate(t.Context(), opts, "input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSpeech {
+		t.Fatal("speech gate rejected speech")
+	}
+	opts.Environment["FAKE_GATE_RESULT"] = "silence"
+	hasSpeech, err = runWhisperSpeechGate(t.Context(), opts, "input.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasSpeech {
+		t.Fatal("speech gate accepted no-speech input")
+	}
+}
+
+func TestWhisperSpeechGateAppliesMinSpeechAfterMinSilence(t *testing.T) {
+	minSpeech := 250
+	minSilence := 100
+	opts := Options{
+		WhisperSpeechGate: WhisperSpeechGateOptions{
+			Enabled:              true,
+			ModelPath:            "silero.bin",
+			MinSpeechDurationMS:  &minSpeech,
+			MinSilenceDurationMS: &minSilence,
+		},
+	}
+	args := whisperSpeechGateArgs(opts, opts.WhisperSpeechGate.normalized(opts), "input.wav")
+	index := func(flag string) int {
+		for current, value := range args {
+			if value == flag {
+				return current
+			}
+		}
+		return -1
+	}
+	minSilenceIndex := index("--vad-min-silence-duration-ms")
+	minSpeechIndex := index("--vad-min-speech-duration-ms")
+	if minSilenceIndex < 0 || minSpeechIndex < 0 || minSilenceIndex >= minSpeechIndex {
+		t.Fatalf("gate args do not preserve v1.9.1 min-speech workaround: %v", args)
+	}
+}
+
+func TestStripWhisperTerminalHallucinationsIsConservative(t *testing.T) {
+	text := "Реальное содержание.\nСубтитры сделал DimaTorzok"
+	got, removed := stripWhisperTerminalHallucinations(text)
+	if got != "Реальное содержание." {
+		t.Fatalf("filtered text = %q", got)
+	}
+	if len(removed) != 1 || removed[0] != "Субтитры сделал DimaTorzok" {
+		t.Fatalf("removed = %#v", removed)
+	}
+
+	got, removed = stripWhisperTerminalHallucinations("Он сказал: продолжение следует, но шутил.")
+	if got != "Он сказал: продолжение следует, но шутил." || len(removed) != 0 {
+		t.Fatalf("embedded phrase was removed: text=%q removed=%#v", got, removed)
+	}
+
+	got, removed = stripWhisperTerminalHallucinations("Спасибо.")
+	if got != "Спасибо." || len(removed) != 0 {
+		t.Fatalf("ordinary thanks was removed: text=%q removed=%#v", got, removed)
 	}
 }
 
@@ -95,8 +187,31 @@ func runWhisperServerHelper() {
 			http.Error(w, "language", http.StatusBadRequest)
 			return
 		}
+		expected := map[string]string{
+			"response_format": "verbose_json",
+			"temperature":     "0",
+			"temperature_inc": "0.2",
+			"best_of":         "2",
+			"beam_size":       "-1",
+			"no_speech_thold": "0.6",
+			"logprob_thold":   "-1",
+			"entropy_thold":   "2.4",
+			"suppress_nst":    "false",
+		}
+		for key, value := range expected {
+			if request.FormValue(key) != value {
+				http.Error(w, key, http.StatusBadRequest)
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(whisperResponse{Text: " привет мир "})
+		_ = json.NewEncoder(w).Encode(whisperResponse{
+			Text: " привет мир ",
+			Segments: []whisperSegment{{
+				AverageLogProbability: -0.25,
+				NoSpeechProbability:   0.1,
+			}},
+		})
 	})
 	server := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", port),

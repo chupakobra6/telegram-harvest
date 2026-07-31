@@ -28,6 +28,22 @@ func TestNumericPeerCandidatesSupportsTelegramChannelIDs(t *testing.T) {
 	}
 }
 
+func TestTranscribeOptionsPinsDailyWhisperProfile(t *testing.T) {
+	opts := transcribeOptions(harvest.HistoryOptions{
+		ASRBackend:          transcribe.BackendWhisperCPP,
+		WhisperCommand:      "whisper-server",
+		WhisperModelPath:    "ggml-large-v3-turbo-q5_0.bin",
+		WhisperGateFilePath: "ggml-silero-v6.2.0.bin",
+	})
+	descriptor := opts.Descriptor()
+	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 {
+		t.Fatalf("beam descriptor = %#v", descriptor.Decode)
+	}
+	if descriptor.SpeechGate == nil || descriptor.SpeechGate.Threshold != 0.5 {
+		t.Fatalf("speech gate descriptor = %#v", descriptor.SpeechGate)
+	}
+}
+
 func TestNormalizeHistoryOptionsAndBatchLimits(t *testing.T) {
 	opts := normalizeHistoryOptions(harvest.HistoryOptions{BatchSize: 500})
 	if opts.Limit != 100 || opts.BatchSize != 100 || opts.MaxBatches != 0 {

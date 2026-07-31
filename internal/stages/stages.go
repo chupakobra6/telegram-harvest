@@ -34,6 +34,7 @@ type MediaPipelineMetrics struct {
 	JobsCompleted           int                  `json:"jobs_completed"`
 	JobsFailed              int                  `json:"jobs_failed"`
 	AudioSeconds            float64              `json:"audio_seconds"`
+	SpeechGateSeconds       float64              `json:"speech_gate_seconds,omitempty"`
 	SpanSeconds             float64              `json:"span_seconds"`
 	OverlapSeconds          float64              `json:"overlap_seconds"`
 	PoolSpeedX              float64              `json:"pool_speed_x"`
@@ -67,6 +68,7 @@ type MediaWorkerMetrics struct {
 	Failures              int     `json:"failures"`
 	AudioSeconds          float64 `json:"audio_seconds"`
 	FFmpegSeconds         float64 `json:"ffmpeg_seconds"`
+	SpeechGateSeconds     float64 `json:"speech_gate_seconds,omitempty"`
 	ModelColdStartSeconds float64 `json:"model_cold_start_seconds"`
 	ASRSeconds            float64 `json:"asr_seconds"`
 	BusySeconds           float64 `json:"busy_seconds"`

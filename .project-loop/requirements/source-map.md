@@ -1,7 +1,7 @@
 # Карта Источников
 
 Проект: telegram-harvest
-Обновлено: 2026-07-30
+Обновлено: 2026-07-31
 
 ## Приоритет Источников
 1. Текущая прямая инструкция Игоря.
@@ -22,6 +22,8 @@
 | S005 | user | 2026-07-30 | `/Users/igor/.codex/attachments/2615f2f2-55ee-4d82-b3be-11a55ab1a100/pasted-text.txt` | принято | Полностью реализовать bounded media pipeline и консервативный динамический пул независимых Vosk workers, переиспользовать кэш, сохранить детерминированные отчеты, измерить ресурсы и сравнить sequential/1/2/4/auto. |
 | S006 | user | 2026-07-30 | current request | принято | Не добавлять Metal в Vosk; ввести общий ASR backend, реализовать Vosk CPU и whisper.cpp Metal/Core ML, сделать backend-specific worker policy и воспроизводимо сравнить скорость, cold-start, RAM/CPU/GPU и качество русского текста на одном реальном корпусе. |
 | S007 | user | 2026-07-30 | current request | принято | Не оставлять воспроизводимый пропуск сообщения в `messages.search`: исправить daily completeness и доказать возврат всех 211 baseline records. |
+| S008 | user | 2026-07-31 | current request | принято | Расширить benchmark на разнообразные исходящие голосовые Игоря из Telegram, сравнить варианты прежде всего по сохранению содержания относительно уже приемлемого Vosk, исследовать способы уменьшения галлюцинаций и выбрать один итоговый production-вариант. |
+| S009 | external primary research | 2026-07-31 | `github.com/openai/whisper/.../transcribe.py`, `github.com/ggml-org/whisper.cpp` v1.9.1 source/VAD docs, arXiv `2501.11378` | принято | Проверять decoder/VAD/no-speech настройки и обновление runtime по первичным источникам; внешние рекомендации считаются кандидатами до live-проверки на локальном корпусе. |
 
 ## Конфликты
 | Источники | Решение | Дата |

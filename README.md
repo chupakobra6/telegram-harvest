@@ -122,7 +122,7 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 
 ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации текущего прогона: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Дневной файл перезаписывается следующим прогоном этой даты и может остаться частичным после interruption.
 
-Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, span/overlap, queue peak, jobs/dedup/failures, requested/activated/peak workers, startup/RSS/ASR speed, CPU evidence и решения auto-controller. Worker-seconds могут быть больше wall time: локальные стадии перекрываются с Telegram и между собой.
+Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, requested/activated/peak workers, startup/RSS/ASR speed, CPU evidence и решения auto-controller. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time: локальные стадии перекрываются с Telegram и между собой.
 
 Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
 
@@ -194,7 +194,9 @@ go run ./cmd/telegram-harvest --profile main daily-download-media \
 
 ## ASR backends
 
-Daily pipeline не знает, как устроен конкретный распознаватель. `internal/transcribe` предоставляет единый managed-runner contract, descriptor, cache identity и worker policy:
+Штатный daily-профиль на этой машине — `whisper.cpp large-v3-turbo q5_0 + Metal`, `beam_size=5` и отдельный whole-file Silero speech gate. Профиль зафиксирован в коде: агенту не нужно подбирать decoder/gate-флаги. Vosk сохранён как CPU fallback и benchmark baseline.
+
+`internal/transcribe` предоставляет единый managed-runner contract, descriptor, cache identity и worker policy:
 
 - `vosk`: CPU backend; `auto` может динамически вырасти от одного до четырёх независимых процессов, если backlog и ресурсы доказывают пользу;
 - `whispercpp`: один долгоживущий локальный `whisper-server`; модель загружается один раз, а WAV отправляются на loopback HTTP. Для Metal и Metal + Core ML безопасный `auto` всегда использует один GPU worker;
@@ -202,9 +204,9 @@ Daily pipeline не знает, как устроен конкретный ра�
 
 Явные `--asr-workers=2..4` остаются диагностическим override. Для Whisper они позволяют поставить эксперимент, но не являются штатным режимом: процессы конкурируют за один GPU и unified memory.
 
-Transcript cache включает backend, accelerator, model/quantization, язык, threads и Vosk grammar. Поэтому результаты Vosk, Metal, Core ML и разных моделей не смешиваются. Смена backend один раз создаст новый cache namespace; готовый transcript по-прежнему публикуется атомарно.
+Transcript cache включает backend, accelerator, model/quantization, язык, threads, decode profile, speech-gate profile и Vosk grammar. Поэтому результаты Vosk, Metal, Core ML, разных моделей и настроек не смешиваются. Смена backend один раз создаст новый cache namespace; готовый transcript по-прежнему публикуется атомарно.
 
-### Vosk CPU
+### Vosk CPU fallback
 
 Daily-транскрибация использует локальный Vosk helper на Go:
 
@@ -268,12 +270,15 @@ whisper.cpp собирается из официального checkout. При�
 
 ```bash
 git clone https://github.com/ggml-org/whisper.cpp .state/asr-runtime/whisper.cpp
+git -C .state/asr-runtime/whisper.cpp checkout v1.9.1
 cmake -S .state/asr-runtime/whisper.cpp \
   -B .state/asr-runtime/whisper.cpp/build-metal \
   -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON \
   -DWHISPER_COREML=OFF -DWHISPER_BUILD_TESTS=OFF
-cmake --build .state/asr-runtime/whisper.cpp/build-metal -j 12 --target whisper-server
+cmake --build .state/asr-runtime/whisper.cpp/build-metal -j 12 \
+  --target whisper-server whisper-vad-speech-segments
 .state/asr-runtime/whisper.cpp/models/download-ggml-model.sh large-v3-turbo-q5_0
+.state/asr-runtime/whisper.cpp/models/download-vad-model.sh silero-v6.2.0
 ```
 
 Настройка daily:
@@ -285,9 +290,10 @@ TG_HARVEST_DAILY_WHISPER_MODEL_PATH=.state/asr-runtime/whisper.cpp/models/ggml-l
 TG_HARVEST_DAILY_WHISPER_ACCELERATOR=metal
 TG_HARVEST_DAILY_WHISPER_THREADS=4
 TG_HARVEST_DAILY_ASR_LANGUAGE=ru
-# Optional Silero VAD; measured trade-off is documented in docs/performance.md:
-# TG_HARVEST_DAILY_WHISPER_VAD_MODEL_PATH=.state/asr-runtime/whisper.cpp/models/ggml-silero-v6.2.0.bin
+TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH=.state/asr-runtime/whisper.cpp/models/ggml-silero-v6.2.0.bin
 ```
+
+Daily всегда использует один GPU worker, `beam_size=5` и Silero с threshold `0.5`, minimum speech `250 ms`, minimum silence `100 ms`, padding `30 ms`. Gate запускается после ffmpeg и только отвечает «есть ли в файле речь»; исходный WAV целиком отправляется в Whisper. Это убирает non-speech hallucinations, не рискуя обрезать отрицания или начало/конец фразы. Известные точные terminal boilerplate-фразы Whisper (`Продолжение следует`, `Субтитры сделал DimaTorzok` и подобные) удаляются только отдельной последней строкой и записываются в diagnostics; совпадение внутри нормального предложения не трогается.
 
 Core ML требует encoder `ggml-<model>-encoder.mlmodelc` рядом с GGML model и отдельную сборку с `-DWHISPER_COREML=ON`. Runtime evidence должен одновременно содержать `COREML = 1`, загрузку Core ML model и Metal device. Одного имени конфигурации недостаточно: benchmark проверяет фактические логи.
 
@@ -309,7 +315,7 @@ go run ./cmd/asr-benchmark \
 | Почти без ASR | 1.5-2 минуты |
 | Обычный день с voice/round-video | 2.5-6 минут |
 | Тяжелый день с десятками voice/round-video/phone-video ASR | 6-8 минут |
-| 19 дней с локальным Vosk CPU | около 1 часа |
+| 19 дней с локальным Vosk CPU (старая baseline-оценка) | около 1 часа |
 
 Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в CPU ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
 Daily пропускает per-chat history для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.

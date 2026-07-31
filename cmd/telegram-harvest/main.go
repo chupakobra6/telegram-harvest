@@ -269,7 +269,7 @@ func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
 	fmt.Fprintf(out, "daily_whisper_command=%s\n", defaults.WhisperCommand)
 	fmt.Fprintf(out, "daily_whisper_model_path=%s\n", defaults.WhisperModelPath)
 	fmt.Fprintf(out, "daily_whisper_accelerator=%s\n", defaults.WhisperAccelerator)
-	fmt.Fprintf(out, "daily_whisper_vad_model_path=%s\n", defaults.WhisperVADModelPath)
+	fmt.Fprintf(out, "daily_whisper_speech_gate_model_path=%s\n", defaults.WhisperGateFilePath)
 	fmt.Fprintf(out, "daily_asr_language=%s\n", defaults.ASRLanguage)
 	fmt.Fprintf(out, "daily_ffmpeg_command=%s\n", defaults.FFmpegCommand)
 	if !includeChecks {
@@ -311,6 +311,11 @@ func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
 			fmt.Fprintf(out, "daily_whisper_model_status=ok\n")
 		} else {
 			fmt.Fprintf(out, "daily_whisper_model_status=missing\n")
+		}
+		if fileExists(defaults.WhisperGateFilePath) {
+			fmt.Fprintf(out, "daily_whisper_speech_gate_status=ok\n")
+		} else {
+			fmt.Fprintf(out, "daily_whisper_speech_gate_status=missing\n")
 		}
 	}
 }
@@ -865,7 +870,7 @@ type dailyOptionFlags struct {
 	whisperModelPath    *string
 	whisperAccelerator  *string
 	whisperThreads      *int
-	whisperVADModelPath *string
+	whisperGateFilePath *string
 	asrLanguage         *string
 	ffmpegCommand       *string
 	asrWorkers          *string
@@ -892,7 +897,7 @@ func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOpt
 		whisperModelPath:    fs.String("whisper-model", defaults.WhisperModelPath, "whisper.cpp multilingual model file"),
 		whisperAccelerator:  fs.String("whisper-accelerator", defaults.WhisperAccelerator, "whisper.cpp accelerator: metal, metal-coreml, or cpu"),
 		whisperThreads:      fs.Int("whisper-threads", defaults.WhisperThreads, "whisper.cpp CPU thread count"),
-		whisperVADModelPath: fs.String("whisper-vad-model", defaults.WhisperVADModelPath, "optional whisper.cpp Silero VAD model"),
+		whisperGateFilePath: fs.String("whisper-speech-gate-model", defaults.WhisperGateFilePath, "required Silero model for the production whole-file speech gate"),
 		asrLanguage:         fs.String("asr-language", defaults.ASRLanguage, "spoken language code"),
 		ffmpegCommand:       fs.String("ffmpeg-command", defaults.FFmpegCommand, "ffmpeg command for audio extraction and WAV conversion"),
 		asrWorkers:          fs.String("asr-workers", "auto", "ASR worker mode: auto or diagnostic fixed count 1..4"),
@@ -926,7 +931,7 @@ func (f dailyOptionFlags) values() dailyOptions {
 		WhisperModelPath:     *f.whisperModelPath,
 		WhisperAccelerator:   *f.whisperAccelerator,
 		WhisperThreads:       *f.whisperThreads,
-		WhisperVADModelPath:  *f.whisperVADModelPath,
+		WhisperGateFilePath:  *f.whisperGateFilePath,
 		ASRLanguage:          *f.asrLanguage,
 		FFmpegCommand:        *f.ffmpegCommand,
 		ASRWorkerMode:        *f.asrWorkers,
@@ -957,7 +962,7 @@ type dailyOptions struct {
 	WhisperModelPath     string
 	WhisperAccelerator   string
 	WhisperThreads       int
-	WhisperVADModelPath  string
+	WhisperGateFilePath  string
 	ASRLanguage          string
 	FFmpegCommand        string
 	ASRWorkerMode        string
@@ -1154,17 +1159,20 @@ func validateDailyOptions(opts dailyOptions) error {
 	}
 	if opts.TranscribeMedia {
 		transcribeOpts := transcribe.Options{
-			CommandTemplate:     opts.TranscribeCommand,
-			Backend:             opts.ASRBackend,
-			VoskCommand:         opts.VoskCommand,
-			VoskModelPath:       opts.VoskModelPath,
-			VoskGrammarPath:     opts.VoskGrammarPath,
-			WhisperCommand:      opts.WhisperCommand,
-			WhisperModelPath:    opts.WhisperModelPath,
-			WhisperAccelerator:  opts.WhisperAccelerator,
-			WhisperThreads:      opts.WhisperThreads,
-			WhisperVADModelPath: opts.WhisperVADModelPath,
-			Language:            opts.ASRLanguage,
+			CommandTemplate:    opts.TranscribeCommand,
+			Backend:            opts.ASRBackend,
+			VoskCommand:        opts.VoskCommand,
+			VoskModelPath:      opts.VoskModelPath,
+			VoskGrammarPath:    opts.VoskGrammarPath,
+			WhisperCommand:     opts.WhisperCommand,
+			WhisperModelPath:   opts.WhisperModelPath,
+			WhisperAccelerator: opts.WhisperAccelerator,
+			WhisperThreads:     opts.WhisperThreads,
+			Language:           opts.ASRLanguage,
+		}
+		if strings.EqualFold(opts.ASRBackend, transcribe.BackendWhisperCPP) {
+			transcribeOpts.WhisperDecode = transcribe.ProductionWhisperDecode()
+			transcribeOpts.WhisperSpeechGate = transcribe.ProductionWhisperSpeechGate(opts.WhisperGateFilePath)
 		}
 		if err := transcribeOpts.Validate(); err != nil {
 			return err
@@ -1189,7 +1197,7 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 		WhisperModelPath:     opts.WhisperModelPath,
 		WhisperAccelerator:   opts.WhisperAccelerator,
 		WhisperThreads:       opts.WhisperThreads,
-		WhisperVADModelPath:  opts.WhisperVADModelPath,
+		WhisperGateFilePath:  opts.WhisperGateFilePath,
 		ASRLanguage:          opts.ASRLanguage,
 		FFmpegCommand:        opts.FFmpegCommand,
 		ASRWorkerMode:        opts.ASRWorkerMode,
@@ -2044,21 +2052,25 @@ func dailyDialogCheckpointScopeFingerprint(cfg config.Config, opts dailyOptions)
 }
 
 func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
-	return transcribe.Options{
-		CommandTemplate:     opts.TranscribeCommand,
-		Backend:             opts.ASRBackend,
-		VoskCommand:         opts.VoskCommand,
-		VoskModelPath:       opts.VoskModelPath,
-		VoskGrammarPath:     opts.VoskGrammarPath,
-		WhisperCommand:      opts.WhisperCommand,
-		WhisperModelPath:    opts.WhisperModelPath,
-		WhisperAccelerator:  opts.WhisperAccelerator,
-		WhisperThreads:      opts.WhisperThreads,
-		WhisperVADModelPath: opts.WhisperVADModelPath,
-		Language:            opts.ASRLanguage,
-		FFmpegCommand:       opts.FFmpegCommand,
-		StageTiming:         opts.StageTiming,
+	result := transcribe.Options{
+		CommandTemplate:    opts.TranscribeCommand,
+		Backend:            opts.ASRBackend,
+		VoskCommand:        opts.VoskCommand,
+		VoskModelPath:      opts.VoskModelPath,
+		VoskGrammarPath:    opts.VoskGrammarPath,
+		WhisperCommand:     opts.WhisperCommand,
+		WhisperModelPath:   opts.WhisperModelPath,
+		WhisperAccelerator: opts.WhisperAccelerator,
+		WhisperThreads:     opts.WhisperThreads,
+		Language:           opts.ASRLanguage,
+		FFmpegCommand:      opts.FFmpegCommand,
+		StageTiming:        opts.StageTiming,
 	}
+	if strings.EqualFold(opts.ASRBackend, transcribe.BackendWhisperCPP) {
+		result.WhisperDecode = transcribe.ProductionWhisperDecode()
+		result.WhisperSpeechGate = transcribe.ProductionWhisperSpeechGate(opts.WhisperGateFilePath)
+	}
+	return result
 }
 
 type dailyRuntimeConfig struct {
@@ -2072,7 +2084,7 @@ type dailyRuntimeConfig struct {
 	WhisperModelPath    string
 	WhisperAccelerator  string
 	WhisperThreads      int
-	WhisperVADModelPath string
+	WhisperGateFilePath string
 	ASRLanguage         string
 	FFmpegCommand       string
 }
@@ -2106,6 +2118,13 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 		whisperCommand = defaultLocalWhisperCommandPath()
 	}
 	whisperModelPath := firstEnvValue("TG_HARVEST_DAILY_WHISPER_MODEL_PATH")
+	if whisperModelPath == "" {
+		whisperModelPath = defaultLocalWhisperModelPath()
+	}
+	whisperSpeechGatePath := firstEnvValue("TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH")
+	if whisperSpeechGatePath == "" {
+		whisperSpeechGatePath = defaultLocalWhisperSpeechGateModelPath()
+	}
 	whisperAccelerator := strings.ToLower(firstEnvValue("TG_HARVEST_DAILY_WHISPER_ACCELERATOR"))
 	if whisperAccelerator == "" {
 		whisperAccelerator = transcribe.AcceleratorMetal
@@ -2123,7 +2142,9 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 	configured := strings.TrimSpace(transcribeCommand) != ""
 	switch asrBackend {
 	case transcribe.BackendWhisperCPP:
-		configured = strings.TrimSpace(whisperCommand) != "" && strings.TrimSpace(whisperModelPath) != ""
+		configured = strings.TrimSpace(whisperCommand) != "" &&
+			strings.TrimSpace(whisperModelPath) != "" &&
+			strings.TrimSpace(whisperSpeechGatePath) != ""
 	case transcribe.BackendVosk:
 		configured = strings.TrimSpace(voskCommand) != "" && strings.TrimSpace(voskModelPath) != ""
 	}
@@ -2138,7 +2159,7 @@ func dailyRuntimeDefaults() dailyRuntimeConfig {
 		WhisperModelPath:    whisperModelPath,
 		WhisperAccelerator:  whisperAccelerator,
 		WhisperThreads:      whisperThreads,
-		WhisperVADModelPath: firstEnvValue("TG_HARVEST_DAILY_WHISPER_VAD_MODEL_PATH"),
+		WhisperGateFilePath: whisperSpeechGatePath,
 		ASRLanguage:         asrLanguage,
 		FFmpegCommand:       ffmpegCommand,
 	}
@@ -2154,7 +2175,36 @@ func defaultLocalWhisperCommandPath() string {
 	if accelerator == transcribe.AcceleratorMetalCoreML {
 		name = "whisper-server-coreml"
 	}
-	candidate := filepath.Join(projectRoot, "bin", name)
+	candidates := []string{
+		filepath.Join(projectRoot, "bin", name),
+		filepath.Join(projectRoot, ".state", "asr-runtime", "whisper.cpp", "build-metal", "bin", "whisper-server"),
+	}
+	for _, candidate := range candidates {
+		if fileExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func defaultLocalWhisperModelPath() string {
+	projectRoot := detectProjectRoot()
+	if projectRoot == "" {
+		return ""
+	}
+	candidate := filepath.Join(projectRoot, ".state", "asr-runtime", "whisper.cpp", "models", "ggml-large-v3-turbo-q5_0.bin")
+	if fileExists(candidate) {
+		return candidate
+	}
+	return ""
+}
+
+func defaultLocalWhisperSpeechGateModelPath() string {
+	projectRoot := detectProjectRoot()
+	if projectRoot == "" {
+		return ""
+	}
+	candidate := filepath.Join(projectRoot, ".state", "asr-runtime", "whisper.cpp", "models", "ggml-silero-v6.2.0.bin")
 	if fileExists(candidate) {
 		return candidate
 	}

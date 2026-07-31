@@ -379,6 +379,7 @@ func TestValidateDailyOptionsChecksSelectedASRBackend(t *testing.T) {
 		ASRBackend:          transcribe.BackendWhisperCPP,
 		WhisperCommand:      "whisper-server",
 		WhisperModelPath:    "ggml-small.bin",
+		WhisperGateFilePath: "ggml-silero-v6.2.0.bin",
 		WhisperAccelerator:  transcribe.AcceleratorMetal,
 		ASRLanguage:         "ru",
 	}
@@ -389,6 +390,29 @@ func TestValidateDailyOptionsChecksSelectedASRBackend(t *testing.T) {
 	missingModel.WhisperModelPath = ""
 	if err := validateDailyOptions(missingModel); err == nil || !strings.Contains(err.Error(), "model path") {
 		t.Fatalf("missing model error = %v", err)
+	}
+	missingGate := valid
+	missingGate.WhisperGateFilePath = ""
+	if err := validateDailyOptions(missingGate); err == nil || !strings.Contains(err.Error(), "speech-gate model") {
+		t.Fatalf("missing speech gate error = %v", err)
+	}
+}
+
+func TestDailyTranscribeOptionsUsesOnlyPinnedWhisperProfile(t *testing.T) {
+	whisper := dailyTranscribeOptions(harvest.HistoryOptions{
+		ASRBackend:          transcribe.BackendWhisperCPP,
+		WhisperCommand:      "whisper-server",
+		WhisperModelPath:    "ggml-large-v3-turbo-q5_0.bin",
+		WhisperGateFilePath: "ggml-silero-v6.2.0.bin",
+	})
+	descriptor := whisper.Descriptor()
+	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 || descriptor.SpeechGate == nil {
+		t.Fatalf("daily whisper descriptor = %#v", descriptor)
+	}
+
+	vosk := dailyTranscribeOptions(harvest.HistoryOptions{ASRBackend: transcribe.BackendVosk})
+	if vosk.WhisperSpeechGate.Enabled || vosk.WhisperDecode.BeamSize != nil {
+		t.Fatalf("Vosk received Whisper production settings: %#v", vosk)
 	}
 }
 

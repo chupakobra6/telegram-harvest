@@ -127,47 +127,54 @@ Cold-cache benchmark 2026-07-30 для дня 2026-07-25:
 
 Warm-cache повтор в `auto` занял 44.90 s: download/ffmpeg/model/ASR/pipeline span равны нулю, `pipeline_workers=0`, user CPU 0.05 s. Это подтверждает, что cache hit не запускает ASR process.
 
-## ASR backend benchmark на M4 Pro
+## Расширенный ASR benchmark на M4 Pro
 
-Один и тот же реальный Telegram corpus: 3 файла, 170.284 s audio, два voice со speech и один 5.8 s round-video без речи. Каждый вариант запускался в новом process три раза после прогрева filesystem/model pages; таблица хранит медианы. Corpus hash: `ba03ca4a34a18128cb6bb6316ee5bd433d8dc34107c14d94d44f2e6b09ff16c4`.
+Корпус собран read-only из реальных исходящих Telegram-медиа за 2026-07-22..29: 28 voice и 14 коротких video/round-video, всего 42 файла и 2178.413 s (36.3 min) аудио. В 30 файлах есть речь; 12 роликов без полезной речи служат отдельным hallucination-control. Corpus hash: `d79e32bb0e7f2d1e05c2c5ee90584ed04827ef4d5f2aa10a62a47f6a6bb24c1a`.
 
-| Backend | ASR speed | Pipeline speed | Process cold-start | Peak RSS | Mean process CPU | Relative WER / CER | Явно неверные |
+Performance ниже — одинаковый полный корпус, один long-lived process на вариант. Финальный профиль дополнительно повторяется три раза; остальные значения — один cold process после прогрева OS file cache.
+
+| Backend / decode | ASR speed | Pipeline speed | Cold-start | Peak RSS | CPU | Missed speech | False text on 12 controls |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Vosk small RU CPU | 6.06× | 5.87× | 0.616 s | 940 MiB | 98.3% | 35.1% / 18.6% | 0 |
-| Whisper small f16 Metal | 39.02× | 35.45× | 0.178 s | 830 MiB | 22.0% | 20.3% / 9.6% | 1 hallucination |
-| Whisper small f16 Metal + Core ML | 37.69× | 33.80× | 0.253 s | 1 343 MiB | 25.2% | 20.3% / 9.7% | 1 hallucination |
-| Whisper small q5_1 Metal | 48.63× | 43.71× | 0.128 s | 499 MiB | 21.9% | 19.7% / 10.0% | 1 hallucination |
-| Whisper large-v3-turbo q5_0 Metal | 29.37× | 27.18× | 0.203 s | 800 MiB | 9.4% | reference / reference | 1 hallucination |
-| Whisper large-v3-turbo q5_0 Metal + Silero VAD | 36.26× | 32.98× | 0.203 s | 823 MiB | 14.9% | 19.7% / 12.1% | 0 |
+| Vosk small RU CPU | 5.29× | 5.24× | 0.643 s | 1304 MiB | 98.5% | 2 | 0 |
+| Whisper small q5_1 Metal, greedy | 57.50× | 52.41× | 0.154 s | 542 MiB | 20.8% | 0 | 12 |
+| Whisper turbo q5_0 Metal, greedy | 27.07× | 25.85× | 0.253 s | 878 MiB | 8.1% | 0 | 12 |
+| Whisper large-v3 q5_0 Metal, greedy | 11.71× | 11.46× | 0.436 s | 1853 MiB | 9.7% | 0 | 12 |
+| **Whisper turbo q5_0 Metal, beam 5 + speech gate** | **13.98×** | **13.63×** | **0.278 s** | **927 MiB** | **7.1%** | **0** | **0** |
 
-`100% process CPU` в `ps` означает примерно одно полностью занятое logical core, а не всю 12-core систему. Точный GPU utilization не снимался: macOS `powermetrics` требует elevated privileges. Вместо выдуманного процента отчет сохраняет `available=false` и runtime evidence. Metal варианты подтвердили Apple M4 Pro и `MTL : EMBED_LIBRARY = 1`; Core ML вариант дополнительно подтвердил `Core ML model loaded` и `COREML = 1`.
+`100% process CPU` в `ps` означает примерно одно полностью занятое logical core, а не всю 12-core систему. Точный GPU utilization не снимался: macOS `powermetrics` требует elevated privileges. Вместо выдуманного процента отчет сохраняет `available=false` и runtime evidence; Metal варианты подтвердили Apple M4 Pro и `MTL : EMBED_LIBRARY = 1`.
 
-WER/CER здесь не абсолютная экспертная оценка. Reference — output `large-v3-turbo-q5_0`; метрики показывают относительное расхождение с сильнейшим кандидатом. Человек не делал пословную аудио-разметку, поэтому turbo получает 0% по определению. Дополнительная независимая проверка — исходные тексты: Vosk заметно искажал русские слова и фразы; small Whisper сохранял смысл лучше; turbo лучше восстанавливал разговорные фразы и пунктуацию.
+### Сравнение содержания
 
-Все Whisper без VAD дали ложную короткую транскрипцию на non-speech ролике. Silero VAD убрал её, но заметно порезал обе speech-транскрипции. Поэтому VAD поддерживается и входит в cache identity, но не включён по умолчанию. Рекомендуемый quality-first профиль для этой машины — `large-v3-turbo-q5_0 + Metal`, один GPU worker. Встроенный default остаётся Vosk, потому что whisper.cpp binary и модель устанавливаются отдельно. `small-q5_1 + Metal` — разумный speed/space профиль. Core ML на small не дал выигрыша: −4.7% pipeline speed против Metal и примерно +513 MiB peak RSS.
+Пословной человеческой разметки 36 минут аудио нет. Для одинакового относительного сравнения независимый full `large-v3 q5_0` используется как silver reference только для 30 speech-файлов. Поэтому его собственные 0% WER нельзя считать абсолютным качеством. Пунктуация и регистр нормализованы. Кроме WER/CER измеряются multiset word F1 и отдельный recall отрицаний/чисел, чтобы малое, но смысловое удаление не растворялось в общей метрике.
 
-Первый в истории запуск свежей Metal/Core ML сборки дополнительно компилировал/прогревал runtime и занял около 11.0/11.9 s cold-start. Повторяемые process cold-start в таблице измерены при прогретом OS file cache; оба числа полезны и не смешиваются.
+| Backend / decode | Relative WER | CER | Content F1 | Negation recall | Number recall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Vosk small RU | 36.14% | 19.65% | 78.75% | 96.58% | 46.27% |
+| Whisper small q5_1 greedy | 25.85% | 16.55% | 87.00% | 93.84% | 70.15% |
+| Whisper turbo q5_0 greedy | 11.64% | 7.57% | 94.89% | 97.95% | 85.07% |
+| **Whisper turbo q5_0 beam 5** | **10.58%** | **6.39%** | **94.61%** | **97.95%** | **94.03%** |
+| Whisper large-v3 q5_0 silver reference | 0% | 0% | 100% | 100% | 100% |
 
-Machine-readable результаты лежат в приватном `.state/asr-benchmark/` и не входят в git. `cmd/asr-benchmark` хэширует corpus вместе с references, запускает один long-lived model process на repetition, снимает audio/ffmpeg/ASR/wall, RSS/CPU, WER/CER, empty/failure/speech-miss/non-speech hallucination и сохраняет полные transcripts/runtime evidence.
+Beam search выбран несмотря на снижение raw speed относительно greedy: он восстановил пропущенные окончания, технические фразы и числа; number recall вырос с 85.07% до 94.03%. Три полных повтора дали pipeline speed `15.64× / 13.63× / 12.90×` (median `13.63×`), то есть даже медленный повтор в 2.46 раза быстрее Vosk. Peak RSS примерно на 29% ниже Vosk. Full large-v3 почти вдвое тяжелее по памяти; ручная проверка также показала, что он не всегда лучше на редких русских/технических словах.
 
-Финальный live `daily` с рекомендуемым turbo-профилем на том же дне подтвердил поведение в полном flow:
+### Защита от галлюцинаций
 
-| Параметр | Значение |
-| --- | ---: |
-| Telegram scan | 41.851 s |
-| Download | 11.398 s |
-| ffmpeg | 0.294 s |
-| Model cold-start | 0.204 s |
-| ASR | 5.793 s |
-| Audio | 170.284 s |
-| ASR speed | 29.40× |
-| Overlapping pipeline speed | 16.69× |
-| Total daily wall | 54.383 s |
-| Workers / FloodWait | 1 / 0 |
+Model-level `no_speech_threshold=0.4`, `suppress_nst` и отключение temperature fallback не решили non-speech: Whisper присваивал шуму очень низкий `no_speech_prob` и всё равно печатал «ПОДПИШИСЬ!», «Продолжение следует…» и subtitle credits. Отключение fallback дополнительно вызвало длинный repetition loop. Встроенный VAD, который режет WAV на сегменты, раньше удалял реальные части фраз. Поэтому production использует другую схему:
+
+1. ffmpeg делает mono 16 kHz WAV.
+2. Отдельный Silero gate (`threshold=0.5`, minimum speech `250 ms`) проверяет только наличие речи.
+3. Если речь есть, весь исходный WAV без нарезки уходит в Whisper.
+4. Точная известная boilerplate-фраза удаляется только если занимает отдельную последнюю строку; удаление остается в diagnostics.
+
+В stable whisper.cpp v1.9.1 найден upstream CLI defect: `--vad-min-silence-duration-ms` ошибочно перезаписывает minimum speech. Runner намеренно передает minimum speech после minimum silence и защищен regression test. После workaround gate дал `0 missed / 0 hallucinations` на 30 speech + 12 controls.
+
+Machine-readable приватные результаты лежат в `.state/asr-quality-20260731/` и не входят в git. `cmd/asr-benchmark` сохраняет corpus hash, полные transcripts, decoder/gate descriptor, confidence diagnostics, audio/ffmpeg/gate/ASR/wall, cold-start, RSS/CPU, WER/CER/content metrics и ошибки.
+
+### Telegram completeness и live E2E
 
 Первоначальный ASR live-run на `messages.search` вернул 210 records и пропустил `1221157785:415830`. После перехода на history-only тот же день без download/ASR вернул все 211 baseline keys, включая проблемное сообщение, при 0 FloodWait. Telegram scan вырос с 42.263 до 69.144 s, batches — с 56 до 92, полный wall — с 43.335 до 70.530 s. Это сознательная плата для холодного исторического запуска; автоматический последовательный catch-up по-прежнему использует dialog checkpoint и не читает неизменившиеся диалоги.
 
-Повторный current-head E2E с download и Whisper turbo также вернул 211 records, 21 attachment и 3 transcript: 92 history batches, 0 FloodWait, 81.083 s total. После исключения только живых Telegram counters, локальных cache paths и самих ASR-текстов все 211 общих JSONL records семантически совпали с baseline; missing/extra keys и semantic mismatches — 0.
+Финальный current-head E2E с изолированным state, download и production Whisper-профилем вернул 211 records, 21 attachment и 3 ASR jobs: 98 history batches, 0 FloodWait, 85.888 s total. Из них 2 jobs дали полезный transcript, а 1 non-speech job был остановлен speech gate. Обработано 170.284 s аудио: ASR speed `17.08×`, media pipeline speed `13.39×`. После исключения только живых Telegram counters, локальных cache paths и самих ASR-текстов все 211 общих JSONL records семантически совпали с baseline; missing/extra keys и semantic mismatches — 0.
 
 ## Как повторять benchmark
 

@@ -3,6 +3,7 @@ package transcribe
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,13 +26,74 @@ const (
 // timing reports and transcript cache keys, so fields must describe everything
 // that can materially change a transcript.
 type Descriptor struct {
-	Backend      string `json:"backend"`
-	Accelerator  string `json:"accelerator"`
-	Model        string `json:"model"`
-	Language     string `json:"language,omitempty"`
-	Quantization string `json:"quantization,omitempty"`
-	Threads      int    `json:"threads,omitempty"`
-	VADModel     string `json:"vad_model,omitempty"`
+	Backend      string                       `json:"backend"`
+	Accelerator  string                       `json:"accelerator"`
+	Model        string                       `json:"model"`
+	Language     string                       `json:"language,omitempty"`
+	Quantization string                       `json:"quantization,omitempty"`
+	Threads      int                          `json:"threads,omitempty"`
+	VADModel     string                       `json:"vad_model,omitempty"`
+	Decode       *WhisperDecodeDescriptor     `json:"decode,omitempty"`
+	SpeechGate   *WhisperSpeechGateDescriptor `json:"speech_gate,omitempty"`
+	PostFilter   string                       `json:"post_filter,omitempty"`
+}
+
+// WhisperDecodeOptions contains only material decoder settings. Pointer fields
+// distinguish an explicit zero (for example, disabling temperature fallback)
+// from the whisper.cpp default.
+type WhisperDecodeOptions struct {
+	BeamSize                *int     `json:"beam_size,omitempty"`
+	BestOf                  *int     `json:"best_of,omitempty"`
+	Temperature             *float64 `json:"temperature,omitempty"`
+	TemperatureIncrement    *float64 `json:"temperature_increment,omitempty"`
+	NoSpeechThreshold       *float64 `json:"no_speech_threshold,omitempty"`
+	LogProbabilityThreshold *float64 `json:"log_probability_threshold,omitempty"`
+	EntropyThreshold        *float64 `json:"entropy_threshold,omitempty"`
+	SuppressNonSpeechTokens bool     `json:"suppress_non_speech_tokens,omitempty"`
+}
+
+type WhisperDecodeDescriptor struct {
+	BeamSize                int     `json:"beam_size"`
+	BestOf                  int     `json:"best_of"`
+	Temperature             float64 `json:"temperature"`
+	TemperatureIncrement    float64 `json:"temperature_increment"`
+	NoSpeechThreshold       float64 `json:"no_speech_threshold"`
+	LogProbabilityThreshold float64 `json:"log_probability_threshold"`
+	EntropyThreshold        float64 `json:"entropy_threshold"`
+	SuppressNonSpeechTokens bool    `json:"suppress_non_speech_tokens"`
+}
+
+// WhisperSpeechGateOptions runs Silero only as a whole-file speech-presence
+// check. Unlike integrated VAD, it never cuts or concatenates detected speech.
+type WhisperSpeechGateOptions struct {
+	Enabled              bool     `json:"enabled,omitempty"`
+	Command              string   `json:"command,omitempty"`
+	ModelPath            string   `json:"model_path,omitempty"`
+	Threshold            *float64 `json:"threshold,omitempty"`
+	MinSpeechDurationMS  *int     `json:"min_speech_duration_ms,omitempty"`
+	MinSilenceDurationMS *int     `json:"min_silence_duration_ms,omitempty"`
+	SpeechPadMS          *int     `json:"speech_pad_ms,omitempty"`
+}
+
+type WhisperSpeechGateDescriptor struct {
+	Enabled              bool    `json:"enabled"`
+	Model                string  `json:"model"`
+	Threshold            float64 `json:"threshold"`
+	MinSpeechDurationMS  int     `json:"min_speech_duration_ms"`
+	MinSilenceDurationMS int     `json:"min_silence_duration_ms"`
+	SpeechPadMS          int     `json:"speech_pad_ms"`
+}
+
+// Diagnostics are backend confidence signals. They are evidence for benchmark
+// analysis, not a generic automatic rejection rule.
+type Diagnostics struct {
+	Segments                      int      `json:"segments"`
+	MeanAverageLogProb            float64  `json:"mean_average_log_probability,omitempty"`
+	MinimumAverageLogProb         float64  `json:"minimum_average_log_probability,omitempty"`
+	MeanNoSpeechProb              float64  `json:"mean_no_speech_probability,omitempty"`
+	MaximumNoSpeechProb           float64  `json:"maximum_no_speech_probability,omitempty"`
+	SpeechGatePassed              *bool    `json:"speech_gate_passed,omitempty"`
+	RemovedTerminalHallucinations []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
 // WorkerPolicy describes safe automatic concurrency for a backend. CPU
@@ -56,6 +118,13 @@ func (o Options) Descriptor() Descriptor {
 		descriptor.Quantization = whisperQuantization(o.WhisperModelPath)
 		descriptor.Threads = o.WhisperThreads
 		descriptor.VADModel = stableModelIdentity(o.WhisperVADModelPath)
+		decode := o.WhisperDecode.normalized()
+		descriptor.Decode = &decode
+		if o.WhisperSpeechGate.Enabled {
+			gate := o.WhisperSpeechGate.normalized(o)
+			descriptor.SpeechGate = &gate
+		}
+		descriptor.PostFilter = whisperTerminalHallucinationProfile
 	case BackendVosk:
 		descriptor.Accelerator = AcceleratorCPU
 		descriptor.Model = stableModelIdentity(o.VoskModelPath)
@@ -80,17 +149,15 @@ func (o Options) WorkerPolicy() WorkerPolicy {
 
 func (o Options) CacheIdentity() string {
 	descriptor := o.Descriptor()
+	descriptorJSON, _ := json.Marshal(descriptor)
 	parts := []string{
-		"v1",
-		descriptor.Backend,
-		descriptor.Accelerator,
-		descriptor.Model,
+		"v2",
+		string(descriptorJSON),
 		cacheModelIdentity(o.engineCommand()),
 		cacheModelIdentity(o.modelPath()),
-		descriptor.Language,
-		descriptor.Quantization,
-		strconv.Itoa(descriptor.Threads),
 		cacheModelIdentity(o.WhisperVADModelPath),
+		cacheModelIdentity(o.WhisperSpeechGate.command(o)),
+		cacheModelIdentity(o.WhisperSpeechGate.ModelPath),
 	}
 	if descriptor.Backend == BackendVosk {
 		parts = append(parts, cacheModelIdentity(o.VoskGrammarPath))
@@ -145,10 +212,128 @@ func (o Options) Validate() error {
 		if accelerator != AcceleratorMetal && accelerator != AcceleratorMetalCoreML && accelerator != AcceleratorCPU {
 			return fmt.Errorf("unsupported whisper.cpp accelerator %q", accelerator)
 		}
+		if err := o.WhisperDecode.validate(); err != nil {
+			return err
+		}
+		if err := o.WhisperSpeechGate.validate(o); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported ASR backend %q", o.Backend)
 	}
 	return nil
+}
+
+func (o WhisperDecodeOptions) normalized() WhisperDecodeDescriptor {
+	return WhisperDecodeDescriptor{
+		BeamSize:                intValue(o.BeamSize, -1),
+		BestOf:                  intValue(o.BestOf, 2),
+		Temperature:             floatValue(o.Temperature, 0),
+		TemperatureIncrement:    floatValue(o.TemperatureIncrement, 0.2),
+		NoSpeechThreshold:       floatValue(o.NoSpeechThreshold, 0.6),
+		LogProbabilityThreshold: floatValue(o.LogProbabilityThreshold, -1),
+		EntropyThreshold:        floatValue(o.EntropyThreshold, 2.4),
+		SuppressNonSpeechTokens: o.SuppressNonSpeechTokens,
+	}
+}
+
+// ProductionWhisperDecode is the single decode profile used by daily
+// catch-ups. Beam search recovered content and numbers that greedy decoding
+// omitted on the private outgoing-Russian benchmark while remaining faster
+// than the Telegram stage.
+func ProductionWhisperDecode() WhisperDecodeOptions {
+	beamSize := 5
+	return WhisperDecodeOptions{BeamSize: &beamSize}
+}
+
+// ProductionWhisperSpeechGate is a whole-file speech-presence check. It does
+// not cut audio, so detected speech always reaches Whisper unchanged.
+func ProductionWhisperSpeechGate(modelPath string) WhisperSpeechGateOptions {
+	threshold := 0.5
+	minSpeechDurationMS := 250
+	minSilenceDurationMS := 100
+	speechPadMS := 30
+	return WhisperSpeechGateOptions{
+		Enabled:              true,
+		ModelPath:            modelPath,
+		Threshold:            &threshold,
+		MinSpeechDurationMS:  &minSpeechDurationMS,
+		MinSilenceDurationMS: &minSilenceDurationMS,
+		SpeechPadMS:          &speechPadMS,
+	}
+}
+
+func (o WhisperDecodeOptions) validate() error {
+	value := o.normalized()
+	if value.BeamSize == 0 || value.BeamSize < -1 {
+		return fmt.Errorf("whisper beam size must be -1 or positive")
+	}
+	if value.BestOf < 1 {
+		return fmt.Errorf("whisper best-of must be positive")
+	}
+	if value.Temperature < 0 || value.TemperatureIncrement < 0 {
+		return fmt.Errorf("whisper temperatures must be non-negative")
+	}
+	if value.NoSpeechThreshold < 0 || value.NoSpeechThreshold > 1 {
+		return fmt.Errorf("whisper no-speech threshold must be between 0 and 1")
+	}
+	return nil
+}
+
+func (o WhisperSpeechGateOptions) normalized(_ Options) WhisperSpeechGateDescriptor {
+	return WhisperSpeechGateDescriptor{
+		Enabled:              o.Enabled,
+		Model:                stableModelIdentity(o.ModelPath),
+		Threshold:            floatValue(o.Threshold, 0.5),
+		MinSpeechDurationMS:  intValue(o.MinSpeechDurationMS, 250),
+		MinSilenceDurationMS: intValue(o.MinSilenceDurationMS, 100),
+		SpeechPadMS:          intValue(o.SpeechPadMS, 30),
+	}
+}
+
+func (o WhisperSpeechGateOptions) validate(parent Options) error {
+	if !o.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(o.command(parent)) == "" {
+		return fmt.Errorf("whisper speech-gate command is empty")
+	}
+	if strings.TrimSpace(o.ModelPath) == "" {
+		return fmt.Errorf("whisper speech-gate model is empty")
+	}
+	value := o.normalized(parent)
+	if value.Threshold < 0 || value.Threshold > 1 {
+		return fmt.Errorf("whisper speech-gate threshold must be between 0 and 1")
+	}
+	if value.MinSpeechDurationMS < 0 || value.MinSilenceDurationMS < 0 || value.SpeechPadMS < 0 {
+		return fmt.Errorf("whisper speech-gate durations must be non-negative")
+	}
+	return nil
+}
+
+func (o WhisperSpeechGateOptions) command(parent Options) string {
+	if value := strings.TrimSpace(o.Command); value != "" {
+		return value
+	}
+	server := strings.TrimSpace(parent.WhisperCommand)
+	if server == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(server), "whisper-vad-speech-segments")
+}
+
+func intValue(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func floatValue(value *float64, fallback float64) float64 {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func (o Options) normalizedBackend() string {
