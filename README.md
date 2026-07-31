@@ -122,7 +122,7 @@ JSONL в `.state/daily/jsonl` - технический audit/source layer. Он 
 
 ASR JSONL в `.state/daily/asr` - подробный машинный лог транскрибации текущего прогона: cache hits, skip reasons, download/ffmpeg/ASR timings, размер, длительность, разрешение, backend и real-time factor. Дневной файл перезаписывается следующим прогоном этой даты и может остаться частичным после interruption.
 
-Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, startup/RSS/ASR speed и CPU evidence. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time, потому что локальная обработка перекрывается с Telegram download.
+Каждый `daily`/`daily-catchup` дополнительно атомарно сохраняет отдельный неизменяемый JSON в `.state/daily/timings/` и печатает его путь. В нем напрямую измерены worker-seconds `telegram_scan`, `download`, `ffmpeg`, `model_cold_start`, `asr`, `render`, полный wall time и `stage_work_seconds`. Объект `media_pipeline` отдельно хранит backend/model/accelerator, speech-gate seconds, span/overlap, queue peak, jobs/dedup/failures, startup/RSS/ASR speed и CPU evidence. `telegram_rpc` хранит static spacing, calls, scheduled wait, операции и transport floods; `history_pagination` — data/empty/sparse pages и checkpoint proof decisions. ASR JSONL дополнительно сохраняет решение gate, confidence signals и удаленные terminal hallucinations. Worker-seconds могут быть больше wall time, потому что локальная обработка перекрывается с Telegram download.
 
 Daily публикует финальные Markdown/JSONL отчеты атомарно: если день не собран до `complete=true`, файлы `reports/daily/YYYY-MM-DD.md` и `.state/daily/jsonl/YYYY-MM-DD.jsonl` не заменяются неполным результатом.
 
@@ -163,7 +163,8 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 
 | Параметр | Значение | Причина |
 | --- | ---: | --- |
-| RPC spacing | 700 ms | Перенесено из Telegram E2E Test Tool как рабочий read-only pacing. |
+| Main/daily RPC spacing | 500 ms | Статический code-owned floor: три 103-RPC прогона прошли без FloodWait, тогда как 400 ms и повторный 450 ms упёрлись в накопительный лимит. |
+| Study RPC spacing | 700 ms | Профиль не участвовал в этой account-specific калибровке и сохраняет прежний консервативный default. |
 | History batch size | 100 | Кодовый cap для одного Telegram history request. |
 | Default history limit | 100 | Обычный `dump`/incremental `sync` читает один batch; полный backfill делается через `--all`. |
 
@@ -259,7 +260,7 @@ go run ./cmd/asr-benchmark \
 Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
 Daily пропускает per-chat history для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.
 
-Для полноты daily использует только `messages.getHistory` и уже локально оставляет self/outgoing и настроенных дополнительных отправителей. `messages.search` намеренно не используется: реальный пустой-query поиск по self воспроизводимо пропустил существующее исходящее сообщение. History pagination завершается по временной границе, safe checkpoint `MinID`, пустой странице или явному hard limit, но не только потому, что Telegram вернул короткую страницу.
+Для полноты daily использует только `messages.getHistory` и уже локально оставляет self/outgoing и настроенных дополнительных отправителей. `messages.search` намеренно не используется: реальный пустой-query поиск по self воспроизводимо пропустил существующее исходящее сообщение. Короткая history page завершает scan досрочно только в узком валидном checkpoint flow, где `MinID`, известный dialog head и exact response metadata совместно доказывают bounded window; historical/fallback flow продолжает безопасную pagination до временной границы, пустой страницы или hard limit.
 
 ## Study sync
 

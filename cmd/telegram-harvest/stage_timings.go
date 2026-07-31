@@ -28,22 +28,24 @@ type dailyStageSeconds struct {
 }
 
 type dailyStageTimingReport struct {
-	RunID            string                       `json:"run_id"`
-	Command          string                       `json:"command"`
-	StartDate        string                       `json:"start_date,omitempty"`
-	EndDate          string                       `json:"end_date,omitempty"`
-	StartedAt        time.Time                    `json:"started_at"`
-	CompletedAt      time.Time                    `json:"completed_at"`
-	Success          bool                         `json:"success"`
-	Error            string                       `json:"error,omitempty"`
-	Stages           dailyStageSeconds            `json:"stages_seconds"`
-	AudioSeconds     float64                      `json:"audio_seconds"`
-	ASRSpeedX        float64                      `json:"asr_speed_x"`
-	PipelineSpeedX   float64                      `json:"pipeline_speed_x"`
-	MediaPipeline    *stages.MediaPipelineMetrics `json:"media_pipeline,omitempty"`
-	DialogCheckpoint dailyDialogCheckpointMetrics `json:"dialog_checkpoint"`
-	StageWorkSeconds float64                      `json:"stage_work_seconds"`
-	TotalSeconds     float64                      `json:"total_seconds"`
+	RunID             string                        `json:"run_id"`
+	Command           string                        `json:"command"`
+	StartDate         string                        `json:"start_date,omitempty"`
+	EndDate           string                        `json:"end_date,omitempty"`
+	StartedAt         time.Time                     `json:"started_at"`
+	CompletedAt       time.Time                     `json:"completed_at"`
+	Success           bool                          `json:"success"`
+	Error             string                        `json:"error,omitempty"`
+	Stages            dailyStageSeconds             `json:"stages_seconds"`
+	AudioSeconds      float64                       `json:"audio_seconds"`
+	ASRSpeedX         float64                       `json:"asr_speed_x"`
+	PipelineSpeedX    float64                       `json:"pipeline_speed_x"`
+	MediaPipeline     *stages.MediaPipelineMetrics  `json:"media_pipeline,omitempty"`
+	DialogCheckpoint  dailyDialogCheckpointMetrics  `json:"dialog_checkpoint"`
+	HistoryPagination dailyHistoryPaginationMetrics `json:"history_pagination"`
+	TelegramRPC       harvest.RPCPacingStats        `json:"telegram_rpc"`
+	StageWorkSeconds  float64                       `json:"stage_work_seconds"`
+	TotalSeconds      float64                       `json:"total_seconds"`
 }
 
 type dailyDialogCheckpointMetrics struct {
@@ -57,17 +59,30 @@ type dailyDialogCheckpointMetrics struct {
 	New            int    `json:"new"`
 }
 
+type dailyHistoryPaginationMetrics struct {
+	DataPages            int            `json:"data_pages"`
+	EmptyProofPages      int            `json:"empty_proof_pages"`
+	SparseContinuations  int            `json:"sparse_continuations"`
+	ProofCandidates      int            `json:"checkpoint_proof_candidates"`
+	ProofStops           int            `json:"checkpoint_proof_stops"`
+	ProofShadowConfirmed int            `json:"checkpoint_proof_shadow_confirmed"`
+	ProofShadowRejected  int            `json:"checkpoint_proof_shadow_rejected"`
+	ProofRejections      map[string]int `json:"checkpoint_proof_rejections,omitempty"`
+}
+
 type dailyStageTimingCollector struct {
-	mu               sync.Mutex
-	runID            string
-	command          string
-	startDate        string
-	endDate          string
-	startedAt        time.Time
-	durations        map[stages.Name]time.Duration
-	audioSeconds     float64
-	mediaPipeline    *stages.MediaPipelineMetrics
-	dialogCheckpoint dailyDialogCheckpointMetrics
+	mu                sync.Mutex
+	runID             string
+	command           string
+	startDate         string
+	endDate           string
+	startedAt         time.Time
+	durations         map[stages.Name]time.Duration
+	audioSeconds      float64
+	mediaPipeline     *stages.MediaPipelineMetrics
+	dialogCheckpoint  dailyDialogCheckpointMetrics
+	historyPagination dailyHistoryPaginationMetrics
+	telegramRPC       harvest.RPCPacingStats
 }
 
 func newDailyStageTimingCollector(command string, startDate string, endDate string) *dailyStageTimingCollector {
@@ -128,6 +143,36 @@ func (c *dailyStageTimingCollector) ObserveDialogCheckpoint(decision harvest.Dai
 	}
 }
 
+func (c *dailyStageTimingCollector) ObserveOutgoingStats(stats harvest.OutgoingStats) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.historyPagination = dailyHistoryPaginationMetrics{
+		DataPages:            stats.HistoryDataPages,
+		EmptyProofPages:      stats.HistoryEmptyProofPages,
+		SparseContinuations:  stats.HistorySparseContinuations,
+		ProofCandidates:      stats.CheckpointProofCandidates,
+		ProofStops:           stats.CheckpointProofStops,
+		ProofShadowConfirmed: stats.CheckpointProofShadowConfirmed,
+		ProofShadowRejected:  stats.CheckpointProofShadowRejected,
+		ProofRejections:      cloneStringIntMap(stats.CheckpointProofRejections),
+	}
+	c.telegramRPC = stats.RPCPacing
+}
+
+func cloneStringIntMap(source map[string]int) map[string]int {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]int, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
 func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport {
 	completedAt := time.Now().UTC()
 	if c == nil {
@@ -152,21 +197,23 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		pipelineSpeedX = c.mediaPipeline.PoolSpeedX
 	}
 	report := dailyStageTimingReport{
-		RunID:            c.runID,
-		Command:          c.command,
-		StartDate:        c.startDate,
-		EndDate:          c.endDate,
-		StartedAt:        c.startedAt,
-		CompletedAt:      completedAt,
-		Success:          runErr == nil,
-		Stages:           stageSeconds,
-		AudioSeconds:     c.audioSeconds,
-		ASRSpeedX:        asrSpeedX,
-		PipelineSpeedX:   pipelineSpeedX,
-		MediaPipeline:    c.mediaPipeline,
-		DialogCheckpoint: c.dialogCheckpoint,
-		StageWorkSeconds: stageWork,
-		TotalSeconds:     total,
+		RunID:             c.runID,
+		Command:           c.command,
+		StartDate:         c.startDate,
+		EndDate:           c.endDate,
+		StartedAt:         c.startedAt,
+		CompletedAt:       completedAt,
+		Success:           runErr == nil,
+		Stages:            stageSeconds,
+		AudioSeconds:      c.audioSeconds,
+		ASRSpeedX:         asrSpeedX,
+		PipelineSpeedX:    pipelineSpeedX,
+		MediaPipeline:     c.mediaPipeline,
+		DialogCheckpoint:  c.dialogCheckpoint,
+		HistoryPagination: c.historyPagination,
+		TelegramRPC:       c.telegramRPC,
+		StageWorkSeconds:  stageWork,
+		TotalSeconds:      total,
 	}
 	if runErr != nil {
 		report.Error = strings.TrimSpace(runErr.Error())
@@ -198,7 +245,7 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			pipelineQueuePeak = report.MediaPipeline.QueuePeak
 		}
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.Stages.FFmpeg,
@@ -214,6 +261,17 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			pipelineOverlap,
 			pipelineWorkers,
 			pipelineQueuePeak,
+			report.TelegramRPC.SpacingMillis,
+			report.TelegramRPC.Calls,
+			report.TelegramRPC.ScheduledWaitSeconds,
+			report.TelegramRPC.TransportFloods,
+			report.HistoryPagination.DataPages,
+			report.HistoryPagination.EmptyProofPages,
+			report.HistoryPagination.SparseContinuations,
+			report.HistoryPagination.ProofCandidates,
+			report.HistoryPagination.ProofStops,
+			report.HistoryPagination.ProofShadowConfirmed,
+			report.HistoryPagination.ProofShadowRejected,
 			report.DialogCheckpoint.Enabled,
 			report.DialogCheckpoint.HistoryRPC,
 			report.DialogCheckpoint.Unchanged,

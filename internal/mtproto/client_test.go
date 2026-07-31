@@ -279,9 +279,217 @@ func TestDailyHistoryContinuesAfterSparsePage(t *testing.T) {
 	if calls != 3 || !stats.Complete || stats.Batches != 3 {
 		t.Fatalf("calls=%d stats=%+v", calls, stats)
 	}
+	if stats.DataPages != 2 || stats.EmptyProofPages != 1 || stats.SparseContinuations != 1 {
+		t.Fatalf("pagination metrics = %+v", stats)
+	}
 	if len(records) != 2 || records[0].MessageID != 10 || records[1].MessageID != 20 {
 		t.Fatalf("records = %+v", records)
 	}
+}
+
+func TestDailyCheckpointProofStopsWithoutEmptyPage(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One", TopMessageID: 13}}
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{
+			BatchSize: 100,
+			MinID:     10,
+			DialogCheckpoint: harvest.DailyDialogCheckpointDecision{
+				Enabled: true,
+			},
+		},
+	}
+	page := &tg.MessagesMessages{Messages: dailyTestMessages(start, 13, 12, 11)}
+	calls := 0
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		calls++
+		if calls > 1 {
+			t.Fatal("formal checkpoint proof made an unnecessary second RPC")
+		}
+		return page, nil
+	}
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(records) != 3 || !stats.Complete {
+		t.Fatalf("calls=%d records=%d stats=%+v", calls, len(records), stats)
+	}
+	if stats.DataPages != 1 || stats.EmptyProofPages != 0 || stats.CheckpointProofCandidates != 1 || stats.CheckpointProofStops != 1 {
+		t.Fatalf("proof metrics = %+v", stats)
+	}
+}
+
+func TestDailyCheckpointProofShadowConfirmsSameRecords(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One", TopMessageID: 13}}
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{
+			BatchSize:           100,
+			MinID:               10,
+			CheckpointProofMode: harvest.CheckpointProofShadow,
+			DialogCheckpoint: harvest.DailyDialogCheckpointDecision{
+				Enabled: true,
+			},
+		},
+	}
+	pages := []tg.MessagesMessagesClass{
+		&tg.MessagesMessages{Messages: dailyTestMessages(start, 13, 12, 11)},
+		&tg.MessagesMessages{},
+	}
+	calls := 0
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		page := pages[calls]
+		calls++
+		return page, nil
+	}
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(records) != 3 || !stats.Complete {
+		t.Fatalf("calls=%d records=%d stats=%+v", calls, len(records), stats)
+	}
+	if stats.CheckpointProofCandidates != 1 || stats.CheckpointProofStops != 0 || stats.CheckpointProofShadowConfirmed != 1 || stats.CheckpointProofShadowRejected != 0 {
+		t.Fatalf("shadow metrics = %+v", stats)
+	}
+}
+
+func TestDailyCheckpointProofShadowRejectsContradictoryContinuation(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One", TopMessageID: 13}}
+	opts := harvest.OutgoingRangeOptions{
+		Start: start,
+		End:   start.AddDate(0, 0, 1),
+		History: harvest.HistoryOptions{
+			BatchSize:           100,
+			MinID:               10,
+			CheckpointProofMode: harvest.CheckpointProofShadow,
+			DialogCheckpoint:    harvest.DailyDialogCheckpointDecision{Enabled: true},
+		},
+	}
+	pages := []tg.MessagesMessagesClass{
+		&tg.MessagesMessages{Messages: dailyTestMessages(start, 13)},
+		&tg.MessagesMessages{Messages: dailyTestMessages(start, 12, 11)},
+		&tg.MessagesMessages{},
+	}
+	calls := 0
+	load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+		page := pages[calls]
+		calls++
+		return page, nil
+	}
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || len(records) != 3 || !stats.Complete {
+		t.Fatalf("calls=%d records=%d stats=%+v", calls, len(records), stats)
+	}
+	if stats.CheckpointProofShadowConfirmed != 0 || stats.CheckpointProofShadowRejected != 1 || stats.SparseContinuations != 1 {
+		t.Fatalf("shadow contradiction metrics = %+v", stats)
+	}
+}
+
+func TestDailyCheckpointProofFallsBackForUnprovenPages(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	baseMessages := dailyTestMessages(start, 13, 12, 11)
+	tests := []struct {
+		name       string
+		topID      int
+		checkpoint bool
+		minID      int
+		page       tg.MessagesMessagesClass
+	}{
+		{name: "historical", topID: 13, minID: 10, page: &tg.MessagesMessages{Messages: baseMessages}},
+		{name: "missing min id", topID: 13, checkpoint: true, page: &tg.MessagesMessages{Messages: baseMessages}},
+		{name: "head mismatch", topID: 14, checkpoint: true, minID: 10, page: &tg.MessagesMessages{Messages: baseMessages}},
+		{name: "inexact slice", topID: 13, checkpoint: true, minID: 10, page: &tg.MessagesMessagesSlice{Inexact: true, Count: 3, Messages: baseMessages}},
+		{name: "invalid slice count", topID: 13, checkpoint: true, minID: 10, page: &tg.MessagesMessagesSlice{Count: 2, Messages: baseMessages}},
+		{name: "invalid channel count", topID: 13, checkpoint: true, minID: 10, page: &tg.MessagesChannelMessages{Count: 2, Messages: baseMessages}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", Display: "One", TopMessageID: test.topID}}
+			opts := harvest.OutgoingRangeOptions{
+				Start: start,
+				End:   start.AddDate(0, 0, 1),
+				History: harvest.HistoryOptions{
+					BatchSize:        100,
+					MinID:            test.minID,
+					DialogCheckpoint: harvest.DailyDialogCheckpointDecision{Enabled: test.checkpoint},
+				},
+			}
+			pages := []tg.MessagesMessagesClass{test.page, &tg.MessagesMessages{}}
+			calls := 0
+			load := func(context.Context, int, int) (tg.MessagesMessagesClass, error) {
+				page := pages[calls]
+				calls++
+				return page, nil
+			}
+			_, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 || stats.CheckpointProofCandidates != 0 || stats.CheckpointProofStops != 0 {
+				t.Fatalf("calls=%d stats=%+v", calls, stats)
+			}
+		})
+	}
+}
+
+func TestDailyCheckpointPageProofAcceptsExactConstructors(t *testing.T) {
+	start := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	messages := dailyTestMessages(start, 13, 12, 11)
+	opts := harvest.HistoryOptions{BatchSize: 100, MinID: 10, DialogCheckpoint: harvest.DailyDialogCheckpointDecision{Enabled: true}}
+	for name, page := range map[string]tg.MessagesMessagesClass{
+		"complete": &tg.MessagesMessages{Messages: messages},
+		"slice":    &tg.MessagesMessagesSlice{Count: len(messages), Messages: messages},
+		"channel":  &tg.MessagesChannelMessages{Count: len(messages), Messages: messages},
+	} {
+		t.Run(name, func(t *testing.T) {
+			complete, rejection := dailyCheckpointPageComplete(page, messages, 13, 0, 100, opts)
+			if !complete || rejection != "" {
+				t.Fatalf("exact %s response was not accepted", name)
+			}
+		})
+	}
+
+	withOffset := &tg.MessagesMessagesSlice{Count: len(messages), Messages: messages}
+	withOffset.SetOffsetIDOffset(1)
+	if complete, rejection := dailyCheckpointPageComplete(withOffset, messages, 13, 0, 100, opts); complete || rejection != "offset" {
+		t.Fatal("non-zero response offset was accepted")
+	}
+	if complete, rejection := dailyCheckpointPageComplete(&tg.MessagesMessages{Messages: messages}, messages, 13, 11, 100, opts); complete || rejection != "" {
+		t.Fatal("non-first request page was accepted")
+	}
+	boundaryOpts := opts
+	boundaryOpts.MinID = 11
+	if complete, rejection := dailyCheckpointPageComplete(&tg.MessagesMessages{Messages: messages}, messages, 13, 0, 100, boundaryOpts); complete || rejection != "min_id_boundary" {
+		t.Fatal("page containing the exclusive MinID boundary was accepted")
+	}
+	fullPage := &tg.MessagesChannelMessages{Count: 1000, Messages: messages}
+	if complete, rejection := dailyCheckpointPageComplete(fullPage, messages, 13, 0, len(messages), opts); complete || rejection != "full_page" {
+		t.Fatal("full channel page was accepted without a terminal boundary")
+	}
+}
+
+func dailyTestMessages(start time.Time, ids ...int) []tg.MessageClass {
+	messages := make([]tg.MessageClass, 0, len(ids))
+	for index, id := range ids {
+		messages = append(messages, &tg.Message{
+			ID:      id,
+			Date:    int(start.Add(time.Duration(index+1) * time.Hour).Unix()),
+			Out:     true,
+			PeerID:  &tg.PeerUser{UserID: 1},
+			Message: "message",
+		})
+	}
+	return messages
 }
 
 func TestDailyHistoryDoesNotClaimCompleteAtMaxBatches(t *testing.T) {
@@ -543,6 +751,34 @@ func TestNoteFloodWaitPushesFutureRPCSlot(t *testing.T) {
 	}
 	if events[0].Operation != "get_history" || events[0].Kind != "flood_wait" {
 		t.Fatalf("unexpected flood event: %+v", events[0])
+	}
+}
+
+func TestRPCPacerReservesStrictSequentialSlotsAndReportsEvidence(t *testing.T) {
+	spacing := 500 * time.Millisecond
+	start := time.Unix(100, 0)
+	s := &Session{rpcSpacing: spacing}
+
+	if delay := s.reserveRPCSlot("get_dialogs", start); delay != 0 {
+		t.Fatalf("first delay = %s, want 0", delay)
+	}
+	if delay := s.reserveRPCSlot("get_history", start); delay != spacing {
+		t.Fatalf("second delay = %s, want %s", delay, spacing)
+	}
+	if delay := s.reserveRPCSlot("get_history", start.Add(250*time.Millisecond)); delay != 750*time.Millisecond {
+		t.Fatalf("third delay = %s, want 750ms", delay)
+	}
+
+	stats := s.RPCPacingStats()
+	if stats.SpacingMillis != 500 || stats.Calls != 3 || stats.ScheduledWaitSeconds != 1.25 {
+		t.Fatalf("pacing stats = %+v", stats)
+	}
+	if stats.Operations["get_dialogs"] != 1 || stats.Operations["get_history"] != 2 {
+		t.Fatalf("operation counts = %#v", stats.Operations)
+	}
+	stats.Operations["get_history"] = 99
+	if got := s.RPCPacingStats().Operations["get_history"]; got != 2 {
+		t.Fatalf("RPC stats exposed mutable state: %d", got)
 	}
 }
 

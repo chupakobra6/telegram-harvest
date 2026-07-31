@@ -38,7 +38,7 @@ make daily-catchup PROFILE=main FROM=2026-07-01 PROGRESS=1
 TG_HARVEST_DAILY_ADDITIONAL_SENDERS=3740223926:8718303786
 ```
 
-Для чата с дополнительным отправителем daily читает дневную историю и оставляет только self и настроенных отправителей. Остальные участники этого чата в отчёт не попадают. Для остальных диалогов сохраняется быстрый Telegram-поиск `from=self`.
+Для каждого затронутого диалога daily читает `messages.getHistory`, а затем локально оставляет self и настроенных дополнительных отправителей. Остальные участники Haru и других чатов в отчёт не попадают; `messages.search` не используется как источник полноты.
 
 ## Содержимое отчёта
 
@@ -84,7 +84,7 @@ ZIP-архивы по умолчанию не создаются. В финал�
 5. Проверить созданные даты, `complete=true`, дневные Markdown, `00-latest-catchup.md` и отсутствие технических ошибок в человекочитаемом тексте.
 6. Проверить, что настроенные дополнительные отправители представлены в релевантных днях, но сообщения остальных участников их чатов не попали в daily.
 7. Проверить ASR-статистику: cache/transcribed/skip/error, нулевые временные файлы и отсутствие зависшего helper-процесса.
-8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, ASR, render, stage work, audio seconds, ASR/pipeline speed, backend/model/accelerator, media pipeline span/overlap/workers/queue/resources и dialog checkpoint counters/fallback.
+8. Проверить строку `timings` и сохраненный `.state/daily/timings/*.json`: в нем всегда есть Telegram scan, download, ffmpeg, model cold-start, ASR, render, stage work, audio seconds, ASR/pipeline speed, backend/model/accelerator, media pipeline span/overlap/workers/queue/resources, static RPC spacing/calls/wait/floods, history data/empty/sparse/proof counters и dialog checkpoint counters/fallback.
 9. Для успешного автоматического catch-up проверить `.state/daily/dialog-checkpoint.json`: `account_id`, `scope_fingerprint`, `verified_through`, `complete=true`, `top_message_id`, `verified_message_id` и `head_fully_verified`. Head из следующего, ещё не опубликованного дня не должен иметь `head_fully_verified=true`. `updated_at` не должен меняться после incomplete/error run или ошибки merged publish.
 10. Удалить только временные файлы текущего прогона. Не удалять отчёты, raw-слой, timing reports, dialog checkpoint или кэш без явной причины.
 

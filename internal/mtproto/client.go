@@ -69,12 +69,15 @@ type Session struct {
 	raw        *tg.Client
 	rpcSpacing time.Duration
 
-	mu              sync.Mutex
-	nextRPCAt       time.Time
-	floodWaits      int
-	transportFloods int
-	floodEvents     []FloodEvent
-	dialogCache     map[string]resolvedTarget
+	mu               sync.Mutex
+	nextRPCAt        time.Time
+	rpcCalls         int
+	rpcScheduledWait time.Duration
+	rpcOperations    map[string]int
+	floodWaits       int
+	transportFloods  int
+	floodEvents      []FloodEvent
+	dialogCache      map[string]resolvedTarget
 }
 
 type DownloadMediaOptions struct {
@@ -680,7 +683,7 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 
 		stats.DialogsHistoryRPC++
 		dialogRecords, dialogStats, err := s.scanDailyHistory(ctx, target, dialogOpts, pipeline)
-		stats.Batches += dialogStats.Batches
+		accumulateDailyHistoryStats(&stats, dialogStats)
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
 			if opts.Progress != nil {
@@ -755,8 +758,36 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		}
 	}
 	stats.FloodWaits = s.FloodWaits()
+	stats.RPCPacing = s.RPCPacingStats()
 	stats.Complete = len(stats.DialogErrors) == 0
 	return stats, nil
+}
+
+func accumulateDailyHistoryStats(stats *harvest.OutgoingStats, history harvest.HistoryStats) {
+	if stats == nil {
+		return
+	}
+	stats.Batches += history.Batches
+	stats.HistoryDataPages += history.DataPages
+	stats.HistoryEmptyProofPages += history.EmptyProofPages
+	stats.HistorySparseContinuations += history.SparseContinuations
+	stats.CheckpointProofCandidates += history.CheckpointProofCandidates
+	stats.CheckpointProofStops += history.CheckpointProofStops
+	stats.CheckpointProofShadowConfirmed += history.CheckpointProofShadowConfirmed
+	stats.CheckpointProofShadowRejected += history.CheckpointProofShadowRejected
+	mergeCountMap(&stats.CheckpointProofRejections, history.CheckpointProofRejections)
+}
+
+func mergeCountMap(destination *map[string]int, source map[string]int) {
+	if destination == nil || len(source) == 0 {
+		return
+	}
+	if *destination == nil {
+		*destination = make(map[string]int, len(source))
+	}
+	for key, count := range source {
+		(*destination)[key] += count
+	}
 }
 
 func dailyDialogHead(chat harvest.Chat, rangeEnd time.Time) harvest.DailyDialogHead {
@@ -997,6 +1028,8 @@ func (s *Session) collectDailyHistory(
 	records := make([]harvest.MessageRecord, 0)
 	stats := harvest.HistoryStats{}
 	offsetID := 0
+	previousPageShort := false
+	shadowProofPending := false
 	for shouldContinueOutgoingDay(opts, stats.Batches) {
 		stats.Batches++
 		batchLimit := opts.History.BatchSize
@@ -1010,8 +1043,20 @@ func (s *Session) collectDailyHistory(
 		entities := historyEntities(result)
 		messages := historyMessages(result)
 		if len(messages) == 0 {
+			stats.EmptyProofPages++
+			if shadowProofPending {
+				stats.CheckpointProofShadowConfirmed++
+			}
 			stats.Complete = true
 			break
+		}
+		stats.DataPages++
+		if previousPageShort {
+			stats.SparseContinuations++
+		}
+		if shadowProofPending {
+			stats.CheckpointProofShadowRejected++
+			shadowProofPending = false
 		}
 		mergeTopicMap(topicByID, historyTopics(result), messages)
 
@@ -1039,15 +1084,118 @@ func (s *Session) collectDailyHistory(
 			stats.Complete = true
 			break
 		}
+		pageComplete, proofRejection := dailyCheckpointPageComplete(result, messages, target.Chat.TopMessageID, offsetID, batchLimit, opts.History)
+		if proofRejection != "" {
+			if stats.CheckpointProofRejections == nil {
+				stats.CheckpointProofRejections = make(map[string]int)
+			}
+			stats.CheckpointProofRejections[proofRejection]++
+		}
+		if pageComplete {
+			stats.CheckpointProofCandidates++
+			switch effectiveCheckpointProofMode(opts.History) {
+			case harvest.CheckpointProofEnforced:
+				stats.CheckpointProofStops++
+				stats.Complete = true
+				break
+			case harvest.CheckpointProofShadow:
+				shadowProofPending = true
+			}
+		}
+		if stats.Complete {
+			break
+		}
 		if offsetID > 0 && minMessageID >= offsetID {
 			stats.FloodWaits = s.FloodWaits()
 			return nil, stats, fmt.Errorf("daily dialog pagination did not advance: offset_id=%d next_offset_id=%d", offsetID, minMessageID)
 		}
 		offsetID = minMessageID
+		previousPageShort = len(messages) < batchLimit
 	}
 	sortDailyRecords(records)
 	finalizeHistoryStats(&stats, records, s.FloodWaits())
 	return records, stats, nil
+}
+
+func effectiveCheckpointProofMode(opts harvest.HistoryOptions) harvest.CheckpointProofMode {
+	if opts.CheckpointProofMode != harvest.CheckpointProofAuto {
+		return opts.CheckpointProofMode
+	}
+	if opts.DialogCheckpoint.Enabled {
+		return harvest.CheckpointProofEnforced
+	}
+	return harvest.CheckpointProofDisabled
+}
+
+func dailyCheckpointPageComplete(
+	result tg.MessagesMessagesClass,
+	messages []tg.MessageClass,
+	expectedTopID int,
+	offsetID int,
+	batchLimit int,
+	opts harvest.HistoryOptions,
+) (bool, string) {
+	if !opts.DialogCheckpoint.Enabled || opts.MinID <= 0 || offsetID != 0 || batchLimit <= 0 {
+		return false, ""
+	}
+	if expectedTopID <= opts.MinID || len(messages) == 0 || len(messages) > batchLimit {
+		return false, "invalid_bounds"
+	}
+	maxID := 0
+	seen := make(map[int]struct{}, len(messages))
+	for _, message := range messages {
+		id := messageID(message)
+		if id <= opts.MinID {
+			return false, "min_id_boundary"
+		}
+		if _, ok := seen[id]; ok {
+			return false, "duplicate_id"
+		}
+		seen[id] = struct{}{}
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if maxID != expectedTopID {
+		return false, "head_mismatch"
+	}
+
+	switch typed := result.(type) {
+	case *tg.MessagesMessages:
+		// This constructor has no total-count/continuation fields and represents
+		// the complete result set for the bounded query.
+		return true, ""
+	case *tg.MessagesMessagesSlice:
+		if typed.Inexact {
+			return false, "inexact"
+		}
+		if typed.Count < len(messages) {
+			return false, "invalid_count"
+		}
+		if offset, ok := typed.GetOffsetIDOffset(); ok && offset != 0 {
+			return false, "offset"
+		}
+		if len(messages) >= batchLimit {
+			return false, "full_page"
+		}
+		return true, ""
+	case *tg.MessagesChannelMessages:
+		if typed.Inexact {
+			return false, "inexact"
+		}
+		if typed.Count < len(messages) {
+			return false, "invalid_count"
+		}
+		if offset, ok := typed.GetOffsetIDOffset(); ok && offset != 0 {
+			return false, "offset"
+		}
+		if len(messages) >= batchLimit {
+			return false, "full_page"
+		}
+		return true, ""
+	default:
+		return false, "unsupported_response"
+	}
 }
 
 func messageAtOrBefore(msg tg.MessageClass, boundary time.Time) bool {
@@ -1316,7 +1464,7 @@ func (s *Session) cacheTarget(chat harvest.Chat, inputPeer tg.InputPeerClass) {
 
 func (s *Session) performRPC(ctx context.Context, operation string, fn func(context.Context) error) error {
 	attempt := func() error {
-		if err := s.beforeRPC(ctx); err != nil {
+		if err := s.beforeRPC(ctx, operation); err != nil {
 			return err
 		}
 		callCtx, cancel := context.WithTimeout(ctx, rpcTimeoutForOperation(operation))
@@ -1344,15 +1492,15 @@ func rpcTimeoutForOperation(operation string) time.Duration {
 	}
 }
 
-func (s *Session) beforeRPC(ctx context.Context) error {
-	delay := s.reserveRPCSlot(time.Now())
+func (s *Session) beforeRPC(ctx context.Context, operation string) error {
+	delay := s.reserveRPCSlot(operation, time.Now())
 	if delay <= 0 {
 		return nil
 	}
 	return sleepContext(ctx, delay)
 }
 
-func (s *Session) reserveRPCSlot(now time.Time) time.Duration {
+func (s *Session) reserveRPCSlot(operation string, now time.Time) time.Duration {
 	if s.rpcSpacing <= 0 {
 		return 0
 	}
@@ -1363,7 +1511,29 @@ func (s *Session) reserveRPCSlot(now time.Time) time.Duration {
 	}
 	delay := s.nextRPCAt.Sub(now)
 	s.nextRPCAt = s.nextRPCAt.Add(s.rpcSpacing)
+	s.rpcCalls++
+	s.rpcScheduledWait += delay
+	if s.rpcOperations == nil {
+		s.rpcOperations = make(map[string]int)
+	}
+	s.rpcOperations[operation]++
 	return delay
+}
+
+func (s *Session) RPCPacingStats() harvest.RPCPacingStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	operations := make(map[string]int, len(s.rpcOperations))
+	for operation, count := range s.rpcOperations {
+		operations[operation] = count
+	}
+	return harvest.RPCPacingStats{
+		SpacingMillis:        int(s.rpcSpacing / time.Millisecond),
+		Calls:                s.rpcCalls,
+		ScheduledWaitSeconds: s.rpcScheduledWait.Seconds(),
+		Operations:           operations,
+		TransportFloods:      s.transportFloods,
+	}
 }
 
 func (s *Session) noteFloodWait(operation string, delay time.Duration) {
@@ -2154,7 +2324,7 @@ func (s *Session) saveAttachmentFile(
 	}
 	downloadStart := time.Now()
 	defer stages.ObserveSince(stageTiming, stages.Download, downloadStart)
-	if err := s.beforeRPC(ctx); err != nil {
+	if err := s.beforeRPC(ctx, "download_media"); err != nil {
 		record.Attachments[index].DownloadError = err.Error()
 		return
 	}
@@ -2232,7 +2402,7 @@ func (s *Session) transcribeAttachmentMedia(
 	}()
 	emitASRLog(opts, asrLogEvent("download_start", "download", "", *record, index, *attachment))
 	downloadStageStart := time.Now()
-	if err := s.beforeRPC(ctx); err != nil {
+	if err := s.beforeRPC(ctx, "download_media"); err != nil {
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
 		if pipeline != nil {

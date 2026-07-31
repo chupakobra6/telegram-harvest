@@ -2,7 +2,7 @@
 
 ## Daily catch-up range scan
 
-`daily-catchup` читает весь новый диапазон одним последовательным Telegram range-scan и только после завершения разбивает записи по московским дням. Telegram RPC не параллелятся и сохраняют штатный pacing 700 ms. Для следующего автоматического непрерывного диапазона dialog checkpoint сравнивает полученные из `get_dialogs` heads с последним полностью опубликованным запуском. Неизменившийся dialog не вызывает history RPC только при `head_fully_verified=true`. Иначе он сканируется с `verified_message_id` как безопасным `MinID`; новый dialog сканируется полностью.
+`daily-catchup` читает весь новый диапазон одним последовательным Telegram range-scan и только после завершения разбивает записи по московским дням. Telegram RPC не параллелятся и используют статический code-owned pacing 500 ms. Для следующего автоматического непрерывного диапазона dialog checkpoint сравнивает полученные из `get_dialogs` heads с последним полностью опубликованным запуском. Неизменившийся dialog не вызывает history RPC только при `head_fully_verified=true`. Иначе он сканируется с `verified_message_id` как безопасным `MinID`; новый dialog сканируется полностью.
 
 Разделение `top_message_id` и `verified_message_id` обязательно: catch-up за вчера запускается сегодня, поэтому `get_dialogs` уже может вернуть head сегодняшнего сообщения, не входящего во вчерашний отчет. Такой head сохраняется как наблюдаемый, но не считается полностью проверенным и не разрешает skip на следующем запуске.
 
@@ -72,12 +72,34 @@ Live safety-проверка 2026-07-30 на текущем диапазоне �
 
 Daily не использует `messages.search` как источник полноты. Empty-query search с `from_id=self` воспроизводимо не вернул существующее исходящее сообщение `1221157785:415830`, хотя `messages.getHistory` его возвращает. Поэтому каждый реально изменившийся dialog читается через последовательный `getHistory`, а self/Trackmate scope фильтруется локально после нормализации.
 
-Короткая history page сама по себе также не считается доказанной границей диапазона. Pagination продолжается до сообщения на `start`, safe checkpoint `MinID`, пустой страницы или явного `max_batches`. Неубывающий offset завершает scan ошибкой и не публикует checkpoint вместо ложного `complete=true`. Регрессионный тест воспроизводит две разреженные history pages и проверяет, что обе попадают в JSONL.
+Короткая history page сама по себе не считается доказанной границей диапазона. В обычном historical/first-run/fallback scan pagination продолжается до сообщения на `start`, пустой страницы или явного `max_batches`; неубывающий offset завершает scan ошибкой и не публикует checkpoint вместо ложного `complete=true`. Регрессионный тест воспроизводит две разреженные history pages и проверяет, что обе попадают в JSONL.
+
+Для непрерывного валидного checkpoint есть более узкий proof: только первая страница bounded-запроса с `MinID > 0`, известным `top_message_id`, уникальными ID строго выше `MinID`, совпавшим page head, exact Telegram response (`inexact=false`, нулевой response offset) и числом сообщений меньше requested limit. `messages.messages` считается конечным constructor по его контракту. `inexact`, полный batch, head/offset/count anomaly и любой flow без валидного checkpoint продолжают старую безопасную pagination. Shadow live-run подтвердил все 4/4 кандидата пустой следующей страницей; enforced-run убрал четыре RPC и вернул побайтно тот же 41-record JSONL.
+
+Timing report сохраняет `history_data_pages`, `history_empty_proof_pages`, `history_sparse_continuations`, proof candidates/stops/shadow results и причины отказа. `telegram_rpc` отдельно хранит статический spacing, число slots, scheduled pacing wait, операции и transport floods.
+
+## Калибровка Telegram pacing
+
+Калибровка выполнена на одном historical range 2026-07-25 без download/ASR: 471 dialog, 46 history dialog, 98 history batches, 103 последовательных RPC slots и 211 records. Каждый прогон возвращал complete JSONL; после удаления только живых dialog counters (`unread_count`, `top_message_id`, `last_message_at`, `views`) normalized SHA-256 всех вариантов одинаков: `e62281eb…6277`.
+
+| Spacing | Wall | FloodWait | Результат |
+| ---: | ---: | ---: | --- |
+| 700 ms | 74.998 s | 0 | baseline |
+| 600 ms | 66.503 s | 0 | clean |
+| 550 ms | 61.058 s | 0 | clean |
+| 500 ms | 57.336 s | 0 | clean |
+| 450 ms | 52.928 s | 0 | первый clean |
+| 400 ms | 53.827 s | 1 | нижняя граница нестабильна |
+| 450 ms после FloodWait | 57.018 s | 1 | накопительный лимит всё ещё проявился |
+| 500 ms после FloodWait, повтор 1 | 56.584 s | 0 | clean |
+| 500 ms после FloodWait, повтор 2 | 57.615 s | 0 | clean |
+
+Production floor профиля `main` закреплён на 500 ms: три 103-RPC прогона чистые, включая два сразу после нижних probes. Median 500-ms wall — 57.336 s против 74.998 s на 700 ms: ускорение `1.31×`, или `−23.6%` wall. 450 ms не выбран, несмотря на лучший одиночный результат, потому что повтор после накопленного burst получил FloodWait. `study` не участвовал в account-specific калибровке и сохраняет прежние 700 ms.
 
 `total_seconds` — wall time измеряемой daily-операции. `stage_work_seconds` — сумма всех stage work-seconds; она намеренно не вычитается из wall, потому что Telegram, ffmpeg и ASR могут выполняться одновременно. CLI печатает основные поля:
 
 ```text
-timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s asr=...s render=...s stage_work=...s audio=...s asr_speed=...x pipeline_speed=...x pipeline_mode=... pipeline_span=...s pipeline_overlap=...s pipeline_workers=... pipeline_queue_peak=... checkpoint_enabled=... total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
+timings telegram_scan=...s download=...s ffmpeg=...s model_cold_start=...s asr=...s render=...s stage_work=...s audio=...s asr_speed=...x pipeline_speed=...x pipeline_mode=... pipeline_span=...s pipeline_overlap=...s pipeline_workers=... pipeline_queue_peak=... rpc_spacing_ms=... rpc_calls=... rpc_wait=...s history_data_pages=... history_empty_proof_pages=... checkpoint_proof_candidates=... checkpoint_proof_stops=... checkpoint_enabled=... total=...s report=.state/daily/timings/<run-id>-daily-catchup.json
 ```
 
 Live-проверка 2026-07-30 на том же восьмидневном диапазоне и прогретом media/transcript cache:

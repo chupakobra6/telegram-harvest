@@ -4,20 +4,20 @@
 Обновлено: 2026-07-31
 
 ## Активный Шаг
-- id: `STEP-006`
+- id: `STEP-007`
 - status: `готово`
-- objective: Расширить реальный Telegram ASR benchmark, настроить quality/hallucination pipeline и закрепить один итоговый production-профиль.
-- requirement IDs: `REQ-015`—`REQ-017`, `VAL-011`—`VAL-013`, `SCOPE-004`
-- owned paths: `internal/transcribe/`, `internal/asrbench/`, `cmd/asr-benchmark/`, ASR config wiring/tests, `README.md`, `docs/performance.md`, `.env.example`, `.project-loop/`; приватный runtime corpus/results только под `.state/`.
-- validation: corpus inventory/hash; focused decoder/cache/quality tests; одинаковый live corpus для Vosk/Whisper; speech/non-speech regression; performance repeats финалистов; `gofmt`; `go test ./...`; `go vet ./...`; relevant `-race`; current-head live daily; `git diff --check`; `loopctl.py validate`.
-- done criteria: репрезентативный приватный корпус собран; quality evaluation не использует Turbo как собственный эталон; опасные настройки отклонены; один backend/profile заметно лучше Vosk по содержанию и закреплён как production default; полный validation зелёный.
+- objective: Доказанно убрать лишний пустой checkpoint history RPC и выбрать статический безопасный Telegram RPC floor без потери сообщений.
+- requirement IDs: `REQ-018`—`REQ-020`, `VAL-014`—`VAL-015`, `CON-001`, `SCOPE-005`
+- owned paths: `internal/mtproto/`, `internal/harvest/` timing/stat contracts, `internal/config/`, `cmd/telegram-harvest/` timing wiring/tests, `README.md`, `docs/performance.md`, `.project-loop/`; приватные live artifacts только под `.state/` или `/tmp`.
+- validation: fake Telegram response/fake clock tests; exact/inexact/sparse/full-page fallback coverage; `gofmt`; focused tests; `go test ./...`; `go vet ./...`; relevant `-race`; live 700/600/550/500/450 ms calibration in isolated state; structural JSONL comparison; final current-head catch-up; `git diff --check`; `loopctl.py validate`.
+- done criteria: метрики различают data/proof/sparse pages; optimized stop включается только при формальном proof и не меняет records; сомнительные/fallback flows сохраняют полный scan; выбран один static code-owned spacing с 0 FloodWait/errors и запасом; интегрированный catch-up не имеет missing/extra/semantic mismatches.
 
 ## Фокус Ревью
-- Корпус достаточно разнообразен и не состоит из пары удобных примеров.
-- Quality comparison оценивает содержание, а не пунктуацию и не self-reference WER.
-- Hallucination mitigation не удаляет речь и критичные слова вроде отрицаний.
-- Все decode/VAD параметры входят в descriptor/cache identity.
-- Итоговый default действительно один; экспериментальные профили не превращаются в параллельные production contracts.
+- Оптимизация не принимает короткую страницу как proof без достаточной Telegram metadata.
+- `MinID`, `top_message_id`, exact/inexact ответы и sparse pages не создают пропусков.
+- Historical/gap/first-run/account/scope/error paths остаются безопасными.
+- RPC по-прежнему последовательны; production spacing статический и code-owned.
+- Live сравнение отделяет pacing эффект от media cache/ASR и проверяет реальные ключи/поля JSONL.
 
 ## Примечания
 - Telegram RPC остаются последовательными; параллельный crawler не вводится.
@@ -37,3 +37,7 @@
 - Full Whisper E2E: 211 records, 21 attachments, 3 transcripts, 81.083 s; 0 missing/extra/semantic mismatches.
 - STEP-006 явно разрешён текущей инструкцией Игоря как непрерывный цикл до выбора одного итогового варианта.
 - STEP-006 завершён; блокеров нет.
+- STEP-007 live shadow: 4/4 proof candidates подтверждены пустой следующей страницей, 0 rejected; enforced сократил 21→17 history batches и вернул побайтно тот же 45-record JSONL.
+- Main pacing matrix на 211-record/103-RPC historical run: 700 ms 74.998 s; 600 ms 66.503 s; 550 ms 61.058 s; 500 ms median 57.336 s; 400 ms и повторный 450 ms дали FloodWait.
+- Production: main/daily 500 ms, study остаётся 700 ms без непроверенного расширения. Integrated CLI: 211 records, 98 history batches, 0 FloodWait, 56.783 s; normalized SHA совпал с 700-ms baseline.
+- Full, vet, race, diff и Project Loop validation зелёные; временный harness и `/tmp` evidence удалены.

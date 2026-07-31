@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+func TestDefaultMainRPCSpacingUsesCalibratedStaticFloor(t *testing.T) {
+	if DefaultMainRPCSpacingMS != 500 {
+		t.Fatalf("DefaultMainRPCSpacingMS = %d, want calibrated 500 ms floor", DefaultMainRPCSpacingMS)
+	}
+}
+
 func TestLoadUsesStudyEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
@@ -75,6 +81,9 @@ func TestLoadMainUsesDailyEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.StateDir != DefaultMainStateDir {
 		t.Fatalf("main state dir = %s", cfg.StateDir)
+	}
+	if cfg.RPCSpacing != time.Duration(DefaultMainRPCSpacingMS)*time.Millisecond {
+		t.Fatalf("main RPCSpacing = %s", cfg.RPCSpacing)
 	}
 }
 

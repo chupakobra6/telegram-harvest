@@ -1038,8 +1038,11 @@ func runDailyJobsWithCheckpoint(
 			}
 			rangeStats, err := runDailyRangeJobs(ctx, session, history, opts, jobs, additionalSenderIDsByChat, out)
 			result.Stats = rangeStats
-			if timings != nil && checkpointRequest != nil {
-				timings.ObserveDialogCheckpoint(history.DialogCheckpoint, rangeStats)
+			if timings != nil {
+				timings.ObserveOutgoingStats(rangeStats)
+				if checkpointRequest != nil {
+					timings.ObserveDialogCheckpoint(history.DialogCheckpoint, rangeStats)
+				}
 			}
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
@@ -1226,7 +1229,7 @@ func runDailyRangeJobs(
 		}
 		writeDailyJobResult(out, job, stats)
 	}
-	fmt.Fprintf(out, "range start=%s end=%s collected=%d published=%d dialogs=%d history_dialogs=%d unchanged=%d changed=%d new=%d batches=%d flood_waits=%d complete=true\n",
+	fmt.Fprintf(out, "range start=%s end=%s collected=%d published=%d dialogs=%d history_dialogs=%d unchanged=%d changed=%d new=%d batches=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d flood_waits=%d complete=true\n",
 		jobs[0].Date,
 		jobs[len(jobs)-1].Date,
 		len(records),
@@ -1237,6 +1240,11 @@ func runDailyRangeJobs(
 		rangeStats.DialogsChanged,
 		rangeStats.DialogsNew,
 		rangeStats.Batches,
+		rangeStats.HistoryDataPages,
+		rangeStats.HistoryEmptyProofPages,
+		rangeStats.HistorySparseContinuations,
+		rangeStats.CheckpointProofCandidates,
+		rangeStats.CheckpointProofStops,
 		rangeStats.FloodWaits,
 	)
 	return rangeStats, nil

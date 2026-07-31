@@ -171,19 +171,37 @@ type HistoryOptions struct {
 	AudioDurationTiming   stages.AudioDurationObserver
 	MediaPipelineTiming   stages.MediaPipelineObserver
 	DialogCheckpoint      DailyDialogCheckpointDecision
+	CheckpointProofMode   CheckpointProofMode
 }
+
+type CheckpointProofMode uint8
+
+const (
+	CheckpointProofAuto CheckpointProofMode = iota
+	CheckpointProofDisabled
+	CheckpointProofShadow
+	CheckpointProofEnforced
+)
 
 type Transcriber interface {
 	Run(ctx context.Context, inputPath string, outputPath string) (string, error)
 }
 
 type HistoryStats struct {
-	Records    int  `json:"records"`
-	FirstID    int  `json:"first_id,omitempty"`
-	LastID     int  `json:"last_id,omitempty"`
-	Batches    int  `json:"batches"`
-	FloodWaits int  `json:"flood_waits"`
-	Complete   bool `json:"complete,omitempty"`
+	Records                        int            `json:"records"`
+	FirstID                        int            `json:"first_id,omitempty"`
+	LastID                         int            `json:"last_id,omitempty"`
+	Batches                        int            `json:"batches"`
+	DataPages                      int            `json:"data_pages"`
+	EmptyProofPages                int            `json:"empty_proof_pages"`
+	SparseContinuations            int            `json:"sparse_continuations"`
+	CheckpointProofCandidates      int            `json:"checkpoint_proof_candidates"`
+	CheckpointProofStops           int            `json:"checkpoint_proof_stops"`
+	CheckpointProofShadowConfirmed int            `json:"checkpoint_proof_shadow_confirmed"`
+	CheckpointProofShadowRejected  int            `json:"checkpoint_proof_shadow_rejected"`
+	CheckpointProofRejections      map[string]int `json:"checkpoint_proof_rejections,omitempty"`
+	FloodWaits                     int            `json:"flood_waits"`
+	Complete                       bool           `json:"complete,omitempty"`
 }
 
 type HistoryProgress struct {
@@ -213,24 +231,41 @@ type OutgoingRangeOptions struct {
 }
 
 type OutgoingStats struct {
-	Records            int               `json:"records"`
-	DialogsScanned     int               `json:"dialogs_scanned"`
-	DialogsHistoryRPC  int               `json:"dialogs_history_rpc"`
-	DialogsWithRecords int               `json:"dialogs_with_records"`
-	DialogsSkipped     int               `json:"dialogs_skipped"`
-	DialogsUnchanged   int               `json:"dialogs_unchanged"`
-	DialogsChanged     int               `json:"dialogs_changed"`
-	DialogsNew         int               `json:"dialogs_new"`
-	DialogErrors       []string          `json:"dialog_errors,omitempty"`
-	Attachments        int               `json:"attachments"`
-	Transcripts        int               `json:"transcripts"`
-	Forwarded          int               `json:"forwarded"`
-	FirstAt            time.Time         `json:"first_at,omitempty"`
-	LastAt             time.Time         `json:"last_at,omitempty"`
-	Batches            int               `json:"batches"`
-	FloodWaits         int               `json:"flood_waits"`
-	Complete           bool              `json:"complete,omitempty"`
-	DialogHeads        []DailyDialogHead `json:"-"`
+	Records                        int               `json:"records"`
+	DialogsScanned                 int               `json:"dialogs_scanned"`
+	DialogsHistoryRPC              int               `json:"dialogs_history_rpc"`
+	DialogsWithRecords             int               `json:"dialogs_with_records"`
+	DialogsSkipped                 int               `json:"dialogs_skipped"`
+	DialogsUnchanged               int               `json:"dialogs_unchanged"`
+	DialogsChanged                 int               `json:"dialogs_changed"`
+	DialogsNew                     int               `json:"dialogs_new"`
+	DialogErrors                   []string          `json:"dialog_errors,omitempty"`
+	Attachments                    int               `json:"attachments"`
+	Transcripts                    int               `json:"transcripts"`
+	Forwarded                      int               `json:"forwarded"`
+	FirstAt                        time.Time         `json:"first_at,omitempty"`
+	LastAt                         time.Time         `json:"last_at,omitempty"`
+	Batches                        int               `json:"batches"`
+	HistoryDataPages               int               `json:"history_data_pages"`
+	HistoryEmptyProofPages         int               `json:"history_empty_proof_pages"`
+	HistorySparseContinuations     int               `json:"history_sparse_continuations"`
+	CheckpointProofCandidates      int               `json:"checkpoint_proof_candidates"`
+	CheckpointProofStops           int               `json:"checkpoint_proof_stops"`
+	CheckpointProofShadowConfirmed int               `json:"checkpoint_proof_shadow_confirmed"`
+	CheckpointProofShadowRejected  int               `json:"checkpoint_proof_shadow_rejected"`
+	CheckpointProofRejections      map[string]int    `json:"checkpoint_proof_rejections,omitempty"`
+	RPCPacing                      RPCPacingStats    `json:"rpc_pacing"`
+	FloodWaits                     int               `json:"flood_waits"`
+	Complete                       bool              `json:"complete,omitempty"`
+	DialogHeads                    []DailyDialogHead `json:"-"`
+}
+
+type RPCPacingStats struct {
+	SpacingMillis        int            `json:"spacing_ms"`
+	Calls                int            `json:"calls"`
+	ScheduledWaitSeconds float64        `json:"scheduled_wait_seconds"`
+	Operations           map[string]int `json:"operations,omitempty"`
+	TransportFloods      int            `json:"transport_floods"`
 }
 
 type OutgoingProgress struct {
