@@ -142,11 +142,19 @@ func (c *dailyStageTimingCollector) ObserveMediaPipeline(metrics stages.MediaPip
 }
 
 func (c *dailyStageTimingCollector) ObserveDownloadTransfer(metrics stages.DownloadTransferMetrics) {
-	if c == nil || metrics.Threads < 1 || metrics.Seconds < 0 {
+	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if metrics.Coordinator != nil {
+		mergeDownloadCoordinatorMetrics(&c.downloadTransport.Coordinator, *metrics.Coordinator)
+		c.downloadTransport.Policy = metrics.Coordinator.Policy
+		return
+	}
+	if metrics.Threads < 1 || metrics.Seconds < 0 {
+		return
+	}
 	if c.downloadTransport.ThreadDecisions == nil {
 		c.downloadTransport.ThreadDecisions = make(map[string]int, 3)
 	}
@@ -165,6 +173,26 @@ func (c *dailyStageTimingCollector) ObserveDownloadTransfer(metrics stages.Downl
 	c.downloadTransport.Retries += metrics.Retries
 	c.downloadTransport.DownloaderFloods += metrics.FloodWaits
 	c.downloadTransport.DownloaderTransportFloods += metrics.TransportFloods
+}
+
+func mergeDownloadCoordinatorMetrics(target *stages.DownloadCoordinatorMetrics, source stages.DownloadCoordinatorMetrics) {
+	if target == nil {
+		return
+	}
+	target.Policy = source.Policy
+	target.CapacitySlots = max(target.CapacitySlots, source.CapacitySlots)
+	target.ActiveSlots = source.ActiveSlots
+	target.PeakActiveSlots = max(target.PeakActiveSlots, source.PeakActiveSlots)
+	target.PeakActiveFiles = max(target.PeakActiveFiles, source.PeakActiveFiles)
+	target.Batches += source.Batches
+	target.Jobs += source.Jobs
+	target.SmallJobs += source.SmallJobs
+	target.LargeJobs += source.LargeJobs
+	target.SmallParallelPairs += source.SmallParallelPairs
+	target.QueueWaitSeconds += source.QueueWaitSeconds
+	target.WallSeconds += source.WallSeconds
+	target.HistorySections += source.HistorySections
+	target.HistoryDownloadOverlap += source.HistoryDownloadOverlap
 }
 
 func (c *dailyStageTimingCollector) ObserveDownloadQueueWait(duration time.Duration) {
@@ -351,7 +379,7 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			pipelineQueuePeak = report.MediaPipeline.QueuePeak
 		}
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs download_files=%d download_bytes=%d download_mib_s=%.2f download_peak_threads=%d download_retries=%d download_floods=%d download_transport_floods=%d download_queue_wait=%.3fs download_transfer=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs rpc_service=%.3fs get_dialogs_calls=%d get_dialogs_wall=%.3fs get_dialogs_wait=%.3fs get_history_calls=%d get_history_wall=%.3fs get_history_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs download_files=%d download_bytes=%d download_mib_s=%.2f download_peak_threads=%d download_retries=%d download_floods=%d download_transport_floods=%d download_queue_wait=%.3fs download_transfer=%.3fs download_slots_active=%d download_slots_peak=%d download_files_peak=%d download_batches=%d download_jobs=%d download_small_jobs=%d download_large_jobs=%d download_small_pairs=%d download_coordinator_wait=%.3fs download_coordinator_wall=%.3fs history_download_overlap=%d ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs rpc_service=%.3fs get_dialogs_calls=%d get_dialogs_wall=%.3fs get_dialogs_wait=%.3fs get_history_calls=%d get_history_wall=%.3fs get_history_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.DownloadTransport.Files,
@@ -363,6 +391,17 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			report.DownloadTransport.DownloaderTransportFloods,
 			report.TelegramBreakdown.DownloadQueueWaitSeconds,
 			report.TelegramBreakdown.DownloadTransferSeconds,
+			report.DownloadTransport.Coordinator.ActiveSlots,
+			report.DownloadTransport.Coordinator.PeakActiveSlots,
+			report.DownloadTransport.Coordinator.PeakActiveFiles,
+			report.DownloadTransport.Coordinator.Batches,
+			report.DownloadTransport.Coordinator.Jobs,
+			report.DownloadTransport.Coordinator.SmallJobs,
+			report.DownloadTransport.Coordinator.LargeJobs,
+			report.DownloadTransport.Coordinator.SmallParallelPairs,
+			report.DownloadTransport.Coordinator.QueueWaitSeconds,
+			report.DownloadTransport.Coordinator.WallSeconds,
+			report.DownloadTransport.Coordinator.HistoryDownloadOverlap,
 			report.Stages.FFmpeg,
 			report.Stages.ModelColdStart,
 			report.Stages.ASR,

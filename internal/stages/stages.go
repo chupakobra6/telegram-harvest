@@ -20,31 +20,50 @@ type DownloadTransferObserver func(DownloadTransferMetrics)
 type DownloadQueueWaitObserver func(time.Duration)
 
 type DownloadTransferMetrics struct {
-	Policy           string  `json:"policy,omitempty"`
-	ExpectedBytes    int64   `json:"expected_bytes,omitempty"`
-	TransferredBytes int64   `json:"transferred_bytes,omitempty"`
-	Threads          int     `json:"threads"`
-	Seconds          float64 `json:"seconds"`
-	Retries          int     `json:"retries"`
-	FloodWaits       int     `json:"flood_waits"`
-	TransportFloods  int     `json:"transport_floods"`
-	Failed           bool    `json:"failed"`
+	Policy           string                      `json:"policy,omitempty"`
+	ExpectedBytes    int64                       `json:"expected_bytes,omitempty"`
+	TransferredBytes int64                       `json:"transferred_bytes,omitempty"`
+	Threads          int                         `json:"threads"`
+	Seconds          float64                     `json:"seconds"`
+	Retries          int                         `json:"retries"`
+	FloodWaits       int                         `json:"flood_waits"`
+	TransportFloods  int                         `json:"transport_floods"`
+	Failed           bool                        `json:"failed"`
+	Coordinator      *DownloadCoordinatorMetrics `json:"-"`
+}
+
+type DownloadCoordinatorMetrics struct {
+	Policy                 string  `json:"policy,omitempty"`
+	CapacitySlots          int     `json:"capacity_slots"`
+	ActiveSlots            int     `json:"active_slots"`
+	PeakActiveSlots        int     `json:"peak_active_slots"`
+	PeakActiveFiles        int     `json:"peak_active_files"`
+	Batches                int     `json:"batches"`
+	Jobs                   int     `json:"jobs"`
+	SmallJobs              int     `json:"small_jobs"`
+	LargeJobs              int     `json:"large_jobs"`
+	SmallParallelPairs     int     `json:"small_parallel_pairs"`
+	QueueWaitSeconds       float64 `json:"queue_wait_seconds"`
+	WallSeconds            float64 `json:"wall_seconds"`
+	HistorySections        int     `json:"history_sections"`
+	HistoryDownloadOverlap int     `json:"history_download_overlap"`
 }
 
 type DownloadTransportMetrics struct {
-	Policy                    string         `json:"policy,omitempty"`
-	Files                     int            `json:"files"`
-	Failed                    int            `json:"failed"`
-	ExpectedBytes             int64          `json:"expected_bytes"`
-	TransferredBytes          int64          `json:"transferred_bytes"`
-	Seconds                   float64        `json:"seconds"`
-	QueueWaitSeconds          float64        `json:"queue_wait_seconds"`
-	ThroughputMiBPerS         float64        `json:"throughput_mib_per_second"`
-	PeakThreads               int            `json:"peak_threads"`
-	ThreadDecisions           map[string]int `json:"thread_decisions,omitempty"`
-	Retries                   int            `json:"retries"`
-	DownloaderFloods          int            `json:"downloader_flood_waits"`
-	DownloaderTransportFloods int            `json:"downloader_transport_floods"`
+	Policy                    string                     `json:"policy,omitempty"`
+	Files                     int                        `json:"files"`
+	Failed                    int                        `json:"failed"`
+	ExpectedBytes             int64                      `json:"expected_bytes"`
+	TransferredBytes          int64                      `json:"transferred_bytes"`
+	Seconds                   float64                    `json:"seconds"`
+	QueueWaitSeconds          float64                    `json:"queue_wait_seconds"`
+	ThroughputMiBPerS         float64                    `json:"throughput_mib_per_second"`
+	PeakThreads               int                        `json:"peak_threads"`
+	ThreadDecisions           map[string]int             `json:"thread_decisions,omitempty"`
+	Retries                   int                        `json:"retries"`
+	DownloaderFloods          int                        `json:"downloader_flood_waits"`
+	DownloaderTransportFloods int                        `json:"downloader_transport_floods"`
+	Coordinator               DownloadCoordinatorMetrics `json:"coordinator"`
 }
 
 func ObserveDownloadQueueWait(observer DownloadQueueWaitObserver, duration time.Duration) {

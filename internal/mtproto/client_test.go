@@ -123,22 +123,22 @@ func TestDailyAdditionalSenderIsScopedToConfiguredChat(t *testing.T) {
 	}, nil, nil)
 	session := &Session{}
 
-	trackmate, ok := session.normalizeOutgoingDayRecord(context.Background(), &tg.Message{
+	trackmate, ok := session.normalizeOutgoingDayRecord(&tg.Message{
 		ID:      1,
 		Date:    int(start.Add(time.Hour).Unix()),
 		FromID:  &tg.PeerUser{UserID: 8718303786},
 		Message: "daily summary",
-	}, target, entities, nil, opts, nil)
+	}, target, entities, nil, opts)
 	if !ok || trackmate.Sender.ID != 8718303786 || !trackmate.Sender.Bot {
 		t.Fatalf("Trackmate record was not included: ok=%t record=%+v", ok, trackmate)
 	}
 
-	if _, ok := session.normalizeOutgoingDayRecord(context.Background(), &tg.Message{
+	if _, ok := session.normalizeOutgoingDayRecord(&tg.Message{
 		ID:      2,
 		Date:    int(start.Add(2 * time.Hour).Unix()),
 		FromID:  &tg.PeerUser{UserID: 42},
 		Message: "not part of daily",
-	}, target, entities, nil, opts, nil); ok {
+	}, target, entities, nil, opts); ok {
 		t.Fatal("other Haru participant should be excluded from daily")
 	}
 }
@@ -275,7 +275,7 @@ func TestDailyHistoryContinuesAfterSparsePage(t *testing.T) {
 		calls++
 		return page, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestDailyHistoryBoundaryIncludesFilteredRawMessagesBeforeExclusiveEnd(t *te
 			&tg.Message{ID: 7, Date: int(start.Add(-time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "previous boundary"},
 		}}, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestDailyHistoryBoundaryIsNotAppliedAfterIncompleteScan(t *testing.T) {
 			&tg.Message{ID: 12, Date: int(end.Add(-time.Hour).Unix()), FromID: &tg.PeerUser{UserID: 99}, PeerID: &tg.PeerUser{UserID: 1}},
 		}}, nil
 	}
-	_, stats, err := (&Session{}).collectDailyHistory(context.Background(), resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", TopMessageID: 12}}, opts, nil, load)
+	_, stats, err := (&Session{}).collectDailyHistory(context.Background(), resolvedTarget{Chat: harvest.Chat{ID: 1, Type: "user", TopMessageID: 12}}, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestDailyCheckpointProofStopsWithoutEmptyPage(t *testing.T) {
 		}
 		return page, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestDailyCheckpointProofShadowConfirmsSameRecords(t *testing.T) {
 		calls++
 		return page, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestDailyCheckpointProofShadowRejectsContradictoryContinuation(t *testing.T
 		calls++
 		return page, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +586,7 @@ func TestDailyCheckpointProofFallsBackForUnprovenPages(t *testing.T) {
 				calls++
 				return page, nil
 			}
-			_, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+			_, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -663,7 +663,7 @@ func TestDailyHistoryDoesNotClaimCompleteAtMaxBatches(t *testing.T) {
 			&tg.Message{ID: 20, Date: int(start.Add(2 * time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "not a boundary"},
 		}}, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,7 +685,7 @@ func TestDailyHistoryRejectsNonAdvancingPagination(t *testing.T) {
 			&tg.Message{ID: 20, Date: int(start.Add(2 * time.Hour).Unix()), Out: true, PeerID: &tg.PeerUser{UserID: 1}, Message: "same page"},
 		}}, nil
 	}
-	_, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	_, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err == nil || !strings.Contains(err.Error(), "pagination did not advance") {
 		t.Fatalf("error = %v", err)
 	}
@@ -725,7 +725,7 @@ func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
 			},
 		}, nil
 	}
-	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, load)
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +740,7 @@ func TestCheckpointMinIDKeepsNewTrackmateAndOutgoingMessages(t *testing.T) {
 	}
 	fullOpts := opts
 	fullOpts.History.MinID = 0
-	fullRecords, fullStats, err := (&Session{}).collectDailyHistory(context.Background(), target, fullOpts, nil, load)
+	fullRecords, fullStats, err := (&Session{}).collectDailyHistory(context.Background(), target, fullOpts, nil, nil, load)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,7 +794,7 @@ func TestDailyRecordFilterRunsBeforeMediaProcessing(t *testing.T) {
 		},
 	}
 
-	if _, ok := session.normalizeOutgoingDayRecord(context.Background(), message, target, peer.Entities{}, nil, opts, nil); ok {
+	if _, ok := session.normalizeOutgoingDayRecord(message, target, peer.Entities{}, nil, opts); ok {
 		t.Fatal("record rejected by range filter should not be emitted")
 	}
 	if !called {
@@ -1027,7 +1027,7 @@ func TestDumpOutgoingRangeReportsRPCMetricsOnValidationFailure(t *testing.T) {
 	}
 }
 
-func TestSaveAttachmentReportsQueueWaitWhenPacingIsCanceled(t *testing.T) {
+func TestSaveAttachmentCancelsBeforeRPCWhenContextIsDone(t *testing.T) {
 	s := &Session{
 		client:     &telegram.Client{},
 		rpcSpacing: 500 * time.Millisecond,
@@ -1040,7 +1040,6 @@ func TestSaveAttachmentReportsQueueWaitWhenPacingIsCanceled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	observed := false
 	s.saveAttachmentFile(
 		ctx,
 		&record,
@@ -1051,22 +1050,14 @@ func TestSaveAttachmentReportsQueueWaitWhenPacingIsCanceled(t *testing.T) {
 		false,
 		nil,
 		nil,
-		func(duration time.Duration) {
-			if duration < 0 {
-				t.Fatalf("queue wait = %s, want non-negative", duration)
-			}
-			observed = true
-		},
+		func(time.Duration) { t.Fatal("canceled task reached RPC pacing") },
 	)
 
-	if !observed {
-		t.Fatal("download queue wait was not observed")
-	}
 	if !strings.Contains(record.Attachments[0].DownloadError, context.Canceled.Error()) {
 		t.Fatalf("download error = %q, want context canceled", record.Attachments[0].DownloadError)
 	}
-	if stats := s.RPCPacingStats(); stats.Operations["download_media"] != 1 {
-		t.Fatalf("download reservation metrics = %+v", stats)
+	if stats := s.RPCPacingStats(); stats.Operations["download_media"] != 0 {
+		t.Fatalf("canceled task reserved a Telegram RPC slot: %+v", stats)
 	}
 }
 
@@ -1214,7 +1205,8 @@ func TestTranscribeAttachmentMediaSkipsTelegramNoAudioBeforeDownload(t *testing.
 		}},
 	}
 	var events []harvest.ASRLogEvent
-	(&Session{}).enqueueAttachmentTranscription(context.Background(), &record, 0, nil, "silent.mp4", harvest.HistoryOptions{
+	plan := newMediaDownloadPlan()
+	(&Session{}).planAttachmentTranscription(&record, 0, nil, "silent.mp4", harvest.HistoryOptions{
 		TranscribeMedia:     true,
 		VideoTranscribeMode: harvest.VideoTranscribeAll,
 		TranscriptDir:       transcriptDir,
@@ -1222,7 +1214,7 @@ func TestTranscribeAttachmentMediaSkipsTelegramNoAudioBeforeDownload(t *testing.
 			events = append(events, event)
 			return nil
 		},
-	}, nil)
+	}, nil, plan)
 
 	attachment := record.Attachments[0]
 	if !strings.Contains(attachment.TranscriptError, "Telegram metadata") || attachment.DownloadError != "" {
@@ -1230,6 +1222,9 @@ func TestTranscribeAttachmentMediaSkipsTelegramNoAudioBeforeDownload(t *testing.
 	}
 	if len(events) != 1 || events[0].Action != "skip" || events[0].Stage != "policy" || !events[0].NoAudio || events[0].DownloadSeconds != 0 {
 		t.Fatalf("events = %+v", events)
+	}
+	if len(plan.tasks) != 0 {
+		t.Fatalf("Telegram nosound video scheduled %d downloads", len(plan.tasks))
 	}
 }
 
@@ -1403,7 +1398,7 @@ func TestDownloadRecordMediaEnsuresTranscriptAttachmentMetadata(t *testing.T) {
 	record := harvest.MessageRecord{MessageID: 55, Kind: "voice"}
 
 	session := &Session{}
-	session.downloadRecordMediaWithPipeline(context.Background(), &tg.Message{ID: 55, Media: media}, &record, harvest.HistoryOptions{DownloadMedia: true}, nil)
+	session.planRecordMediaDownloads(&tg.Message{ID: 55, Media: media}, &record, harvest.HistoryOptions{DownloadMedia: true}, nil, newMediaDownloadPlan())
 
 	if len(record.Attachments) != 1 {
 		t.Fatalf("attachments len = %d, want 1", len(record.Attachments))

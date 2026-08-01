@@ -146,6 +146,11 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 
 func TestDailyStageTimingReportAggregatesDownloadTransport(t *testing.T) {
 	collector := newDailyStageTimingCollector("daily", "2026-07-30", "2026-07-31")
+	collector.ObserveDownloadTransfer(stages.DownloadTransferMetrics{Coordinator: &stages.DownloadCoordinatorMetrics{
+		Policy: "page-fifo-cap2", CapacitySlots: 2, PeakActiveSlots: 2, PeakActiveFiles: 2,
+		Batches: 3, Jobs: 5, SmallJobs: 4, LargeJobs: 1, SmallParallelPairs: 2,
+		QueueWaitSeconds: 1.5, WallSeconds: 4, HistorySections: 7,
+	}})
 	collector.ObserveDownloadQueueWait(250 * time.Millisecond)
 	collector.ObserveDownloadQueueWait(750 * time.Millisecond)
 	collector.ObserveDownloadTransfer(stages.DownloadTransferMetrics{
@@ -180,6 +185,9 @@ func TestDailyStageTimingReportAggregatesDownloadTransport(t *testing.T) {
 	if metrics.Retries != 2 || metrics.DownloaderFloods != 1 || metrics.DownloaderTransportFloods != 1 || metrics.ThroughputMiBPerS != 2.5 {
 		t.Fatalf("download transport evidence = %+v", metrics)
 	}
+	if metrics.Coordinator.Policy != "page-fifo-cap2" || metrics.Coordinator.CapacitySlots != 2 || metrics.Coordinator.PeakActiveSlots != 2 || metrics.Coordinator.PeakActiveFiles != 2 || metrics.Coordinator.SmallParallelPairs != 2 || metrics.Coordinator.HistoryDownloadOverlap != 0 {
+		t.Fatalf("download coordinator evidence = %+v", metrics.Coordinator)
+	}
 }
 
 func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
@@ -195,6 +203,7 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 		"checkpoint_unchanged=", "checkpoint_changed=", "checkpoint_new=", "checkpoint_fallback=",
 		"stage_work=", "pipeline_mode=", "pipeline_span=", "pipeline_overlap=", "pipeline_workers=", "pipeline_queue_peak=", "total=", "report=",
 		"download_files=", "download_bytes=", "download_mib_s=", "download_peak_threads=", "download_retries=", "download_floods=", "download_transport_floods=", "download_queue_wait=", "download_transfer=",
+		"download_slots_active=", "download_slots_peak=", "download_files_peak=", "download_batches=", "download_jobs=", "download_small_jobs=", "download_large_jobs=", "download_small_pairs=", "download_coordinator_wait=", "download_coordinator_wall=", "history_download_overlap=",
 		"rpc_spacing_ms=", "rpc_calls=", "rpc_wait=", "rpc_service=", "get_dialogs_calls=", "get_dialogs_wall=", "get_dialogs_wait=", "get_history_calls=", "get_history_wall=", "get_history_wait=", "transport_floods=", "history_data_pages=", "history_empty_proof_pages=", "history_sparse_continuations=",
 		"checkpoint_proof_candidates=", "checkpoint_proof_stops=", "checkpoint_proof_shadow_confirmed=", "checkpoint_proof_shadow_rejected=",
 	} {
