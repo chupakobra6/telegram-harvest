@@ -59,6 +59,7 @@ type MediaPipelineMetrics struct {
 	JobsSubmitted           int                  `json:"jobs_submitted"`
 	JobsDeduplicated        int                  `json:"jobs_deduplicated"`
 	JobsCompleted           int                  `json:"jobs_completed"`
+	JobsSkipped             int                  `json:"jobs_skipped"`
 	JobsFailed              int                  `json:"jobs_failed"`
 	AudioSeconds            float64              `json:"audio_seconds"`
 	SpeechGateSeconds       float64              `json:"speech_gate_seconds,omitempty"`
@@ -80,6 +81,7 @@ type MediaPipelineMetrics struct {
 type MediaWorkerMetrics struct {
 	ID                    int     `json:"id"`
 	Jobs                  int     `json:"jobs"`
+	Skips                 int     `json:"skips"`
 	Failures              int     `json:"failures"`
 	AudioSeconds          float64 `json:"audio_seconds"`
 	FFmpegSeconds         float64 `json:"ffmpeg_seconds"`

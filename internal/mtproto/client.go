@@ -2519,7 +2519,11 @@ func (s *Session) transcribeAttachmentMedia(
 	result, err := runTranscriberDetailed(transcribeCtx, opts.Transcriber, transcribeOpts, tempPath, transcriptPath)
 	if err != nil {
 		attachment.TranscriptError = transcriptErrorMessage(err)
-		event := asrLogEvent("error", "transcribe", attachment.TranscriptError, *record, index, *attachment)
+		action := "error"
+		if isTranscriptSkipError(err) {
+			action = "skip"
+		}
+		event := asrLogEvent(action, "transcribe", attachment.TranscriptError, *record, index, *attachment)
 		event.DownloadSeconds = downloadSeconds
 		event.Engine = transcribeOpts.EngineName()
 		event.InputBytes = localFileSize(tempPath)
@@ -2654,6 +2658,10 @@ func transcriptErrorMessage(err error) string {
 		return "skipped: media has no audio stream"
 	}
 	return detail
+}
+
+func isTranscriptSkipError(err error) bool {
+	return strings.HasPrefix(transcriptErrorMessage(err), "skipped: ")
 }
 
 func transcriptMediaKind(kind string) bool {

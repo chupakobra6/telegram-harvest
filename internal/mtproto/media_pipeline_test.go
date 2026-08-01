@@ -93,6 +93,14 @@ type pipelineHarness struct {
 	calls  atomic.Int32
 }
 
+type pipelineErrorRunner struct {
+	err error
+}
+
+func (r pipelineErrorRunner) Run(context.Context, string, string) (string, error) {
+	return "", r.err
+}
+
 func (h *pipelineHarness) factory(delay time.Duration, audio float64, asr time.Duration, fail bool, gate <-chan struct{}) func() harvest.Transcriber {
 	return func() harvest.Transcriber {
 		return &pipelineRunnerHarness{
@@ -342,6 +350,58 @@ func TestMediaPipelineFailureDoesNotPublishPartialCache(t *testing.T) {
 	}
 	if _, err := os.Stat(input); !os.IsNotExist(err) {
 		t.Fatalf("temporary input exists: %v", err)
+	}
+}
+
+func TestMediaPipelineClassifiesNoAudioAsSkip(t *testing.T) {
+	dir := t.TempDir()
+	var events []harvest.ASRLogEvent
+	pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{
+		ASRLog: func(event harvest.ASRLogEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	}, mediaPipelineConfig{
+		QueueCapacity: 2,
+		RunnerFactory: func() harvest.Transcriber {
+			return pipelineErrorRunner{err: errors.New("Stream map '0:a:0' matches no streams")}
+		},
+		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
+		SampleRSS:       func(int) uint64 { return 0 },
+		Now:             time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "silent.mp4")
+	key := filepath.Join(dir, "silent.txt")
+	if err := os.WriteFile(input, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline.claim(key)
+	record := harvest.MessageRecord{Attachments: []harvest.Attachment{{Kind: "video", TranscriptPath: key}}}
+	if err := pipeline.enqueue(mediaPipelineJob{
+		Key: key, InputPath: input, TranscriptPath: key,
+		Record: record, Attachment: record.Attachments[0],
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := []harvest.MessageRecord{record}
+	if err := pipeline.waitAndApply(records); err != nil {
+		t.Fatal(err)
+	}
+	metrics := pipeline.metrics()
+	if metrics.JobsSkipped != 1 || metrics.JobsFailed != 0 || len(metrics.Workers) != 1 || metrics.Workers[0].Skips != 1 || metrics.Workers[0].Failures != 0 {
+		t.Fatalf("skip metrics = %+v", metrics)
+	}
+	if metrics.AudioSeconds != 0 || metrics.Workers[0].AudioSeconds != 0 || metrics.PoolSpeedX != 0 || metrics.WorkerWorkSpeedX != 0 {
+		t.Fatalf("skipped media affected audio throughput metrics: %+v", metrics)
+	}
+	if records[0].Attachments[0].TranscriptError != "skipped: media has no audio stream" {
+		t.Fatalf("transcript error = %q", records[0].Attachments[0].TranscriptError)
+	}
+	if len(events) != 2 || events[1].Action != "skip" || events[1].Reason != "skipped: media has no audio stream" {
+		t.Fatalf("ASR events = %+v", events)
 	}
 }
 

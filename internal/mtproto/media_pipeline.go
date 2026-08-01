@@ -78,6 +78,7 @@ type mediaPipeline struct {
 	jobsSubmitted     int
 	jobsDeduplicated  int
 	jobsCompleted     int
+	jobsSkipped       int
 	jobsFailed        int
 	activeJobs        int
 	peakActiveJobs    int
@@ -277,7 +278,11 @@ func (p *mediaPipeline) processJob(worker *mediaPipelineWorker, job mediaPipelin
 	detailed, err := runTranscriberDetailedAtomic(transcribeCtx, worker.runner, job.TranscribeOption, job.InputPath, job.TranscriptPath)
 	if err != nil {
 		result.Err = err
-		event := asrLogEvent("error", "transcribe", transcriptErrorMessage(err), job.Record, job.AttachmentIndex, job.Attachment)
+		action := "error"
+		if isTranscriptSkipError(err) {
+			action = "skip"
+		}
+		event := asrLogEvent(action, "transcribe", transcriptErrorMessage(err), job.Record, job.AttachmentIndex, job.Attachment)
 		event.DownloadSeconds = job.DownloadSeconds
 		event.Engine = job.TranscribeOption.EngineName()
 		event.InputBytes = localFileSize(job.InputPath)
@@ -313,9 +318,12 @@ func (p *mediaPipeline) processJob(worker *mediaPipelineWorker, job mediaPipelin
 }
 
 func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPipelineResult) {
-	audioSeconds := result.Result.WAVDurationSeconds
-	if audioSeconds <= 0 {
-		audioSeconds = result.Job.Attachment.DurationSeconds
+	audioSeconds := 0.0
+	if result.Err == nil {
+		audioSeconds = result.Result.WAVDurationSeconds
+		if audioSeconds <= 0 {
+			audioSeconds = result.Job.Attachment.DurationSeconds
+		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -325,8 +333,13 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 	p.totalAudio += audioSeconds
 	p.totalASR += result.Result.ASRDuration.Seconds()
 	if result.Err != nil {
-		p.jobsFailed++
-		worker.metrics.Failures++
+		if isTranscriptSkipError(result.Err) {
+			p.jobsSkipped++
+			worker.metrics.Skips++
+		} else {
+			p.jobsFailed++
+			worker.metrics.Failures++
+		}
 	}
 	worker.metrics.Jobs++
 	worker.metrics.AudioSeconds += audioSeconds
@@ -489,6 +502,7 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		JobsSubmitted:           p.jobsSubmitted,
 		JobsDeduplicated:        p.jobsDeduplicated,
 		JobsCompleted:           p.jobsCompleted,
+		JobsSkipped:             p.jobsSkipped,
 		JobsFailed:              p.jobsFailed,
 		AudioSeconds:            p.totalAudio,
 		SpeechGateSeconds:       speechGateSeconds,
