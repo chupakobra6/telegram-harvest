@@ -99,6 +99,29 @@ func TestProductionWhisperProfileIsPinned(t *testing.T) {
 	}
 }
 
+func TestProductionWhisperProfileCanSkipOnlySpeechGate(t *testing.T) {
+	opts := ProductionOptions(
+		"whisper-server",
+		ProductionModelFile,
+		"unused-gate-model.bin",
+		"ffmpeg",
+		nil,
+	).WithoutSpeechGate()
+	if err := opts.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := opts.Descriptor()
+	if descriptor.SpeechGate != nil {
+		t.Fatalf("speech gate = %#v, want disabled", descriptor.SpeechGate)
+	}
+	if descriptor.Model != ProductionModelFile || descriptor.Accelerator != AcceleratorMetal || descriptor.Language != ProductionLanguage {
+		t.Fatalf("production identity changed: %#v", descriptor)
+	}
+	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 || descriptor.PostFilter != whisperTerminalHallucinationProfile {
+		t.Fatalf("production inference profile changed: %#v", descriptor)
+	}
+}
+
 func TestProductionWhisperProfileRejectsDifferentModels(t *testing.T) {
 	opts := ProductionOptions(
 		"whisper-server",

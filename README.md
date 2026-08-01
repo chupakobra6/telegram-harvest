@@ -210,6 +210,8 @@ bin/telegram-harvest --profile main transcribe-file \
 
 Команда пишет plain UTF-8 transcript в `--output`, а в stdout — versioned JSON с backend descriptor, speech-gate result, Metal confirmation и timings. `transcribe-file --check` проверяет текущие runtime/model paths без обработки медиа. OBS Interview Pipeline использует этот вход, поэтому Whisper profile, VAD и post-filter обновляются только здесь, в `internal/transcribe`.
 
+Для доверенной записи, в которой речь гарантирована самим workflow, `--assume-speech` пропускает только whole-file Silero gate. Модель `large-v3-turbo-q5_0`, Metal, русский decode profile и terminal post-filter остаются теми же и по-прежнему принадлежат этому пакету. Обычные Telegram-команды этот флаг не используют и сохраняют Silero gate.
+
 Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; bounded chunk parallelism существует только внутри текущего файла. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 
 Несколько Whisper-процессов не запускаются: на Apple Silicon они конкурируют за один GPU и unified memory, а измеренный production workload этого не требует. Transcript cache включает runtime/model/quantization, язык, threads, decode, gate и post-filter; готовый transcript публикуется через `temp → fsync/close → rename`. Cache проверяется до media download, поэтому повторный catch-up не запускает ASR для уже известных вложений.

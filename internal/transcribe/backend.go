@@ -112,6 +112,14 @@ func ProductionOptions(command, modelPath, gateModelPath, ffmpegCommand string, 
 	}
 }
 
+// WithoutSpeechGate keeps the canonical production inference and post-filter
+// profile, but skips the whole-file presence check for trusted inputs that are
+// already known to contain speech (for example, an OBS interview recording).
+func (o Options) WithoutSpeechGate() Options {
+	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
+	return o
+}
+
 func (o Options) Descriptor() Descriptor {
 	decode := o.WhisperDecode.normalized()
 	descriptor := Descriptor{
@@ -136,14 +144,20 @@ func (o Options) Descriptor() Descriptor {
 // lets existing tuned-Whisper transcripts remain reusable.
 func (o Options) CacheIdentity() string {
 	descriptorJSON, _ := json.Marshal(o.Descriptor())
+	gateCommand := ""
+	gateModel := ""
+	if o.WhisperSpeechGate.Enabled {
+		gateCommand = cacheModelIdentity(o.WhisperSpeechGate.command(o))
+		gateModel = cacheModelIdentity(o.WhisperSpeechGate.ModelPath)
+	}
 	parts := []string{
 		"v2",
 		string(descriptorJSON),
 		cacheModelIdentity(o.WhisperCommand),
 		cacheModelIdentity(o.WhisperModelPath),
 		"",
-		cacheModelIdentity(o.WhisperSpeechGate.command(o)),
-		cacheModelIdentity(o.WhisperSpeechGate.ModelPath),
+		gateCommand,
+		gateModel,
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:16])
@@ -165,7 +179,7 @@ func (o Options) Validate() error {
 	if err := o.WhisperSpeechGate.validate(o); err != nil {
 		return err
 	}
-	if o.productionProfile && filepath.Base(filepath.Clean(o.WhisperSpeechGate.ModelPath)) != ProductionSpeechGateFile {
+	if o.productionProfile && o.WhisperSpeechGate.Enabled && filepath.Base(filepath.Clean(o.WhisperSpeechGate.ModelPath)) != ProductionSpeechGateFile {
 		return fmt.Errorf("production whisper speech-gate model must be %s", ProductionSpeechGateFile)
 	}
 	return nil
@@ -177,11 +191,14 @@ func (o Options) ValidateRuntime() error {
 	if err := o.Validate(); err != nil {
 		return err
 	}
-	for name, command := range map[string]string{
-		"ffmpeg":                  o.FFmpegCommand,
-		"whisper.cpp server":      o.WhisperCommand,
-		"whisper.cpp speech gate": o.WhisperSpeechGate.command(o),
-	} {
+	commands := map[string]string{
+		"ffmpeg":             o.FFmpegCommand,
+		"whisper.cpp server": o.WhisperCommand,
+	}
+	if o.WhisperSpeechGate.Enabled {
+		commands["whisper.cpp speech gate"] = o.WhisperSpeechGate.command(o)
+	}
+	for name, command := range commands {
 		if strings.TrimSpace(command) == "" {
 			return fmt.Errorf("%s command is empty", name)
 		}
@@ -189,10 +206,11 @@ func (o Options) ValidateRuntime() error {
 			return fmt.Errorf("%s command is unavailable: %s", name, command)
 		}
 	}
-	for name, path := range map[string]string{
-		"whisper.cpp model":       o.WhisperModelPath,
-		"whisper.cpp speech gate": o.WhisperSpeechGate.ModelPath,
-	} {
+	models := map[string]string{"whisper.cpp model": o.WhisperModelPath}
+	if o.WhisperSpeechGate.Enabled {
+		models["whisper.cpp speech gate"] = o.WhisperSpeechGate.ModelPath
+	}
+	for name, path := range models {
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("%s is unavailable: %s: %w", name, path, err)
