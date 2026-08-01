@@ -36,7 +36,7 @@ help:
 	@printf "  make compact PROFILE=study # low-level: compact an existing JSONL for agents\\n"
 	@printf "  make agent-view PROFILE=study # low-level: build Markdown navigation from JSONL\\n"
 	@printf "  make refresh-agent-view PROFILE=study # update Markdown navigation and messages.toon\\n"
-	@printf "  make clean   # remove rebuildable caches/views; keep reports, .env, and sessions\\n"
+	@printf "  make clean   # remove build artifacts; keep harvested data and runtime state\\n"
 
 setup:
 	go mod download
@@ -124,6 +124,4 @@ agent-view:
 refresh-agent-view: agent-view compact
 
 clean:
-	rm -rf .state artifacts telegram-harvest agent-view media media-refresh bin
-	rm -f messages.jsonl messages.toon *.log
-	rm -f .sessions/*.runtime.lock
+	rm -rf artifacts telegram-harvest bin
