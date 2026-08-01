@@ -60,7 +60,7 @@ Telegram app credentials создаются на <https://my.telegram.org>. Се
 ```bash
 make login PROFILE=main
 make doctor PROFILE=main
-go run ./cmd/telegram-harvest --profile main me
+bin/telegram-harvest --profile main me
 ```
 
 Логин учебного аккаунта через API credentials:
@@ -68,7 +68,7 @@ go run ./cmd/telegram-harvest --profile main me
 ```bash
 make login PROFILE=study
 make doctor PROFILE=study
-go run ./cmd/telegram-harvest --profile study me
+bin/telegram-harvest --profile study me
 ```
 
 ## Профили
@@ -76,8 +76,8 @@ go run ./cmd/telegram-harvest --profile study me
 Профиль всегда указывается явно. CLI не выбирает аккаунт по команде и не имеет дефолтного аккаунта.
 
 ```bash
-go run ./cmd/telegram-harvest --profile main  <command>
-go run ./cmd/telegram-harvest --profile study <command>
+bin/telegram-harvest --profile main  <command>
+bin/telegram-harvest --profile study <command>
 ```
 
 Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study`. Первый Make-запуск собирает `bin/telegram-harvest`; следующие запуски переиспользуют бинарник, пока не изменятся Go sources, `go.mod` или `go.sum`.
@@ -102,7 +102,7 @@ make daily PROFILE=main DATE=2026-06-04
 То же напрямую через CLI:
 
 ```bash
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04
+bin/telegram-harvest --profile main daily --date 2026-06-04
 ```
 
 Выходные файлы по умолчанию:
@@ -134,18 +134,18 @@ Daily публикует финальные Markdown/JSONL отчеты атом
 Полезные флаги:
 
 ```bash
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --progress
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --transcribe-video=phone
-go run ./cmd/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
+bin/telegram-harvest --profile main daily --date 2026-06-04 --progress
+bin/telegram-harvest --profile main daily --date 2026-06-04 --download-media=false
+bin/telegram-harvest --profile main daily --date 2026-06-04 --transcribe=false
+bin/telegram-harvest --profile main daily --date 2026-06-04 --transcribe-video=phone
+bin/telegram-harvest --profile main daily --date 2026-06-04 --markdown-out reports/daily/2026-06-04.md
 ```
 
 Актуализировать отчеты одной командой:
 
 ```bash
 make daily-catchup PROFILE=main
-go run ./cmd/telegram-harvest --profile main daily-catchup
+bin/telegram-harvest --profile main daily-catchup
 ```
 
 `daily-catchup` смотрит последние дневные Markdown-отчеты в `reports/daily`, берет день после самого свежего `YYYY-MM-DD.md` и строит все недостающие отчеты до текущей даты не включительно. Весь новый диапазон читается из Telegram одним последовательным range-scan, после чего записи разделяются по московским дням и атомарно публикуются в отдельные JSONL/Markdown. `00-latest-catchup.md` не участвует в определении последней даты. Если сегодня 2026-06-07, а последний дневной отчет — 2026-06-02, команда построит 2026-06-03 ... 2026-06-06 и объединит их в один файл. Существующие дневные Markdown не перезаписываются; их даты также исключаются из media/ASR-обработки range-scan.
@@ -155,12 +155,10 @@ go run ./cmd/telegram-harvest --profile main daily-catchup
 Для первого catch-up без предыдущих отчетов передай явный старт:
 
 ```bash
-go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
+bin/telegram-harvest --profile main daily-catchup --from 2026-06-03
 ```
 
 Каноническое описание слова «catch-up», daily scope, медиа, ASR и проверок готовности находится в [`docs/catch-up.md`](docs/catch-up.md). `daily`/`daily-catchup` — единственный пользовательский catch-up flow.
-
-Архитектура единого range-scan и воспроизводимый old/new benchmark описаны в [`docs/performance.md`](docs/performance.md).
 
 ## Telegram pacing
 
@@ -189,7 +187,7 @@ go run ./cmd/telegram-harvest --profile main daily-catchup --from 2026-06-03
 Если файл выше лимита, JSONL сохраняет `download_error` и `download_hint`, а Markdown остается чистым пользовательским отчетом. Ручное скачивание делается отдельной командой и лимиты не применяет:
 
 ```bash
-go run ./cmd/telegram-harvest --profile main daily-download-media \
+bin/telegram-harvest --profile main daily-download-media \
   --chat 1234567890 \
   --message-id 777 \
   --index 1 \
@@ -253,21 +251,6 @@ go run ./cmd/asr-benchmark \
   --runs 3
 ```
 
-## Производительность daily
-
-Контрольный current-head E2E на дне с 211 сообщениями и тремя ASR jobs общей длительностью 170.284 с занял 85.888 с: ASR speed `17.08×`, media pipeline speed `13.39×`, 0 FloodWait и 0 потерянных сообщений. Финальный повтор на выборке последних пяти голосовых дал `15.70×` ASR speed и `15.02×` pipeline speed. Подробные сравнения качества и воспроизводимые условия находятся в [`docs/performance.md`](docs/performance.md).
-
-| Нагрузка дня | Оценка |
-| --- | ---: |
-| Почти без ASR | 1.5-2 минуты |
-| Обычный день с voice/round-video | 2.5-6 минут |
-| Тяжелый день с десятками voice/round-video/phone-video ASR | 6-8 минут |
-
-Основной драйвер времени - количество и длительность audio/video, а не только число сообщений. Generic horizontal/long video по умолчанию скипается до скачивания, чтобы фильмы и крупные travel clips не уходили в ASR. Transcript cache keyed by Telegram media id, поэтому повторные запуски заметно дешевле.
-Daily пропускает per-chat history для чатов, где последнее сообщение старше нужного дня, но не останавливает загрузку списка диалогов по первому старому чату: на исторических датах Telegram dialog order оказался недостаточным стоп-критерием.
-
-Для полноты daily использует только `messages.getHistory` и уже локально оставляет self/outgoing и настроенных дополнительных отправителей. `messages.search` намеренно не используется: реальный пустой-query поиск по self воспроизводимо пропустил существующее исходящее сообщение. Короткая history page завершает scan досрочно только в узком валидном checkpoint flow, где `MinID`, известный dialog head и exact response metadata совместно доказывают bounded window; historical/fallback flow продолжает безопасную pagination до временной границы, пустой страницы или hard limit.
-
 ## Study sync
 
 Сначала посмотреть доступные чаты:
@@ -281,7 +264,7 @@ make chats PROFILE=study QUERY=вшэ
 Полная выгрузка:
 
 ```bash
-go run ./cmd/telegram-harvest --profile study sync \
+bin/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --all \
@@ -293,7 +276,7 @@ go run ./cmd/telegram-harvest --profile study sync \
 Resume после interruption:
 
 ```bash
-go run ./cmd/telegram-harvest --profile study sync \
+bin/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --all \
@@ -303,7 +286,7 @@ go run ./cmd/telegram-harvest --profile study sync \
 Обычный incremental sync:
 
 ```bash
-go run ./cmd/telegram-harvest --profile study sync \
+bin/telegram-harvest --profile study sync \
   --chat 1234567890 \
   --name study-main \
   --merged-out messages.jsonl
@@ -341,8 +324,8 @@ make dump PROFILE=main CHAT=1234567890 \
 JSONL - canonical lossless source. Markdown/TOON - производные представления, их можно пересобрать:
 
 ```bash
-go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view
-go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon
+bin/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view
+bin/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon
 make refresh-agent-view PROFILE=study
 ```
 
@@ -362,9 +345,9 @@ make fmt
 make test
 make check
 make audit
-go run ./cmd/telegram-harvest --help
-go run ./cmd/telegram-harvest --profile main daily --help
-go run ./cmd/telegram-harvest --profile main daily-catchup --help
+bin/telegram-harvest --help
+bin/telegram-harvest --profile main daily --help
+bin/telegram-harvest --profile main daily-catchup --help
 ```
 
 ## Структура

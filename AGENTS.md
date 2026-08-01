@@ -9,6 +9,7 @@
 ## Safety
 - Read-only is a hard boundary: do not add commands that send messages, click buttons, delete messages, pin/unpin, join chats, mark chats read, or mutate Telegram state.
 - Keep history crawlers and high-level media selection sequential and paced. The only allowed Telegram concurrency is the measured bounded chunk parallelism inside one active file: one worker below 1 MiB, two workers from 1 MiB, production cap two.
+- Accept Telegram performance changes only after same-corpus A/B checks preserve message keys and stable JSONL/media content with zero Telegram errors and zero FloodWait. Never promote a faster probe setting that fails those checks.
 - Treat `.env`, `.sessions/`, `.state/`, dumps, and chat exports as private local data.
 - Never print app hashes, passwords, session data, or full phone numbers.
 - Do not keep broad dumps of other people's messages in repo-local `.state/`; daily full-dialog scans may emit only outgoing/self records and explicitly configured sender IDs scoped to their configured chat IDs.
@@ -23,14 +24,14 @@
 - Login: `make login PROFILE=<main|study>`
 - Daily harvest: `make daily PROFILE=main DATE=yesterday`
 - Daily catch-up through yesterday: `make daily-catchup PROFILE=main`
-- List chats: `go run ./cmd/telegram-harvest --profile study chats --query вшэ`
-- List forum topics: `go run ./cmd/telegram-harvest --profile study topics --chat <forum-id-or-username>`
-- Dump chat: `go run ./cmd/telegram-harvest --profile study dump --chat <id-or-username> --out chat.jsonl` (relative outputs resolve inside the selected profile state dir)
-- Start full sync: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset`
+- List chats: `bin/telegram-harvest --profile study chats --query вшэ`
+- List forum topics: `bin/telegram-harvest --profile study topics --chat <forum-id-or-username>`
+- Dump chat: `bin/telegram-harvest --profile study dump --chat <id-or-username> --out chat.jsonl` (relative outputs resolve inside the selected profile state dir)
+- Start full sync: `bin/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
-- Incremental sync after full sync completion: `go run ./cmd/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
-- Compact agent view: `go run ./cmd/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
-- Markdown navigation for agents: `go run ./cmd/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it writes under the profile state dir, updates incrementally when possible, and accepts `--rebuild` for a full rewrite.
+- Incremental sync after full sync completion: `bin/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
+- Compact agent view: `bin/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
+- Markdown navigation for agents: `bin/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it writes under the profile state dir, updates incrementally when possible, and accepts `--rebuild` for a full rewrite.
 
 ## Version control
 - The user has given standing approval to push completed Telegram Harvest commits. After relevant validation and a local commit, push the current branch to its configured upstream; do not open a pull request unless requested.
