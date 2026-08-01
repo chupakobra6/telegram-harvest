@@ -28,7 +28,7 @@ help:
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
 	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
-	@printf "  make transcribe-file PROFILE=main # local production ASR; INPUT=... OUTPUT=... ASSUME_SPEECH=1\\n"
+	@printf "  make transcribe-file PROFILE=main # local production ASR; INPUT=... OUTPUT=... ASSUME_SPEECH=1 or TRUSTED_LONG_FORM=1\\n"
 	@printf "  make chats PROFILE=study # list dialogs; pass QUERY='вшэ' to filter\\n"
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
@@ -98,7 +98,7 @@ transcribe-file:
 	$(REQUIRE_PROFILE)
 	@test -n "$(strip $(INPUT))" || { printf "INPUT is required\\n"; exit 2; }
 	@test -n "$(strip $(OUTPUT))" || { printf "OUTPUT is required\\n"; exit 2; }
-	$(CLI) $(PROFILE_ARG) transcribe-file --input "$(INPUT)" --output "$(OUTPUT)" $(if $(strip $(ASSUME_SPEECH)),--assume-speech,)
+	$(CLI) $(PROFILE_ARG) transcribe-file --input "$(INPUT)" --output "$(OUTPUT)" $(if $(strip $(ASSUME_SPEECH)),--assume-speech,) $(if $(strip $(TRUSTED_LONG_FORM)),--trusted-long-form,)
 
 chats:
 	$(REQUIRE_PROFILE)

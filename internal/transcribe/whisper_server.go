@@ -6,18 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
@@ -81,13 +84,28 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	ffmpegDuration := time.Since(ffmpegStart)
 	defer cleanup()
 	wavBytes := fileSize(wavPath)
+	diagnostics := &Diagnostics{}
+	var leadingTrimDuration time.Duration
+	var leadingSpeechOffset float64
+	if r.opts.WhisperLongForm.Enabled {
+		trimStart := time.Now()
+		trimmedPath, offset, trimCleanup, trimErr := prepareLeadingSpeechWAV(ctx, r.opts, wavPath, filepath.Dir(outputPath))
+		leadingTrimDuration = time.Since(trimStart)
+		if trimErr != nil {
+			return Result{}, trimErr
+		}
+		defer trimCleanup()
+		wavPath = trimmedPath
+		wavBytes = fileSize(wavPath)
+		leadingSpeechOffset = offset
+		diagnostics.LeadingSpeechOffsetSeconds = offset
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return Result{}, fmt.Errorf("whisper.cpp session is closed")
 	}
-	diagnostics := &Diagnostics{}
 	var speechGateDuration time.Duration
 	if r.opts.WhisperSpeechGate.Enabled {
 		gateStart := time.Now()
@@ -126,7 +144,13 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 		return Result{}, err
 	}
 	inferenceStart := time.Now()
-	text, inferenceDiagnostics, err := r.inferLocked(ctx, wavPath)
+	var text string
+	var inferenceDiagnostics *Diagnostics
+	if r.opts.WhisperLongForm.Enabled {
+		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath, filepath.Dir(outputPath))
+	} else {
+		text, inferenceDiagnostics, err = r.inferLocked(ctx, wavPath)
+	}
 	inferenceDuration := time.Since(inferenceStart)
 	if r.opts.StageTiming != nil {
 		r.opts.StageTiming(stages.ASR, inferenceDuration)
@@ -137,25 +161,243 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	mergeDiagnostics(diagnostics, inferenceDiagnostics)
 	asrDuration := speechGateDuration + inferenceDuration
 	text = strings.TrimSpace(text)
-	text, diagnostics.RemovedTerminalHallucinations = stripWhisperTerminalHallucinations(text)
+	var removed []string
+	text, removed = stripWhisperTerminalHallucinations(text)
+	diagnostics.RemovedTerminalHallucinations = append(diagnostics.RemovedTerminalHallucinations, removed...)
 	if err := os.WriteFile(outputPath, []byte(text), 0o600); err != nil {
 		return Result{}, fmt.Errorf("write transcript: %w", err)
 	}
 	return Result{
-		Text:                   text,
-		Engine:                 r.opts.EngineName(),
-		Backend:                r.opts.Descriptor(),
-		FFmpegDuration:         ffmpegDuration,
-		ModelColdStartDuration: modelColdStartDuration,
-		ASRDuration:            asrDuration,
-		SpeechGateDuration:     speechGateDuration,
-		TotalDuration:          time.Since(start),
-		InputBytes:             fileSize(inputPath),
-		WAVBytes:               wavBytes,
-		WAVDurationSeconds:     wavPCM16MonoDuration(wavBytes),
-		TranscriptBytes:        int64(len([]byte(text))),
-		Diagnostics:            diagnostics,
+		Text:                        text,
+		Engine:                      r.opts.EngineName(),
+		Backend:                     r.opts.Descriptor(),
+		FFmpegDuration:              ffmpegDuration,
+		ModelColdStartDuration:      modelColdStartDuration,
+		ASRDuration:                 asrDuration,
+		SpeechGateDuration:          speechGateDuration,
+		LongFormPreparationDuration: leadingTrimDuration,
+		LeadingSpeechOffset:         leadingSpeechOffset,
+		TotalDuration:               time.Since(start),
+		InputBytes:                  fileSize(inputPath),
+		WAVBytes:                    wavBytes,
+		WAVDurationSeconds:          wavPCM16MonoDuration(wavBytes),
+		TranscriptBytes:             int64(len([]byte(text))),
+		Diagnostics:                 diagnostics,
 	}, nil
+}
+
+func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath, tempDir string) (string, *Diagnostics, error) {
+	duration := wavPCM16MonoDuration(fileSize(wavPath))
+	if duration <= 0 {
+		return "", nil, fmt.Errorf("trusted long-form inference received empty audio")
+	}
+	settings := r.opts.WhisperLongForm.normalized()
+	chunkSeconds := float64(settings.ChunkSeconds)
+	overlapSeconds := float64(settings.ChunkOverlapSeconds)
+	combinedText := ""
+	combinedDiagnostics := &Diagnostics{}
+	for offset := 0.0; offset < duration; offset += chunkSeconds {
+		chunkDuration := math.Min(chunkSeconds+overlapSeconds, duration-offset)
+		chunkPath, cleanup, err := temporaryWAV(tempDir, ".asr-long-form-chunk-*.wav")
+		if err != nil {
+			return "", nil, err
+		}
+		if err := extractASRWAVRange(ctx, r.opts, wavPath, chunkPath, offset, chunkDuration); err != nil {
+			cleanup()
+			return "", nil, err
+		}
+		chunkText, chunkDiagnostics, err := r.inferLocked(ctx, chunkPath)
+		cleanup()
+		if err != nil {
+			return "", nil, fmt.Errorf("transcribe long-form chunk at %.3fs: %w", offset, err)
+		}
+		chunkText, removed := stripWhisperTerminalHallucinations(strings.TrimSpace(chunkText))
+		if chunkDiagnostics == nil {
+			chunkDiagnostics = &Diagnostics{}
+		}
+		chunkDiagnostics.RemovedTerminalHallucinations = append(chunkDiagnostics.RemovedTerminalHallucinations, removed...)
+		appendWhisperDiagnostics(combinedDiagnostics, chunkDiagnostics)
+		combinedText = mergeTranscriptOverlap(combinedText, chunkText)
+	}
+	return strings.TrimSpace(combinedText), combinedDiagnostics, nil
+}
+
+func mergeTranscriptOverlap(existing, next string) string {
+	existing = strings.TrimSpace(existing)
+	next = strings.TrimSpace(next)
+	if existing == "" {
+		return next
+	}
+	if next == "" {
+		return existing
+	}
+	existingWords := strings.Fields(existing)
+	nextWords := strings.Fields(next)
+	limit := min(40, len(existingWords), len(nextWords))
+	overlap := 0
+	for count := limit; count >= 2; count-- {
+		matched := true
+		for index := 0; index < count; index++ {
+			left := normalizeMergeWord(existingWords[len(existingWords)-count+index])
+			right := normalizeMergeWord(nextWords[index])
+			if left == "" || left != right {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			overlap = count
+			break
+		}
+	}
+	remaining := strings.Join(nextWords[overlap:], " ")
+	if remaining == "" {
+		return existing
+	}
+	return existing + "\n " + remaining
+}
+
+func normalizeMergeWord(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, value)
+}
+
+func appendWhisperDiagnostics(target, source *Diagnostics) {
+	if target == nil || source == nil {
+		return
+	}
+	previousSegments := target.Segments
+	totalSegments := previousSegments + source.Segments
+	if totalSegments > 0 {
+		target.MeanAverageLogProb = (target.MeanAverageLogProb*float64(previousSegments) + source.MeanAverageLogProb*float64(source.Segments)) / float64(totalSegments)
+		target.MeanNoSpeechProb = (target.MeanNoSpeechProb*float64(previousSegments) + source.MeanNoSpeechProb*float64(source.Segments)) / float64(totalSegments)
+	}
+	if previousSegments == 0 || (source.Segments > 0 && source.MinimumAverageLogProb < target.MinimumAverageLogProb) {
+		target.MinimumAverageLogProb = source.MinimumAverageLogProb
+	}
+	if source.MaximumNoSpeechProb > target.MaximumNoSpeechProb {
+		target.MaximumNoSpeechProb = source.MaximumNoSpeechProb
+	}
+	target.Segments = totalSegments
+	target.RemovedTerminalHallucinations = append(target.RemovedTerminalHallucinations, source.RemovedTerminalHallucinations...)
+}
+
+var leadingSpeechPattern = regexp.MustCompile(`(?m)^Speech segment \d+: start = ([0-9]+(?:\.[0-9]+)?),`)
+
+func prepareLeadingSpeechWAV(ctx context.Context, opts Options, wavPath, tempDir string) (string, float64, func(), error) {
+	duration := wavPCM16MonoDuration(fileSize(wavPath))
+	if duration <= 0 {
+		return "", 0, func() {}, fmt.Errorf("leading-speech trim received empty audio")
+	}
+	settings := opts.WhisperLongForm.normalized()
+	window := float64(settings.ScanWindowSeconds)
+	step := float64(settings.ScanWindowSeconds - settings.ScanOverlapSeconds)
+	for offset := 0.0; offset < duration; offset += step {
+		windowDuration := math.Min(window, duration-offset)
+		chunkPath, chunkCleanup, err := temporaryWAV(tempDir, ".asr-leading-window-*.wav")
+		if err != nil {
+			return "", 0, func() {}, err
+		}
+		if err := extractASRWAVRange(ctx, opts, wavPath, chunkPath, offset, windowDuration); err != nil {
+			chunkCleanup()
+			return "", 0, func() {}, err
+		}
+		localStart, found, err := runLeadingSpeechProbe(ctx, opts, chunkPath)
+		chunkCleanup()
+		if err != nil {
+			return "", 0, func() {}, err
+		}
+		if found {
+			trimOffset := math.Max(0, offset+localStart-float64(settings.LeadInMS)/1000)
+			if trimOffset < 0.001 {
+				return wavPath, 0, func() {}, nil
+			}
+			trimmedPath, cleanup, err := temporaryWAV(tempDir, ".asr-leading-trimmed-*.wav")
+			if err != nil {
+				return "", 0, func() {}, err
+			}
+			if err := extractASRWAVRange(ctx, opts, wavPath, trimmedPath, trimOffset, duration-trimOffset); err != nil {
+				cleanup()
+				return "", 0, func() {}, err
+			}
+			return trimmedPath, trimOffset, cleanup, nil
+		}
+		if offset+windowDuration >= duration {
+			break
+		}
+	}
+	return "", 0, func() {}, fmt.Errorf("leading-speech trim found no speech in %.3fs", duration)
+}
+
+func temporaryWAV(dir, pattern string) (string, func(), error) {
+	file, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create temporary ASR wav: %w", err)
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close temporary ASR wav: %w", err)
+	}
+	return path, cleanup, nil
+}
+
+func extractASRWAVRange(ctx context.Context, opts Options, inputPath, outputPath string, offset, duration float64) error {
+	ffmpegCommand := strings.TrimSpace(opts.FFmpegCommand)
+	if ffmpegCommand == "" {
+		ffmpegCommand = DefaultFFmpegCommand
+	}
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-ss", strconv.FormatFloat(offset, 'f', 3, 64),
+		"-t", strconv.FormatFloat(duration, 'f', 3, 64),
+		"-i", inputPath,
+		"-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
+		outputPath,
+	}
+	if output, err := exec.CommandContext(ctx, ffmpegCommand, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("prepare ASR audio range: %w: %s", err, trimDetail(string(output)))
+	}
+	return nil
+}
+
+func runLeadingSpeechProbe(ctx context.Context, opts Options, wavPath string) (float64, bool, error) {
+	settings := opts.WhisperLongForm.normalized()
+	args := whisperVADArgs(
+		opts.WhisperLongForm.ModelPath,
+		settings.Threshold,
+		settings.MinSilenceDurationMS,
+		settings.MinSpeechDurationMS,
+		settings.SpeechPadMS,
+		wavPath,
+	)
+	command := exec.CommandContext(ctx, opts.WhisperLongForm.command(opts), args...)
+	command.Env = commandEnvironment(opts.Environment)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return 0, false, fmt.Errorf("whisper leading-speech probe: %w: %s", err, trimDetail(string(output)))
+	}
+	return parseLeadingSpeechStart(string(output))
+}
+
+func parseLeadingSpeechStart(output string) (float64, bool, error) {
+	if strings.Contains(output, "Detected 0 speech segments:") {
+		return 0, false, nil
+	}
+	match := leadingSpeechPattern.FindStringSubmatch(output)
+	if len(match) != 2 {
+		return 0, false, fmt.Errorf("whisper leading-speech probe returned an unrecognized result: %s", trimDetail(output))
+	}
+	centiseconds, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse leading-speech timestamp %q: %w", match[1], err)
+	}
+	return centiseconds / 100, true, nil
 }
 
 func (r *WhisperServerRunner) startLocked(ctx context.Context) (time.Duration, error) {
@@ -359,16 +601,27 @@ func runWhisperSpeechGate(ctx context.Context, opts Options, wavPath string) (bo
 }
 
 func whisperSpeechGateArgs(opts Options, gate WhisperSpeechGateDescriptor, wavPath string) []string {
+	return whisperVADArgs(
+		opts.WhisperSpeechGate.ModelPath,
+		gate.Threshold,
+		gate.MinSilenceDurationMS,
+		gate.MinSpeechDurationMS,
+		gate.SpeechPadMS,
+		wavPath,
+	)
+}
+
+func whisperVADArgs(modelPath string, threshold float64, minSilenceDurationMS, minSpeechDurationMS, speechPadMS int, wavPath string) []string {
 	return []string{
 		"--no-prints",
-		"--vad-model", strings.TrimSpace(opts.WhisperSpeechGate.ModelPath),
-		"--vad-threshold", strconv.FormatFloat(gate.Threshold, 'f', -1, 64),
+		"--vad-model", strings.TrimSpace(modelPath),
+		"--vad-threshold", strconv.FormatFloat(threshold, 'f', -1, 64),
 		// whisper.cpp v1.9.1 accidentally assigns the min-silence value to
 		// min-speech. Sending min-speech second preserves both the intended
 		// gate behavior on v1.9.1 and the correct behavior after upstream fixes.
-		"--vad-min-silence-duration-ms", strconv.Itoa(gate.MinSilenceDurationMS),
-		"--vad-min-speech-duration-ms", strconv.Itoa(gate.MinSpeechDurationMS),
-		"--vad-speech-pad-ms", strconv.Itoa(gate.SpeechPadMS),
+		"--vad-min-silence-duration-ms", strconv.Itoa(minSilenceDurationMS),
+		"--vad-min-speech-duration-ms", strconv.Itoa(minSpeechDurationMS),
+		"--vad-speech-pad-ms", strconv.Itoa(speechPadMS),
 		"--file", wavPath,
 	}
 }
@@ -445,9 +698,12 @@ func mergeDiagnostics(target *Diagnostics, source *Diagnostics) {
 		return
 	}
 	gate := target.SpeechGatePassed
-	removed := target.RemovedTerminalHallucinations
+	leadingOffset := target.LeadingSpeechOffsetSeconds
+	removed := append([]string(nil), target.RemovedTerminalHallucinations...)
+	removed = append(removed, source.RemovedTerminalHallucinations...)
 	*target = *source
 	target.SpeechGatePassed = gate
+	target.LeadingSpeechOffsetSeconds = leadingOffset
 	target.RemovedTerminalHallucinations = removed
 }
 

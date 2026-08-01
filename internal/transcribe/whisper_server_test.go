@@ -146,6 +146,34 @@ func TestWhisperSpeechGateAppliesMinSpeechAfterMinSilence(t *testing.T) {
 	}
 }
 
+func TestParseLeadingSpeechStart(t *testing.T) {
+	start, found, err := parseLeadingSpeechStart("Detected 2 speech segments:\nSpeech segment 0: start = 17949.00, end = 18285.00\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || start != 179.49 {
+		t.Fatalf("start = %.3f, found = %t", start, found)
+	}
+	start, found, err = parseLeadingSpeechStart("Detected 0 speech segments:\n")
+	if err != nil || found || start != 0 {
+		t.Fatalf("silence result: start = %.3f, found = %t, err = %v", start, found, err)
+	}
+}
+
+func TestMergeTranscriptOverlapRemovesOnlyMatchingBoundary(t *testing.T) {
+	got := mergeTranscriptOverlap(
+		"Первый вопрос. Ответ начинается прямо здесь.",
+		"ответ начинается прямо здесь. Затем новый вопрос.",
+	)
+	if got != "Первый вопрос. Ответ начинается прямо здесь.\n Затем новый вопрос." {
+		t.Fatalf("merged transcript = %q", got)
+	}
+	got = mergeTranscriptOverlap("Одна фраза.", "Совсем другая фраза.")
+	if got != "Одна фраза.\n Совсем другая фраза." {
+		t.Fatalf("unrelated transcript = %q", got)
+	}
+}
+
 func TestStripWhisperTerminalHallucinationsIsConservative(t *testing.T) {
 	text := "Реальное содержание.\nСубтитры сделал DimaTorzok"
 	got, removed := stripWhisperTerminalHallucinations(text)

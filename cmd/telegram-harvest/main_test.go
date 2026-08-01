@@ -117,6 +117,48 @@ func TestRunTranscribeFileCheckCanSkipSpeechGateRuntime(t *testing.T) {
 	}
 }
 
+func TestRunTranscribeFileCheckCanUseTrustedLongFormWithoutWholeFileGate(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	whisperCommand := filepath.Join(binDir, "whisper-server")
+	gateCommand := filepath.Join(binDir, "whisper-vad-speech-segments")
+	ffmpegCommand := filepath.Join(binDir, "ffmpeg")
+	for _, path := range []string{whisperCommand, gateCommand, ffmpegCommand} {
+		mustWriteCLIFile(t, path, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	modelPath := filepath.Join(dir, transcribe.ProductionModelFile)
+	gateModelPath := filepath.Join(dir, transcribe.ProductionSpeechGateFile)
+	mustWriteCLIFile(t, modelPath, "model")
+	mustWriteCLIFile(t, gateModelPath, "gate")
+	env := map[string]string{
+		"TG_HARVEST_DAILY_WHISPER_COMMAND":                whisperCommand,
+		"TG_HARVEST_DAILY_WHISPER_MODEL_PATH":             modelPath,
+		"TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH": gateModelPath,
+		"TG_HARVEST_DAILY_FFMPEG_COMMAND":                 ffmpegCommand,
+	}
+	code, stdout, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--trusted-long-form"}, env)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	var response transcribeFileResponse
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, stdout)
+	}
+	if response.Backend.SpeechGate != nil || response.Backend.LongForm == nil {
+		t.Fatalf("unexpected backend: %#v", response.Backend)
+	}
+}
+
+func TestRunTranscribeFileRejectsConflictingTrustedModes(t *testing.T) {
+	code, _, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--assume-speech", "--trusted-long-form"}, nil)
+	if code != 1 || !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+}
+
 func TestRunTranscribeFileRejectsStudyProfile(t *testing.T) {
 	code, _, stderr := runCommand(t, []string{"--profile", "study", "transcribe-file", "--check"}, nil)
 	if code != 1 || !strings.Contains(stderr, "only for profile main") {

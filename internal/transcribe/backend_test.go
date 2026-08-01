@@ -122,6 +122,32 @@ func TestProductionWhisperProfileCanSkipOnlySpeechGate(t *testing.T) {
 	}
 }
 
+func TestProductionWhisperProfileCanTrimOnlyLeadingSilence(t *testing.T) {
+	opts := ProductionOptions(
+		"/runtime/bin/whisper-server",
+		ProductionModelFile,
+		ProductionSpeechGateFile,
+		"ffmpeg",
+		nil,
+	).WithTrustedLongForm()
+	if err := opts.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := opts.Descriptor()
+	if descriptor.SpeechGate != nil {
+		t.Fatalf("speech gate = %#v, want disabled", descriptor.SpeechGate)
+	}
+	if descriptor.LongForm == nil || descriptor.LongForm.Model != ProductionSpeechGateFile ||
+		descriptor.LongForm.ScanWindowSeconds != 300 || descriptor.LongForm.ScanOverlapSeconds != 10 ||
+		descriptor.LongForm.LeadInMS != 1000 || descriptor.LongForm.ChunkSeconds != 120 ||
+		descriptor.LongForm.ChunkOverlapSeconds != 1 {
+		t.Fatalf("long form = %#v", descriptor.LongForm)
+	}
+	if opts.WhisperLongForm.Command != "/runtime/bin/whisper-vad-speech-segments" {
+		t.Fatalf("leading command = %q", opts.WhisperLongForm.Command)
+	}
+}
+
 func TestProductionWhisperProfileRejectsDifferentModels(t *testing.T) {
 	opts := ProductionOptions(
 		"whisper-server",

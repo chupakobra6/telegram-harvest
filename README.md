@@ -208,9 +208,9 @@ bin/telegram-harvest --profile main transcribe-file \
   --output /absolute/path/transcript.txt
 ```
 
-Команда пишет plain UTF-8 transcript в `--output`, а в stdout — versioned JSON с backend descriptor, speech-gate result, Metal confirmation и timings. `transcribe-file --check` проверяет текущие runtime/model paths без обработки медиа. OBS Interview Pipeline использует этот вход, поэтому Whisper profile, VAD и post-filter обновляются только здесь, в `internal/transcribe`.
+Команда пишет plain UTF-8 transcript в `--output`, а в stdout — versioned JSON с backend descriptor, ASR diagnostics, Metal confirmation и timings. `transcribe-file --check` проверяет текущие runtime/model paths без обработки медиа. OBS Interview Pipeline использует этот вход, поэтому Whisper profile, VAD и post-filter обновляются только здесь, в `internal/transcribe`.
 
-Для доверенной записи, в которой речь гарантирована самим workflow, `--assume-speech` пропускает только whole-file Silero gate. Модель `large-v3-turbo-q5_0`, Metal, русский decode profile и terminal post-filter остаются теми же и по-прежнему принадлежат этому пакету. Обычные Telegram-команды этот флаг не используют и сохраняют Silero gate.
+Для короткой доверенной записи `--assume-speech` пропускает только whole-file Silero gate. Для длинной OBS-записи `--trusted-long-form` дополнительно находит начало первой речи короткими Silero-окнами и сбрасывает Whisper context между перекрывающимися чанками. Это предотвращает hallucinations на длинном тихом pre-roll и потерю последующего диалога. Модель `large-v3-turbo-q5_0`, Metal, русский decode profile и terminal post-filter остаются теми же и по-прежнему принадлежат этому пакету. Обычные Telegram-команды эти флаги не используют и сохраняют whole-file gate.
 
 Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; bounded chunk parallelism существует только внутри текущего файла. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 

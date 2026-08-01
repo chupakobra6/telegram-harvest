@@ -210,7 +210,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
-	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt [--assume-speech]  # local production ASR; profile main only")
+	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt [--assume-speech | --trusted-long-form]  # local production ASR; profile main only")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
 	fmt.Fprintln(out, "  me [--json]")
@@ -2004,6 +2004,8 @@ type transcribeFileResponse struct {
 	FFmpeg          time.Duration         `json:"ffmpeg"`
 	ModelColdStart  time.Duration         `json:"model_cold_start"`
 	SpeechGate      time.Duration         `json:"speech_gate"`
+	LongFormPrep    time.Duration         `json:"long_form_preparation"`
+	LeadingOffset   float64               `json:"leading_speech_offset_seconds,omitempty"`
 	Inference       time.Duration         `json:"inference"`
 	Total           time.Duration         `json:"total"`
 }
@@ -2015,6 +2017,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	outputPath := fs.String("output", "", "plain UTF-8 transcript output path")
 	check := fs.Bool("check", false, "validate the configured production ASR runtime and exit")
 	assumeSpeech := fs.Bool("assume-speech", false, "skip the whole-file speech gate for a trusted speech recording")
+	trustedLongForm := fs.Bool("trusted-long-form", false, "trim silent pre-roll and reset Whisper context across bounded chunks")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2029,7 +2032,12 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		defaults.FFmpegCommand,
 		nil,
 	)
-	if *assumeSpeech {
+	if *trustedLongForm && *assumeSpeech {
+		return fmt.Errorf("--trusted-long-form and --assume-speech are mutually exclusive")
+	}
+	if *trustedLongForm {
+		opts = opts.WithTrustedLongForm()
+	} else if *assumeSpeech {
 		opts = opts.WithoutSpeechGate()
 	}
 	if err := opts.ValidateRuntime(); err != nil {
@@ -2068,7 +2076,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	if err != nil {
 		return err
 	}
-	speechDetected := *assumeSpeech
+	speechDetected := *assumeSpeech || *trustedLongForm
 	if result.Diagnostics != nil && result.Diagnostics.SpeechGatePassed != nil {
 		speechDetected = *result.Diagnostics.SpeechGatePassed
 	}
@@ -2087,6 +2095,8 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		FFmpeg:          result.FFmpegDuration,
 		ModelColdStart:  result.ModelColdStartDuration,
 		SpeechGate:      result.SpeechGateDuration,
+		LongFormPrep:    result.LongFormPreparationDuration,
+		LeadingOffset:   result.LeadingSpeechOffset,
 		Inference:       inference,
 		Total:           result.TotalDuration,
 	})

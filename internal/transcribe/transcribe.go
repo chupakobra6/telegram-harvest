@@ -22,6 +22,7 @@ type Options struct {
 	WhisperThreads    int
 	WhisperDecode     WhisperDecodeOptions
 	WhisperSpeechGate WhisperSpeechGateOptions
+	WhisperLongForm   WhisperLongFormOptions
 	Language          string
 	Environment       map[string]string
 	FFmpegCommand     string
@@ -36,19 +37,21 @@ type ManagedRunner interface {
 }
 
 type Result struct {
-	Text                   string
-	Engine                 string
-	Backend                Descriptor
-	FFmpegDuration         time.Duration
-	ModelColdStartDuration time.Duration
-	ASRDuration            time.Duration
-	SpeechGateDuration     time.Duration
-	TotalDuration          time.Duration
-	InputBytes             int64
-	WAVBytes               int64
-	WAVDurationSeconds     float64
-	TranscriptBytes        int64
-	Diagnostics            *Diagnostics
+	Text                        string
+	Engine                      string
+	Backend                     Descriptor
+	FFmpegDuration              time.Duration
+	ModelColdStartDuration      time.Duration
+	ASRDuration                 time.Duration
+	SpeechGateDuration          time.Duration
+	LongFormPreparationDuration time.Duration
+	LeadingSpeechOffset         float64
+	TotalDuration               time.Duration
+	InputBytes                  int64
+	WAVBytes                    int64
+	WAVDurationSeconds          float64
+	TranscriptBytes             int64
+	Diagnostics                 *Diagnostics
 }
 
 func NewManagedRunner(opts Options) ManagedRunner {

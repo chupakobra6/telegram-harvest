@@ -35,6 +35,7 @@ type Descriptor struct {
 	Threads      int                          `json:"threads,omitempty"`
 	Decode       *WhisperDecodeDescriptor     `json:"decode,omitempty"`
 	SpeechGate   *WhisperSpeechGateDescriptor `json:"speech_gate,omitempty"`
+	LongForm     *WhisperLongFormDescriptor   `json:"trusted_long_form,omitempty"`
 	PostFilter   string                       `json:"post_filter,omitempty"`
 }
 
@@ -83,6 +84,37 @@ type WhisperSpeechGateDescriptor struct {
 	SpeechPadMS          int     `json:"speech_pad_ms"`
 }
 
+// WhisperLongFormOptions finds the first speech with short Silero windows and
+// transcribes bounded overlapping chunks with one long-lived Whisper model.
+type WhisperLongFormOptions struct {
+	Enabled              bool
+	Command              string
+	ModelPath            string
+	Threshold            *float64
+	MinSpeechDurationMS  *int
+	MinSilenceDurationMS *int
+	SpeechPadMS          *int
+	ScanWindowSeconds    int
+	ScanOverlapSeconds   int
+	LeadInMS             int
+	ChunkSeconds         int
+	ChunkOverlapSeconds  int
+}
+
+type WhisperLongFormDescriptor struct {
+	Enabled              bool    `json:"enabled"`
+	Model                string  `json:"model"`
+	Threshold            float64 `json:"threshold"`
+	MinSpeechDurationMS  int     `json:"min_speech_duration_ms"`
+	MinSilenceDurationMS int     `json:"min_silence_duration_ms"`
+	SpeechPadMS          int     `json:"speech_pad_ms"`
+	ScanWindowSeconds    int     `json:"scan_window_seconds"`
+	ScanOverlapSeconds   int     `json:"scan_overlap_seconds"`
+	LeadInMS             int     `json:"lead_in_ms"`
+	ChunkSeconds         int     `json:"chunk_seconds"`
+	ChunkOverlapSeconds  int     `json:"chunk_overlap_seconds"`
+}
+
 // Diagnostics are backend confidence signals. They are evidence for benchmark
 // analysis, not a generic automatic rejection rule.
 type Diagnostics struct {
@@ -92,6 +124,7 @@ type Diagnostics struct {
 	MeanNoSpeechProb              float64  `json:"mean_no_speech_probability,omitempty"`
 	MaximumNoSpeechProb           float64  `json:"maximum_no_speech_probability,omitempty"`
 	SpeechGatePassed              *bool    `json:"speech_gate_passed,omitempty"`
+	LeadingSpeechOffsetSeconds    float64  `json:"leading_speech_offset_seconds,omitempty"`
 	RemovedTerminalHallucinations []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
@@ -120,6 +153,29 @@ func (o Options) WithoutSpeechGate() Options {
 	return o
 }
 
+// WithTrustedLongForm reuses canonical Silero only to find the first speech,
+// disables the whole-file gate, and resets Whisper context between chunks.
+func (o Options) WithTrustedLongForm() Options {
+	gate := o.WhisperSpeechGate
+	normalized := gate.normalized()
+	o.WhisperLongForm = WhisperLongFormOptions{
+		Enabled:              true,
+		Command:              gate.command(o),
+		ModelPath:            gate.ModelPath,
+		Threshold:            floatPointer(normalized.Threshold),
+		MinSpeechDurationMS:  intPointer(normalized.MinSpeechDurationMS),
+		MinSilenceDurationMS: intPointer(normalized.MinSilenceDurationMS),
+		SpeechPadMS:          intPointer(normalized.SpeechPadMS),
+		ScanWindowSeconds:    300,
+		ScanOverlapSeconds:   10,
+		LeadInMS:             1000,
+		ChunkSeconds:         120,
+		ChunkOverlapSeconds:  1,
+	}
+	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
+	return o
+}
+
 func (o Options) Descriptor() Descriptor {
 	decode := o.WhisperDecode.normalized()
 	descriptor := Descriptor{
@@ -136,6 +192,10 @@ func (o Options) Descriptor() Descriptor {
 		gate := o.WhisperSpeechGate.normalized()
 		descriptor.SpeechGate = &gate
 	}
+	if o.WhisperLongForm.Enabled {
+		trim := o.WhisperLongForm.normalized()
+		descriptor.LongForm = &trim
+	}
 	return descriptor
 }
 
@@ -150,6 +210,12 @@ func (o Options) CacheIdentity() string {
 		gateCommand = cacheModelIdentity(o.WhisperSpeechGate.command(o))
 		gateModel = cacheModelIdentity(o.WhisperSpeechGate.ModelPath)
 	}
+	trimCommand := ""
+	trimModel := ""
+	if o.WhisperLongForm.Enabled {
+		trimCommand = cacheModelIdentity(o.WhisperLongForm.command(o))
+		trimModel = cacheModelIdentity(o.WhisperLongForm.ModelPath)
+	}
 	parts := []string{
 		"v2",
 		string(descriptorJSON),
@@ -158,6 +224,8 @@ func (o Options) CacheIdentity() string {
 		"",
 		gateCommand,
 		gateModel,
+		trimCommand,
+		trimModel,
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:16])
@@ -179,8 +247,14 @@ func (o Options) Validate() error {
 	if err := o.WhisperSpeechGate.validate(o); err != nil {
 		return err
 	}
+	if err := o.WhisperLongForm.validate(o); err != nil {
+		return err
+	}
 	if o.productionProfile && o.WhisperSpeechGate.Enabled && filepath.Base(filepath.Clean(o.WhisperSpeechGate.ModelPath)) != ProductionSpeechGateFile {
 		return fmt.Errorf("production whisper speech-gate model must be %s", ProductionSpeechGateFile)
+	}
+	if o.productionProfile && o.WhisperLongForm.Enabled && filepath.Base(filepath.Clean(o.WhisperLongForm.ModelPath)) != ProductionSpeechGateFile {
+		return fmt.Errorf("production whisper trusted long-form VAD model must be %s", ProductionSpeechGateFile)
 	}
 	return nil
 }
@@ -198,6 +272,9 @@ func (o Options) ValidateRuntime() error {
 	if o.WhisperSpeechGate.Enabled {
 		commands["whisper.cpp speech gate"] = o.WhisperSpeechGate.command(o)
 	}
+	if o.WhisperLongForm.Enabled {
+		commands["whisper.cpp trusted long-form VAD"] = o.WhisperLongForm.command(o)
+	}
 	for name, command := range commands {
 		if strings.TrimSpace(command) == "" {
 			return fmt.Errorf("%s command is empty", name)
@@ -209,6 +286,9 @@ func (o Options) ValidateRuntime() error {
 	models := map[string]string{"whisper.cpp model": o.WhisperModelPath}
 	if o.WhisperSpeechGate.Enabled {
 		models["whisper.cpp speech gate"] = o.WhisperSpeechGate.ModelPath
+	}
+	if o.WhisperLongForm.Enabled {
+		models["whisper.cpp trusted long-form VAD"] = o.WhisperLongForm.ModelPath
 	}
 	for name, path := range models {
 		info, err := os.Stat(path)
@@ -313,6 +393,69 @@ func (o WhisperSpeechGateOptions) command(parent Options) string {
 	}
 	return filepath.Join(filepath.Dir(server), "whisper-vad-speech-segments")
 }
+
+func (o WhisperLongFormOptions) normalized() WhisperLongFormDescriptor {
+	return WhisperLongFormDescriptor{
+		Enabled:              o.Enabled,
+		Model:                stableModelIdentity(o.ModelPath),
+		Threshold:            floatValue(o.Threshold, 0.5),
+		MinSpeechDurationMS:  intValue(o.MinSpeechDurationMS, 250),
+		MinSilenceDurationMS: intValue(o.MinSilenceDurationMS, 100),
+		SpeechPadMS:          intValue(o.SpeechPadMS, 30),
+		ScanWindowSeconds:    positiveOr(o.ScanWindowSeconds, 300),
+		ScanOverlapSeconds:   positiveOr(o.ScanOverlapSeconds, 10),
+		LeadInMS:             positiveOr(o.LeadInMS, 1000),
+		ChunkSeconds:         positiveOr(o.ChunkSeconds, 120),
+		ChunkOverlapSeconds:  positiveOr(o.ChunkOverlapSeconds, 1),
+	}
+}
+
+func (o WhisperLongFormOptions) validate(parent Options) error {
+	if !o.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(o.command(parent)) == "" {
+		return fmt.Errorf("whisper trusted long-form VAD command is empty")
+	}
+	if strings.TrimSpace(o.ModelPath) == "" {
+		return fmt.Errorf("whisper trusted long-form VAD model is empty")
+	}
+	value := o.normalized()
+	if value.Threshold < 0 || value.Threshold > 1 {
+		return fmt.Errorf("whisper trusted long-form VAD threshold must be between 0 and 1")
+	}
+	if value.MinSpeechDurationMS < 0 || value.MinSilenceDurationMS < 0 || value.SpeechPadMS < 0 || value.LeadInMS < 0 {
+		return fmt.Errorf("whisper trusted long-form durations must be non-negative")
+	}
+	if value.ScanWindowSeconds <= value.ScanOverlapSeconds {
+		return fmt.Errorf("whisper trusted long-form scan window must exceed overlap")
+	}
+	if value.ChunkSeconds <= value.ChunkOverlapSeconds {
+		return fmt.Errorf("whisper trusted long-form chunk must exceed overlap")
+	}
+	return nil
+}
+
+func (o WhisperLongFormOptions) command(parent Options) string {
+	if value := strings.TrimSpace(o.Command); value != "" {
+		return value
+	}
+	server := strings.TrimSpace(parent.WhisperCommand)
+	if server == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(server), "whisper-vad-speech-segments")
+}
+
+func positiveOr(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func floatPointer(value float64) *float64 { return &value }
+func intPointer(value int) *int           { return &value }
 
 func normalizedThreads(threads int) int {
 	if threads > 0 {
