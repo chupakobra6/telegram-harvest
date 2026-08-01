@@ -200,6 +200,16 @@ Downloader выбирает chunk concurrency автоматически по р
 
 Единственный production-профиль — `whisper.cpp large-v3-turbo q5_0 + Metal`, русский язык, четыре CPU helper threads, `beam_size=5` и отдельный whole-file Silero speech gate. Эти параметры зафиксированы в коде. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
 
+Тот же production-профиль доступен локальным автоматизациям без Telegram RPC:
+
+```bash
+bin/telegram-harvest --profile main transcribe-file \
+  --input /absolute/path/recording.mp4 \
+  --output /absolute/path/transcript.txt
+```
+
+Команда пишет plain UTF-8 transcript в `--output`, а в stdout — versioned JSON с backend descriptor, speech-gate result, Metal confirmation и timings. `transcribe-file --check` проверяет текущие runtime/model paths без обработки медиа. OBS Interview Pipeline использует этот вход, поэтому Whisper profile, VAD и post-filter обновляются только здесь, в `internal/transcribe`.
+
 Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; bounded chunk parallelism существует только внутри текущего файла. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 
 Несколько Whisper-процессов не запускаются: на Apple Silicon они конкурируют за один GPU и unified memory, а измеренный production workload этого не требует. Transcript cache включает runtime/model/quantization, язык, threads, decode, gate и post-filter; готовый transcript публикуется через `temp → fsync/close → rename`. Cache проверяется до media download, поэтому повторный catch-up не запускает ASR для уже известных вложений.

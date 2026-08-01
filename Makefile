@@ -13,7 +13,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup build fmt fmt-check test check audit doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build fmt fmt-check test check audit doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -28,6 +28,7 @@ help:
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
 	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
+	@printf "  make transcribe-file PROFILE=main # local production ASR; INPUT=... OUTPUT=...\\n"
 	@printf "  make chats PROFILE=study # list dialogs; pass QUERY='вшэ' to filter\\n"
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
@@ -71,7 +72,7 @@ audit:
 	go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 	go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
-doctor login daily daily-catchup daily-download-media chats topics dump sync download-media compact agent-view: $(CLI)
+doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync download-media compact agent-view: $(CLI)
 
 doctor:
 	$(REQUIRE_PROFILE)
@@ -92,6 +93,12 @@ daily-catchup:
 daily-download-media:
 	$(REQUIRE_PROFILE)
 	$(CLI) $(PROFILE_ARG) daily-download-media --chat "$(CHAT)" --message-id "$(MESSAGE_ID)" $(if $(strip $(INDEX)),--index "$(INDEX)",) $(if $(strip $(OUT_DIR)),--out-dir "$(OUT_DIR)",) $(if $(strip $(OVERWRITE)),--overwrite,) $(if $(strip $(JSON)),--json,)
+
+transcribe-file:
+	$(REQUIRE_PROFILE)
+	@test -n "$(strip $(INPUT))" || { printf "INPUT is required\\n"; exit 2; }
+	@test -n "$(strip $(OUTPUT))" || { printf "OUTPUT is required\\n"; exit 2; }
+	$(CLI) $(PROFILE_ARG) transcribe-file --input "$(INPUT)" --output "$(OUTPUT)"
 
 chats:
 	$(REQUIRE_PROFILE)

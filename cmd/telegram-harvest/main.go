@@ -65,6 +65,17 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	}
 	cfg = cfg.WithRoot(projectRoot)
 	includeDailyRuntime := cfg.Mode == config.ModeMain
+	if command == "transcribe-file" {
+		if cfg.Mode != config.ModeMain {
+			return printError(stderr, 1, fmt.Errorf("transcribe-file is supported only for profile main"))
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if err := runTranscribeFile(ctx, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	}
 	client := mtproto.New(cfg)
 
 	switch command {
@@ -146,7 +157,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 func knownCommand(command string) bool {
 	switch command {
 	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
-		"me", "chats", "topics", "dump", "download-media", "sync", "compact", "agent-view":
+		"me", "chats", "topics", "dump", "download-media", "sync", "compact", "agent-view", "transcribe-file":
 		return true
 	default:
 		return false
@@ -190,7 +201,7 @@ func loadProfileConfig(profile string) (config.Config, error) {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-harvest --profile main|study <doctor|print-config|login|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest --profile main|study <doctor|print-config|login|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Telegram operations are read-only; commands may write local sessions, state, and exports")
 	fmt.Fprintln(out, "  --profile main|study  # required account profile")
@@ -199,6 +210,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
+	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt  # local production ASR; profile main only")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
 	fmt.Fprintln(out, "  me [--json]")
@@ -1976,6 +1988,108 @@ func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 		opts.FFmpegCommand,
 		opts.StageTiming,
 	)
+}
+
+const transcribeFileContractVersion = 1
+
+type transcribeFileResponse struct {
+	ContractVersion int                   `json:"contract_version"`
+	Status          string                `json:"status"`
+	Text            string                `json:"text,omitempty"`
+	SpeechDetected  bool                  `json:"speech_detected"`
+	MetalConfirmed  bool                  `json:"metal_confirmed"`
+	Engine          string                `json:"engine"`
+	Backend         transcribe.Descriptor `json:"backend"`
+	FFmpeg          time.Duration         `json:"ffmpeg"`
+	ModelColdStart  time.Duration         `json:"model_cold_start"`
+	SpeechGate      time.Duration         `json:"speech_gate"`
+	Inference       time.Duration         `json:"inference"`
+	Total           time.Duration         `json:"total"`
+}
+
+func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("transcribe-file", flag.ContinueOnError)
+	fs.SetOutput(out)
+	inputPath := fs.String("input", "", "local audio or video input path")
+	outputPath := fs.String("output", "", "plain UTF-8 transcript output path")
+	check := fs.Bool("check", false, "validate the configured production ASR runtime and exit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("transcribe-file takes no positional arguments")
+	}
+	defaults := dailyRuntimeDefaults()
+	opts := transcribe.ProductionOptions(
+		defaults.WhisperCommand,
+		defaults.WhisperModelPath,
+		defaults.WhisperGateFilePath,
+		defaults.FFmpegCommand,
+		nil,
+	)
+	if err := opts.ValidateRuntime(); err != nil {
+		return fmt.Errorf("production ASR runtime: %w", err)
+	}
+	if *check {
+		return writeTranscribeFileResponse(out, transcribeFileResponse{
+			ContractVersion: transcribeFileContractVersion,
+			Status:          "ok",
+			Engine:          opts.EngineName(),
+			Backend:         opts.Descriptor(),
+		})
+	}
+	if strings.TrimSpace(*inputPath) == "" || strings.TrimSpace(*outputPath) == "" {
+		return fmt.Errorf("transcribe-file requires --input and --output")
+	}
+	inputAbs, err := filepath.Abs(*inputPath)
+	if err != nil {
+		return fmt.Errorf("resolve transcribe input: %w", err)
+	}
+	outputAbs, err := filepath.Abs(*outputPath)
+	if err != nil {
+		return fmt.Errorf("resolve transcript output: %w", err)
+	}
+	if samePath(inputAbs, outputAbs) {
+		return fmt.Errorf("transcript output must differ from media input")
+	}
+	info, err := os.Stat(inputAbs)
+	if err != nil {
+		return fmt.Errorf("inspect transcribe input: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("transcribe input must be a non-empty regular file")
+	}
+	result, err := transcribe.RunDetailed(ctx, opts, inputAbs, outputAbs)
+	if err != nil {
+		return err
+	}
+	speechDetected := result.Diagnostics != nil &&
+		result.Diagnostics.SpeechGatePassed != nil &&
+		*result.Diagnostics.SpeechGatePassed
+	inference := result.ASRDuration - result.SpeechGateDuration
+	if inference < 0 {
+		inference = 0
+	}
+	return writeTranscribeFileResponse(out, transcribeFileResponse{
+		ContractVersion: transcribeFileContractVersion,
+		Status:          "ok",
+		Text:            result.Text,
+		SpeechDetected:  speechDetected,
+		MetalConfirmed:  speechDetected,
+		Engine:          result.Engine,
+		Backend:         result.Backend,
+		FFmpeg:          result.FFmpegDuration,
+		ModelColdStart:  result.ModelColdStartDuration,
+		SpeechGate:      result.SpeechGateDuration,
+		Inference:       inference,
+		Total:           result.TotalDuration,
+	})
+}
+
+func writeTranscribeFileResponse(out io.Writer, value transcribeFileResponse) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
 }
 
 type dailyRuntimeConfig struct {

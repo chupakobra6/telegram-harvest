@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -166,6 +167,39 @@ func (o Options) Validate() error {
 	}
 	if o.productionProfile && filepath.Base(filepath.Clean(o.WhisperSpeechGate.ModelPath)) != ProductionSpeechGateFile {
 		return fmt.Errorf("production whisper speech-gate model must be %s", ProductionSpeechGateFile)
+	}
+	return nil
+}
+
+// ValidateRuntime verifies that the production profile's local dependencies
+// are present before a caller starts an expensive media pipeline.
+func (o Options) ValidateRuntime() error {
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	for name, command := range map[string]string{
+		"ffmpeg":                  o.FFmpegCommand,
+		"whisper.cpp server":      o.WhisperCommand,
+		"whisper.cpp speech gate": o.WhisperSpeechGate.command(o),
+	} {
+		if strings.TrimSpace(command) == "" {
+			return fmt.Errorf("%s command is empty", name)
+		}
+		if _, err := exec.LookPath(command); err != nil {
+			return fmt.Errorf("%s command is unavailable: %s", name, command)
+		}
+	}
+	for name, path := range map[string]string{
+		"whisper.cpp model":       o.WhisperModelPath,
+		"whisper.cpp speech gate": o.WhisperSpeechGate.ModelPath,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("%s is unavailable: %s: %w", name, path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file: %s", name, path)
+		}
 	}
 	return nil
 }
