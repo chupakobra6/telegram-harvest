@@ -62,8 +62,9 @@ type mediaPipeline struct {
 	opts   harvest.HistoryOptions
 	cfg    mediaPipelineConfig
 
-	jobs chan mediaPipelineJob
-	wg   sync.WaitGroup
+	jobs        chan mediaPipelineJob
+	wg          sync.WaitGroup
+	jobsPending sync.WaitGroup
 
 	mu                sync.Mutex
 	closing           bool
@@ -201,6 +202,7 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 	}
 	p.jobsSubmitted++
 	p.mu.Unlock()
+	p.jobsPending.Add(1)
 
 	select {
 	case p.jobs <- job:
@@ -211,6 +213,7 @@ func (p *mediaPipeline) enqueue(job mediaPipelineJob) error {
 		p.mu.Unlock()
 		return nil
 	case <-p.ctx.Done():
+		p.jobsPending.Done()
 		p.mu.Lock()
 		p.jobsSubmitted--
 		delete(p.claimed, job.Key)
@@ -318,6 +321,7 @@ func (p *mediaPipeline) processJob(worker *mediaPipelineWorker, job mediaPipelin
 }
 
 func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPipelineResult) {
+	defer p.jobsPending.Done()
 	audioSeconds := 0.0
 	if result.Err == nil {
 		audioSeconds = result.Result.WAVDurationSeconds
@@ -358,7 +362,25 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 	p.completedAt = p.cfg.Now()
 }
 
-func (p *mediaPipeline) waitAndApply(records []harvest.MessageRecord) error {
+func (p *mediaPipeline) flushAndApply(records []harvest.MessageRecord) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	closing := p.closing
+	p.mu.Unlock()
+	if closing {
+		return fmt.Errorf("media pipeline is closed")
+	}
+	p.jobsPending.Wait()
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	p.applyResults(records)
+	return nil
+}
+
+func (p *mediaPipeline) finishAndApply(records []harvest.MessageRecord) error {
 	if p == nil {
 		return nil
 	}
@@ -376,14 +398,46 @@ func (p *mediaPipeline) waitAndApply(records []harvest.MessageRecord) error {
 	p.cancel()
 
 	p.mu.Lock()
-	results := make(map[string]mediaPipelineResult, len(p.results))
 	var closeErrors []error
 	for key, result := range p.results {
 		if strings.HasPrefix(key, "__worker_close_") {
 			closeErrors = append(closeErrors, result.Err)
+		}
+	}
+	p.mu.Unlock()
+	p.applyResults(records)
+
+	metrics := p.metrics()
+	stages.ObserveAudioDuration(p.opts.AudioDurationTiming, metrics.AudioSeconds)
+	if p.opts.MediaPipelineTiming != nil {
+		p.opts.MediaPipelineTiming(metrics)
+	}
+	return errors.Join(closeErrors...)
+}
+
+func (p *mediaPipeline) applyResults(records []harvest.MessageRecord) {
+	keys := make(map[string]struct{})
+	for recordIndex := range records {
+		for attachmentIndex := range records[recordIndex].Attachments {
+			key := records[recordIndex].Attachments[attachmentIndex].TranscriptPath
+			if strings.TrimSpace(key) != "" {
+				keys[key] = struct{}{}
+			}
+		}
+	}
+	applyAll := records == nil
+	p.mu.Lock()
+	results := make(map[string]mediaPipelineResult, len(keys))
+	for key, result := range p.results {
+		if strings.HasPrefix(key, "__worker_close_") {
+			continue
+		}
+		if _, ok := keys[key]; !applyAll && !ok {
 			continue
 		}
 		results[key] = result
+		delete(p.results, key)
+		delete(p.claimed, key)
 	}
 	p.mu.Unlock()
 
@@ -428,12 +482,6 @@ func (p *mediaPipeline) waitAndApply(records []harvest.MessageRecord) error {
 			}
 		}
 	}
-	metrics := p.metrics()
-	stages.ObserveAudioDuration(p.opts.AudioDurationTiming, metrics.AudioSeconds)
-	if p.opts.MediaPipelineTiming != nil {
-		p.opts.MediaPipelineTiming(metrics)
-	}
-	return errors.Join(closeErrors...)
 }
 
 func (p *mediaPipeline) abort() {
@@ -610,6 +658,50 @@ func runTranscriberDetailedAtomic(
 		}
 	}
 	return result, nil
+}
+
+func runTranscriberDetailed(
+	ctx context.Context,
+	runner harvest.Transcriber,
+	opts transcribe.Options,
+	inputPath string,
+	outputPath string,
+) (transcribe.Result, error) {
+	if runner == nil {
+		return transcribe.RunDetailed(ctx, opts, inputPath, outputPath)
+	}
+	if detailed, ok := runner.(interface {
+		RunDetailed(context.Context, string, string) (transcribe.Result, error)
+	}); ok {
+		return detailed.RunDetailed(ctx, inputPath, outputPath)
+	}
+	text, err := runner.Run(ctx, inputPath, outputPath)
+	if err != nil {
+		return transcribe.Result{}, err
+	}
+	return transcribe.Result{
+		Text:            text,
+		Engine:          "custom",
+		TranscriptBytes: int64(len([]byte(text))),
+	}, nil
+}
+
+func transcriptErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := oneLine(err.Error())
+	lower := strings.ToLower(detail)
+	if strings.Contains(lower, "output file does not contain any stream") ||
+		strings.Contains(lower, "does not contain any stream") ||
+		strings.Contains(lower, "stream map") && strings.Contains(lower, "matches no streams") {
+		return "skipped: media has no audio stream"
+	}
+	return detail
+}
+
+func isTranscriptSkipError(err error) bool {
+	return strings.HasPrefix(transcriptErrorMessage(err), "skipped: ")
 }
 
 func sampleMediaPipelineResources() mediaPipelineResourceSnapshot {

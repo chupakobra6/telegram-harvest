@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ type pipelineRunnerHarness struct {
 	active        *atomic.Int32
 	peak          *atomic.Int32
 	calls         *atomic.Int32
+	closes        *atomic.Int32
 }
 
 func (r *pipelineRunnerHarness) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
@@ -82,7 +84,12 @@ func (r *pipelineRunnerHarness) RunDetailed(ctx context.Context, inputPath strin
 	}, nil
 }
 
-func (r *pipelineRunnerHarness) Close() error { return nil }
+func (r *pipelineRunnerHarness) Close() error {
+	if r.closes != nil {
+		r.closes.Add(1)
+	}
+	return nil
+}
 func (r *pipelineRunnerHarness) ProcessID() int {
 	return 0
 }
@@ -91,6 +98,7 @@ type pipelineHarness struct {
 	active atomic.Int32
 	peak   atomic.Int32
 	calls  atomic.Int32
+	closes atomic.Int32
 }
 
 type pipelineErrorRunner struct {
@@ -112,7 +120,103 @@ func (h *pipelineHarness) factory(delay time.Duration, audio float64, asr time.D
 			active:        &h.active,
 			peak:          &h.peak,
 			calls:         &h.calls,
+			closes:        &h.closes,
 		}
+	}
+}
+
+func TestMediaPipelineFlushAppliesBatchWithoutClosingWorker(t *testing.T) {
+	dir := t.TempDir()
+	harness := &pipelineHarness{}
+	var events []harvest.ASRLogEvent
+	pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{
+		ASRLog: func(event harvest.ASRLogEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	}, mediaPipelineConfig{
+		QueueCapacity:   2,
+		RunnerFactory:   harness.factory(0, 3, time.Second, false, nil),
+		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
+		SampleRSS:       func(int) uint64 { return 0 },
+		Now:             time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeBatch := func(name string, messageID int) ([]harvest.MessageRecord, mediaPipelineJob) {
+		input := filepath.Join(dir, name+".ogg")
+		if err := os.WriteFile(input, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		transcript := filepath.Join(dir, name+".txt")
+		record := harvest.MessageRecord{
+			Date:      time.Unix(int64(messageID), 0),
+			Chat:      harvest.Chat{ID: 1},
+			MessageID: messageID,
+			Attachments: []harvest.Attachment{{
+				Kind:           "voice",
+				TranscriptPath: transcript,
+			}},
+		}
+		if !pipeline.claim(transcript) {
+			t.Fatalf("claim %s failed", transcript)
+		}
+		return []harvest.MessageRecord{record}, mediaPipelineJob{
+			Key:             transcript,
+			InputPath:       input,
+			TranscriptPath:  transcript,
+			Record:          record,
+			Attachment:      record.Attachments[0],
+			AttachmentIndex: 0,
+		}
+	}
+
+	firstRecords, firstJob := makeBatch("first", 1)
+	if err := pipeline.enqueue(firstJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.flushAndApply(firstRecords); err != nil {
+		t.Fatal(err)
+	}
+	if got := firstRecords[0].Attachments[0].Transcript; got != "first" {
+		t.Fatalf("first transcript = %q", got)
+	}
+	if harness.closes.Load() != 0 {
+		t.Fatalf("worker closed during flush: %d", harness.closes.Load())
+	}
+	if len(events) != 2 {
+		t.Fatalf("events after flush = %d, want 2", len(events))
+	}
+	pipeline.mu.Lock()
+	pendingResults := len(pipeline.results)
+	pipeline.mu.Unlock()
+	if pendingResults != 0 {
+		t.Fatalf("completed batch retained %d results", pendingResults)
+	}
+	if !pipeline.claim(firstJob.Key) {
+		t.Fatal("completed batch retained its in-flight claim")
+	}
+	pipeline.releaseClaim(firstJob.Key)
+
+	secondRecords, secondJob := makeBatch("second", 2)
+	if err := pipeline.enqueue(secondJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := pipeline.finishAndApply(secondRecords); err != nil {
+		t.Fatal(err)
+	}
+	if got := secondRecords[0].Attachments[0].Transcript; got != "second" {
+		t.Fatalf("second transcript = %q", got)
+	}
+	if harness.calls.Load() != 2 || harness.closes.Load() != 1 {
+		t.Fatalf("runner calls=%d closes=%d, want 2/1", harness.calls.Load(), harness.closes.Load())
+	}
+	if len(events) != 4 {
+		t.Fatalf("events after finish = %d, want 4", len(events))
+	}
+	if metrics := pipeline.metrics(); metrics.JobsCompleted != 2 || metrics.AudioSeconds != 6 {
+		t.Fatalf("pipeline metrics = %+v", metrics)
 	}
 }
 
@@ -167,7 +271,7 @@ func TestMediaPipelineSingleWorkerCollectsDeterministicallyAndAtomically(t *test
 			t.Fatal(err)
 		}
 	}
-	if err := pipeline.waitAndApply(records); err != nil {
+	if err := pipeline.finishAndApply(records); err != nil {
 		t.Fatal(err)
 	}
 	for i, want := range []string{"a", "b", "c"} {
@@ -238,7 +342,7 @@ func TestMediaPipelineDeduplicatesInflightMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []harvest.MessageRecord{record, record}
-	if err := pipeline.waitAndApply(records); err != nil {
+	if err := pipeline.finishAndApply(records); err != nil {
 		t.Fatal(err)
 	}
 	if harness.calls.Load() != 1 {
@@ -304,11 +408,55 @@ func TestMediaPipelineBoundedQueueAppliesBackpressure(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("third enqueue remained blocked after worker progressed")
 	}
-	if err := pipeline.waitAndApply(nil); err != nil {
+	if err := pipeline.finishAndApply(nil); err != nil {
 		t.Fatal(err)
 	}
 	if pipeline.metrics().QueuePeak != 1 {
 		t.Fatalf("queue peak = %d, want 1", pipeline.metrics().QueuePeak)
+	}
+}
+
+func TestMediaPipelineAbortUnblocksJobsAndCleansInputs(t *testing.T) {
+	dir := t.TempDir()
+	gate := make(chan struct{})
+	harness := &pipelineHarness{}
+	pipeline, err := newMediaPipelineWithConfig(context.Background(), harvest.HistoryOptions{}, mediaPipelineConfig{
+		QueueCapacity:   2,
+		RunnerFactory:   harness.factory(0, 1, time.Second, false, gate),
+		SampleResources: func() mediaPipelineResourceSnapshot { return mediaPipelineResourceSnapshot{} },
+		SampleRSS:       func(int) uint64 { return 0 },
+		Now:             time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := []string{filepath.Join(dir, "active.ogg"), filepath.Join(dir, "queued.ogg")}
+	for index, input := range inputs {
+		if err := os.WriteFile(input, []byte("audio"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		key := filepath.Join(dir, fmt.Sprintf("%d.txt", index))
+		if !pipeline.claim(key) {
+			t.Fatalf("claim %s failed", key)
+		}
+		if err := pipeline.enqueue(mediaPipelineJob{Key: key, InputPath: input, TranscriptPath: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for harness.active.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	pipeline.abort()
+
+	for _, input := range inputs {
+		if _, err := os.Stat(input); !os.IsNotExist(err) {
+			t.Fatalf("temporary input still exists: %s (%v)", input, err)
+		}
+	}
+	if harness.closes.Load() != 1 {
+		t.Fatalf("runner closes = %d, want 1", harness.closes.Load())
 	}
 }
 
@@ -339,7 +487,7 @@ func TestMediaPipelineFailureDoesNotPublishPartialCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []harvest.MessageRecord{record}
-	if err := pipeline.waitAndApply(records); err != nil {
+	if err := pipeline.finishAndApply(records); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(records[0].Attachments[0].TranscriptError, "synthetic ASR failure") {
@@ -387,7 +535,7 @@ func TestMediaPipelineClassifiesNoAudioAsSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []harvest.MessageRecord{record}
-	if err := pipeline.waitAndApply(records); err != nil {
+	if err := pipeline.finishAndApply(records); err != nil {
 		t.Fatal(err)
 	}
 	metrics := pipeline.metrics()

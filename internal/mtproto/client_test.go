@@ -1107,17 +1107,6 @@ func TestHistoryProgressCopiesStats(t *testing.T) {
 	}
 }
 
-func TestRunTranscriberUsesExplicitRunnerWithoutCommandConfig(t *testing.T) {
-	runner := &fakeTranscriber{text: "from runner"}
-	text, err := runTranscriber(context.Background(), runner, transcribe.Options{}, "input.ogg", "out.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if text != "from runner" || runner.calls != 1 {
-		t.Fatalf("text=%q calls=%d", text, runner.calls)
-	}
-}
-
 func TestTranscriptErrorMessageClassifiesNoAudioStream(t *testing.T) {
 	err := transcriptErrorMessage(errString("ffmpeg: exit status 234: [out#0/wav @ 0x123] Output file does not contain any stream Error opening output file /tmp/.asr-123.wav"))
 	if err != "skipped: media has no audio stream" {
@@ -1225,7 +1214,7 @@ func TestTranscribeAttachmentMediaSkipsTelegramNoAudioBeforeDownload(t *testing.
 		}},
 	}
 	var events []harvest.ASRLogEvent
-	(&Session{}).transcribeAttachmentMedia(context.Background(), &record, 0, nil, "silent.mp4", harvest.HistoryOptions{
+	(&Session{}).enqueueAttachmentTranscription(context.Background(), &record, 0, nil, "silent.mp4", harvest.HistoryOptions{
 		TranscribeMedia:     true,
 		VideoTranscribeMode: harvest.VideoTranscribeAll,
 		TranscriptDir:       transcriptDir,
@@ -1279,16 +1268,6 @@ type errString string
 
 func (e errString) Error() string {
 	return string(e)
-}
-
-type fakeTranscriber struct {
-	text  string
-	calls int
-}
-
-func (f *fakeTranscriber) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
-	f.calls++
-	return f.text, nil
 }
 
 func TestMediaLinksAndAttachmentsKeepDocumentMetadata(t *testing.T) {
@@ -1424,7 +1403,7 @@ func TestDownloadRecordMediaEnsuresTranscriptAttachmentMetadata(t *testing.T) {
 	record := harvest.MessageRecord{MessageID: 55, Kind: "voice"}
 
 	session := &Session{}
-	session.downloadRecordMedia(context.Background(), &tg.Message{ID: 55, Media: media}, &record, harvest.HistoryOptions{DownloadMedia: true})
+	session.downloadRecordMediaWithPipeline(context.Background(), &tg.Message{ID: 55, Media: media}, &record, harvest.HistoryOptions{DownloadMedia: true}, nil)
 
 	if len(record.Attachments) != 1 {
 		t.Fatalf("attachments len = %d, want 1", len(record.Attachments))

@@ -392,8 +392,29 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 			}
 		}
 	}
+	pipeline, err := newMediaPipeline(ctx, opts)
+	if err != nil {
+		return harvest.Chat{}, harvest.HistoryStats{}, err
+	}
+	pipelineFinished := false
+	defer func() {
+		if pipeline != nil && !pipelineFinished {
+			pipeline.abort()
+		}
+	}()
 	if opts.All {
-		return s.dumpHistoryStreaming(ctx, target, opts, emit, topicByID)
+		chatResult, stats, dumpErr := s.dumpHistoryStreaming(ctx, target, opts, emit, topicByID, pipeline)
+		if dumpErr != nil {
+			return chatResult, stats, dumpErr
+		}
+		if pipeline != nil {
+			pipelineErr := pipeline.finishAndApply(nil)
+			pipelineFinished = true
+			if pipelineErr != nil {
+				return chatResult, stats, pipelineErr
+			}
+		}
+		return chatResult, stats, nil
 	}
 
 	records := make([]harvest.MessageRecord, 0, initialHistoryCapacity(opts))
@@ -459,13 +480,20 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 			if !historyRecordInTimeRange(record, opts) {
 				continue
 			}
-			s.downloadRecordMedia(ctx, msgClass, &record, opts)
+			s.downloadRecordMediaWithPipeline(ctx, msgClass, &record, opts, pipeline)
 			records = append(records, record)
 		}
 		if reachedStart || minSeenID == 0 || len(messages) < batchLimit {
 			break
 		}
 		offsetID = minSeenID
+	}
+	if pipeline != nil {
+		pipelineErr := pipeline.finishAndApply(records)
+		pipelineFinished = true
+		if pipelineErr != nil {
+			return harvest.Chat{}, harvest.HistoryStats{}, pipelineErr
+		}
 	}
 
 	sort.Slice(records, func(i, j int) bool { return records[i].MessageID < records[j].MessageID })
@@ -753,7 +781,7 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 	}
 
 	if pipeline != nil {
-		if err := pipeline.waitAndApply(records); err != nil {
+		if err := pipeline.finishAndApply(records); err != nil {
 			return harvest.OutgoingStats{}, err
 		}
 		pipelineFinished = true
@@ -898,7 +926,14 @@ func applyDailyHistoryBoundary(head *harvest.DailyDialogHead, plan dailyDialogSc
 	}
 }
 
-func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarget, opts harvest.HistoryOptions, emit func(harvest.MessageRecord) error, topicByID map[int]harvest.Topic) (harvest.Chat, harvest.HistoryStats, error) {
+func (s *Session) dumpHistoryStreaming(
+	ctx context.Context,
+	target resolvedTarget,
+	opts harvest.HistoryOptions,
+	emit func(harvest.MessageRecord) error,
+	topicByID map[int]harvest.Topic,
+	pipeline *mediaPipeline,
+) (harvest.Chat, harvest.HistoryStats, error) {
 	offsetID := opts.StartOffsetID
 	stats := harvest.HistoryStats{}
 	for shouldContinueHistory(opts, stats.Records, stats.Batches) {
@@ -971,10 +1006,14 @@ func (s *Session) dumpHistoryStreaming(ctx context.Context, target resolvedTarge
 			if !historyRecordInTimeRange(record, opts) {
 				continue
 			}
-			s.downloadRecordMedia(ctx, msgClass, &record, opts)
+			s.downloadRecordMediaWithPipeline(ctx, msgClass, &record, opts, pipeline)
 			batchRecords = append(batchRecords, record)
 		}
 		sort.Slice(batchRecords, func(i, j int) bool { return batchRecords[i].MessageID < batchRecords[j].MessageID })
+		if err := pipeline.flushAndApply(batchRecords); err != nil {
+			stats.FloodWaits = s.FloodWaits()
+			return harvest.Chat{}, stats, err
+		}
 		for _, record := range batchRecords {
 			if emit != nil {
 				if err := emit(record); err != nil {
@@ -2317,10 +2356,6 @@ func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attac
 	}
 }
 
-func (s *Session) downloadRecordMedia(ctx context.Context, msgClass tg.MessageClass, record *harvest.MessageRecord, opts harvest.HistoryOptions) {
-	s.downloadRecordMediaWithPipeline(ctx, msgClass, record, opts, nil)
-}
-
 func (s *Session) downloadRecordMediaWithPipeline(
 	ctx context.Context,
 	msgClass tg.MessageClass,
@@ -2401,7 +2436,7 @@ func (s *Session) downloadAttachment(
 		return
 	}
 	if transcriptMediaKind(record.Attachments[index].Kind) {
-		s.transcribeAttachmentMedia(ctx, record, index, location, fileName, opts, pipeline)
+		s.enqueueAttachmentTranscription(ctx, record, index, location, fileName, opts, pipeline)
 		return
 	}
 	if mediaSizeLimitExceeded(record, index, opts) {
@@ -2508,7 +2543,7 @@ func (s *Session) saveAttachmentFile(
 	}
 }
 
-func (s *Session) transcribeAttachmentMedia(
+func (s *Session) enqueueAttachmentTranscription(
 	ctx context.Context,
 	record *harvest.MessageRecord,
 	index int,
@@ -2553,14 +2588,17 @@ func (s *Session) transcribeAttachmentMedia(
 		emitASRLog(opts, asrLogEvent("skip", "config", attachment.TranscriptError, *record, index, *attachment))
 		return
 	}
-	if pipeline != nil && !pipeline.claim(transcriptPath) {
+	if pipeline == nil {
+		attachment.TranscriptError = "transcription pipeline is unavailable"
+		emitASRLog(opts, asrLogEvent("error", "transcribe", attachment.TranscriptError, *record, index, *attachment))
+		return
+	}
+	if !pipeline.claim(transcriptPath) {
 		return
 	}
 	tempPath, err := createTemporaryMediaPath(opts.MediaDir, fileName)
 	if err != nil {
-		if pipeline != nil {
-			pipeline.releaseClaim(transcriptPath)
-		}
+		pipeline.releaseClaim(transcriptPath)
 		attachment.DownloadError = fmt.Sprintf("prepare temporary media: %v", err)
 		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
@@ -2578,9 +2616,7 @@ func (s *Session) transcribeAttachmentMedia(
 		stages.ObserveDownloadQueueWait(opts.DownloadQueueTiming, time.Since(queueWaitStart))
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
-		if pipeline != nil {
-			pipeline.releaseClaim(transcriptPath)
-		}
+		pipeline.releaseClaim(transcriptPath)
 		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
@@ -2591,9 +2627,7 @@ func (s *Session) transcribeAttachmentMedia(
 	if err := s.downloadFile(downloadCtx, location, tempPath, attachment.Size, opts.DownloadTiming); err != nil {
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
-		if pipeline != nil {
-			pipeline.releaseClaim(transcriptPath)
-		}
+		pipeline.releaseClaim(transcriptPath)
 		event := asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment)
 		event.DownloadSeconds = secondsSince(downloadStart)
 		emitASRLog(opts, event)
@@ -2601,77 +2635,23 @@ func (s *Session) transcribeAttachmentMedia(
 	}
 	stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 	downloadSeconds := secondsSince(downloadStart)
-	if pipeline != nil {
-		job := mediaPipelineJob{
-			Key:              transcriptPath,
-			InputPath:        tempPath,
-			TranscriptPath:   transcriptPath,
-			Record:           *record,
-			Attachment:       *attachment,
-			AttachmentIndex:  index,
-			DownloadSeconds:  downloadSeconds,
-			TranscribeOption: transcribeOpts,
-		}
-		if err := pipeline.enqueue(job); err != nil {
-			pipeline.releaseClaim(transcriptPath)
-			attachment.TranscriptError = transcriptErrorMessage(err)
-			emitASRLog(opts, asrLogEvent("error", "transcribe", attachment.TranscriptError, *record, index, *attachment))
-		} else {
-			cleanupTemp = false
-		}
-		return
+	job := mediaPipelineJob{
+		Key:              transcriptPath,
+		InputPath:        tempPath,
+		TranscriptPath:   transcriptPath,
+		Record:           *record,
+		Attachment:       *attachment,
+		AttachmentIndex:  index,
+		DownloadSeconds:  downloadSeconds,
+		TranscribeOption: transcribeOpts,
 	}
-
-	transcribeCtx, cancel := context.WithTimeout(ctx, defaultTranscribeTimeout)
-	defer cancel()
-	transcribeStart := time.Now()
-	startEvent := asrLogEvent("transcribe_start", "transcribe", "", *record, index, *attachment)
-	startEvent.DownloadSeconds = downloadSeconds
-	startEvent.Engine = transcribeOpts.EngineName()
-	startEvent.InputBytes = localFileSize(tempPath)
-	emitASRLog(opts, startEvent)
-	result, err := runTranscriberDetailed(transcribeCtx, opts.Transcriber, transcribeOpts, tempPath, transcriptPath)
-	if err != nil {
+	if err := pipeline.enqueue(job); err != nil {
+		pipeline.releaseClaim(transcriptPath)
 		attachment.TranscriptError = transcriptErrorMessage(err)
-		action := "error"
-		if isTranscriptSkipError(err) {
-			action = "skip"
-		}
-		event := asrLogEvent(action, "transcribe", attachment.TranscriptError, *record, index, *attachment)
-		event.DownloadSeconds = downloadSeconds
-		event.Engine = transcribeOpts.EngineName()
-		event.InputBytes = localFileSize(tempPath)
-		event.TotalSeconds = time.Since(transcribeStart).Seconds() + downloadSeconds
-		emitASRLog(opts, event)
+		emitASRLog(opts, asrLogEvent("error", "transcribe", attachment.TranscriptError, *record, index, *attachment))
 		return
 	}
-	transcript := result.Text
-	if strings.TrimSpace(transcript) == "" {
-		if fromFile, readErr := readTranscriptFile(transcriptPath); readErr == nil {
-			transcript = fromFile
-		}
-	}
-	attachment.Transcript = transcript
-	event := asrLogEvent("transcribed", "transcribe", "", *record, index, *attachment)
-	event.DownloadSeconds = downloadSeconds
-	event.Engine = result.Engine
-	event.FFmpegSeconds = result.FFmpegDuration.Seconds()
-	event.ModelColdStartSeconds = result.ModelColdStartDuration.Seconds()
-	event.ASRSeconds = result.ASRDuration.Seconds()
-	event.TotalSeconds = result.TotalDuration.Seconds() + downloadSeconds
-	event.InputBytes = result.InputBytes
-	event.WAVBytes = result.WAVBytes
-	event.WAVDurationSeconds = result.WAVDurationSeconds
-	event.TranscriptBytes = result.TranscriptBytes
-	if result.WAVDurationSeconds > 0 && result.ASRDuration > 0 {
-		event.RealTimeFactor = result.ASRDuration.Seconds() / result.WAVDurationSeconds
-	}
-	audioDurationSeconds := result.WAVDurationSeconds
-	if audioDurationSeconds <= 0 {
-		audioDurationSeconds = attachment.DurationSeconds
-	}
-	stages.ObserveAudioDuration(opts.AudioDurationTiming, audioDurationSeconds)
-	emitASRLog(opts, event)
+	cleanupTemp = false
 }
 
 func (s *Session) downloadFile(
@@ -2730,52 +2710,6 @@ func (s *Session) observeDownloadError(operation string, err error, floodWaits, 
 		}
 		s.noteTransportFlood(operation, err)
 	}
-}
-
-func runTranscriber(ctx context.Context, runner harvest.Transcriber, opts transcribe.Options, inputPath string, outputPath string) (string, error) {
-	result, err := runTranscriberDetailed(ctx, runner, opts, inputPath, outputPath)
-	if err != nil {
-		return "", err
-	}
-	return result.Text, nil
-}
-
-func runTranscriberDetailed(ctx context.Context, runner harvest.Transcriber, opts transcribe.Options, inputPath string, outputPath string) (transcribe.Result, error) {
-	if runner != nil {
-		if detailed, ok := runner.(interface {
-			RunDetailed(context.Context, string, string) (transcribe.Result, error)
-		}); ok {
-			return detailed.RunDetailed(ctx, inputPath, outputPath)
-		}
-		text, err := runner.Run(ctx, inputPath, outputPath)
-		if err != nil {
-			return transcribe.Result{}, err
-		}
-		return transcribe.Result{
-			Text:            text,
-			Engine:          "custom",
-			TranscriptBytes: int64(len([]byte(text))),
-		}, nil
-	}
-	return transcribe.RunDetailed(ctx, opts, inputPath, outputPath)
-}
-
-func transcriptErrorMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	detail := oneLine(err.Error())
-	lower := strings.ToLower(detail)
-	if strings.Contains(lower, "output file does not contain any stream") ||
-		strings.Contains(lower, "does not contain any stream") ||
-		strings.Contains(lower, "stream map") && strings.Contains(lower, "matches no streams") {
-		return "skipped: media has no audio stream"
-	}
-	return detail
-}
-
-func isTranscriptSkipError(err error) bool {
-	return strings.HasPrefix(transcriptErrorMessage(err), "skipped: ")
 }
 
 func transcriptMediaKind(kind string) bool {
