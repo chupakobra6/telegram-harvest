@@ -80,6 +80,8 @@ type Session struct {
 	transportFloods  int
 	floodEvents      []FloodEvent
 	dialogCache      map[string]resolvedTarget
+	mediaCacheMu     sync.Mutex
+	mediaCaches      map[string]*persistentMediaCache
 }
 
 type DownloadMediaOptions struct {
@@ -2209,12 +2211,13 @@ func dailyDocumentAttachment(media *tg.MessageMediaDocument, messageID int) (har
 func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attachment, tg.InputFileLocationClass, string, bool) {
 	switch typed := media.(type) {
 	case *tg.MessageMediaPhoto:
-		location, fileName, size, ok := photoDownload(typed)
+		location, fileName, mediaID, size, ok := photoDownload(typed)
 		if !ok {
 			return harvest.Attachment{}, nil, "", false
 		}
 		return harvest.Attachment{
 			Kind:     "photo",
+			MediaID:  mediaID,
 			MIMEType: "image/jpeg",
 			FileName: fileName,
 			Size:     size,
@@ -2233,16 +2236,15 @@ func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attac
 		if strings.TrimSpace(fileName) == "" {
 			fileName = fallbackFileName(kind, messageID, doc.MimeType)
 		}
-		return harvest.Attachment{
-			Kind:            kind,
-			MediaID:         documentMediaID(doc),
-			MIMEType:        doc.MimeType,
-			Size:            doc.Size,
-			DurationSeconds: documentDurationSeconds(doc),
-			Width:           documentVideoWidth(doc),
-			Height:          documentVideoHeight(doc),
-			FileName:        fileName,
-		}, doc.AsInputDocumentFileLocation(), fileName, true
+		attachment := harvest.Attachment{
+			Kind:     kind,
+			MediaID:  documentMediaID(doc),
+			MIMEType: doc.MimeType,
+			Size:     doc.Size,
+			FileName: fileName,
+		}
+		applyDocumentMetadata(&attachment, doc)
+		return attachment, doc.AsInputDocumentFileLocation(), fileName, true
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
 			return downloadableMedia(attached, messageID)
@@ -2280,12 +2282,13 @@ func (s *Session) downloadRecordMediaWithPipeline(
 		if len(record.Attachments) == 0 {
 			return
 		}
-		location, fileName, size, ok := photoDownload(typed)
+		location, fileName, mediaID, size, ok := photoDownload(typed)
 		if !ok {
 			record.Attachments[0].DownloadError = "photo location is unavailable"
 			return
 		}
 		record.Attachments[0].MIMEType = "image/jpeg"
+		record.Attachments[0].MediaID = mediaID
 		record.Attachments[0].FileName = fileName
 		record.Attachments[0].Size = size
 		s.downloadAttachment(ctx, record, 0, location, fileName, opts, pipeline)
@@ -2368,7 +2371,8 @@ func (s *Session) saveAttachmentFile(
 		return
 	}
 	target := mediaTargetPath(mediaDir, *record, index, fileName)
-	record.Attachments[index].LocalPath = target
+	attachment := &record.Attachments[index]
+	attachment.LocalPath = target
 	if existing, err := os.Stat(target); err == nil && existing.Size() > 0 {
 		if !overwrite {
 			return
@@ -2379,21 +2383,51 @@ func (s *Session) saveAttachmentFile(
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		record.Attachments[index].DownloadError = fmt.Sprintf("prepare media dir: %v", err)
+		attachment.DownloadError = fmt.Sprintf("prepare media dir: %v", err)
 		return
 	}
+	cacheIdentity, cacheable := mediaCacheIdentity(*attachment)
+	var cache *persistentMediaCache
+	if cacheable && !overwrite {
+		cache = s.persistentMediaCache(mediaDir)
+		if hit, err := cache.Restore(cacheIdentity, target, attachment.Size); err == nil && hit {
+			attachment.MediaCached = true
+			return
+		}
+	}
+	downloadTarget := target
+	if cache != nil {
+		tempPath, err := cache.NewDownloadPath(fileName)
+		if err == nil {
+			downloadTarget = tempPath
+			defer os.Remove(tempPath)
+		} else {
+			cache = nil
+		}
+	}
 	downloadStart := time.Now()
-	defer stages.ObserveSince(stageTiming, stages.Download, downloadStart)
 	if err := s.beforeRPC(ctx, "download_media"); err != nil {
-		record.Attachments[index].DownloadError = err.Error()
+		stages.ObserveSince(stageTiming, stages.Download, downloadStart)
+		attachment.DownloadError = err.Error()
 		return
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
 	defer cancel()
-	if err := s.downloadFile(downloadCtx, location, target, record.Attachments[index].Size, downloadTiming); err != nil {
-		_ = os.Remove(target)
-		record.Attachments[index].DownloadError = err.Error()
+	if err := s.downloadFile(downloadCtx, location, downloadTarget, attachment.Size, downloadTiming); err != nil {
+		stages.ObserveSince(stageTiming, stages.Download, downloadStart)
+		_ = os.Remove(downloadTarget)
+		attachment.DownloadError = err.Error()
 		return
+	}
+	stages.ObserveSince(stageTiming, stages.Download, downloadStart)
+	if cache == nil {
+		return
+	}
+	if err := cache.Store(cacheIdentity, downloadTarget, target, attachment.Size); err == nil {
+		return
+	}
+	if err := publishMediaFileAtomic(downloadTarget, target); err != nil {
+		attachment.DownloadError = fmt.Sprintf("publish downloaded media: %v", err)
 	}
 }
 
@@ -2674,6 +2708,9 @@ func transcriptMediaKind(kind string) bool {
 }
 
 func genericVideoTranscriptAllowed(attachment harvest.Attachment, opts harvest.HistoryOptions) (bool, string) {
+	if attachment.NoAudio && (attachment.Kind == "video" || attachment.Kind == "round_video") {
+		return false, "skipped: Telegram metadata marks video as having no audio track"
+	}
 	if attachment.Kind != "video" {
 		return true, ""
 	}
@@ -2735,6 +2772,7 @@ func asrLogEvent(action string, stage string, reason string, record harvest.Mess
 		DurationSeconds:     attachment.DurationSeconds,
 		Width:               attachment.Width,
 		Height:              attachment.Height,
+		NoAudio:             attachment.NoAudio,
 		TranscriptPath:      attachment.TranscriptPath,
 		TranscriptCached:    attachment.TranscriptCached,
 		VideoTranscribeMode: harvest.VideoTranscribePhone,
@@ -2848,30 +2886,31 @@ func transcribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 	)
 }
 
-func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, int64, bool) {
+func photoDownload(media *tg.MessageMediaPhoto) (tg.InputFileLocationClass, string, string, int64, bool) {
 	if media == nil {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	photoClass, ok := media.GetPhoto()
 	if !ok {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	photo, ok := photoClass.AsNotEmpty()
 	if !ok {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	thumbSize := bestPhotoThumbSize(photo)
 	if thumbSize == "" {
-		return nil, "", 0, false
+		return nil, "", "", 0, false
 	}
 	fileName := fmt.Sprintf("photo-%d-%s.jpg", photo.ID, time.Unix(int64(photo.Date), 0).UTC().Format("20060102T150405"))
+	mediaID := fmt.Sprintf("photo:%d:%s", photo.ID, thumbSize)
 	size := photoThumbSizeBytes(photo, thumbSize)
 	return &tg.InputPhotoFileLocation{
 		ID:            photo.ID,
 		AccessHash:    photo.AccessHash,
 		FileReference: photo.FileReference,
 		ThumbSize:     thumbSize,
-	}, fileName, size, true
+	}, fileName, mediaID, size, true
 }
 
 func bestPhotoThumbSize(photo *tg.Photo) string {
@@ -3139,6 +3178,19 @@ func applyDocumentMetadata(attachment *harvest.Attachment, doc *tg.Document) {
 	attachment.DurationSeconds = documentDurationSeconds(doc)
 	attachment.Width = documentVideoWidth(doc)
 	attachment.Height = documentVideoHeight(doc)
+	attachment.NoAudio = documentVideoNoAudio(doc)
+}
+
+func documentVideoNoAudio(doc *tg.Document) bool {
+	if doc == nil {
+		return false
+	}
+	for _, attr := range doc.Attributes {
+		if typed, ok := attr.(*tg.DocumentAttributeVideo); ok {
+			return typed.Nosound
+		}
+	}
+	return false
 }
 
 func documentDurationSeconds(doc *tg.Document) float64 {

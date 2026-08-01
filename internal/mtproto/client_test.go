@@ -1058,6 +1058,55 @@ func TestGenericVideoTranscriptPolicyKeepsOnlyShortVerticalPhoneVideo(t *testing
 	if ok, _ := genericVideoTranscriptAllowed(base, harvest.HistoryOptions{VideoTranscribeMode: harvest.VideoTranscribeOff}); ok {
 		t.Fatalf("off mode should reject generic video")
 	}
+	for _, kind := range []string{"video", "round_video"} {
+		noAudio := base
+		noAudio.Kind = kind
+		noAudio.NoAudio = true
+		if ok, reason := genericVideoTranscriptAllowed(noAudio, harvest.HistoryOptions{VideoTranscribeMode: harvest.VideoTranscribeAll}); ok || !strings.Contains(reason, "Telegram metadata") {
+			t.Fatalf("%s nosound policy = (%v, %q), want Telegram metadata skip", kind, ok, reason)
+		}
+	}
+}
+
+func TestGenericVideoTranscriptPolicyTreatsMissingNoAudioFlagAsUnknown(t *testing.T) {
+	attachment := harvest.Attachment{Kind: "video", NoAudio: false}
+	if ok, reason := genericVideoTranscriptAllowed(attachment, harvest.HistoryOptions{VideoTranscribeMode: harvest.VideoTranscribeAll}); !ok {
+		t.Fatalf("missing nosound flag must keep ffmpeg fallback: %s", reason)
+	}
+}
+
+func TestTranscribeAttachmentMediaSkipsTelegramNoAudioBeforeDownload(t *testing.T) {
+	transcriptDir := t.TempDir()
+	record := harvest.MessageRecord{
+		Source:    "telegram",
+		Chat:      harvest.Chat{ID: 1},
+		MessageID: 2,
+		Date:      time.Now(),
+		Attachments: []harvest.Attachment{{
+			Kind:     "video",
+			MediaID:  "document:3",
+			FileName: "silent.mp4",
+			NoAudio:  true,
+		}},
+	}
+	var events []harvest.ASRLogEvent
+	(&Session{}).transcribeAttachmentMedia(context.Background(), &record, 0, nil, "silent.mp4", harvest.HistoryOptions{
+		TranscribeMedia:     true,
+		VideoTranscribeMode: harvest.VideoTranscribeAll,
+		TranscriptDir:       transcriptDir,
+		ASRLog: func(event harvest.ASRLogEvent) error {
+			events = append(events, event)
+			return nil
+		},
+	}, nil)
+
+	attachment := record.Attachments[0]
+	if !strings.Contains(attachment.TranscriptError, "Telegram metadata") || attachment.DownloadError != "" {
+		t.Fatalf("attachment = %+v", attachment)
+	}
+	if len(events) != 1 || events[0].Action != "skip" || events[0].Stage != "policy" || !events[0].NoAudio || events[0].DownloadSeconds != 0 {
+		t.Fatalf("events = %+v", events)
+	}
 }
 
 func withVideoShape(base harvest.Attachment, width int, height int, duration float64, size int64) harvest.Attachment {
@@ -1169,7 +1218,7 @@ func TestMediaLinksAndAttachmentsKeepDocumentMetadata(t *testing.T) {
 		Size:     12345,
 		Attributes: []tg.DocumentAttributeClass{
 			&tg.DocumentAttributeFilename{FileName: "talk.mp4"},
-			&tg.DocumentAttributeVideo{Duration: 2701.5, W: 1920, H: 1080},
+			&tg.DocumentAttributeVideo{Duration: 2701.5, W: 1920, H: 1080, Nosound: true},
 		},
 	})
 	videoAttachments := extractAttachments(video)
@@ -1178,7 +1227,8 @@ func TestMediaLinksAndAttachmentsKeepDocumentMetadata(t *testing.T) {
 		videoAttachments[0].FileName != "talk.mp4" ||
 		videoAttachments[0].DurationSeconds != 2701.5 ||
 		videoAttachments[0].Width != 1920 ||
-		videoAttachments[0].Height != 1080 {
+		videoAttachments[0].Height != 1080 ||
+		!videoAttachments[0].NoAudio {
 		t.Fatalf("video attachments=%#v", videoAttachments)
 	}
 }
@@ -1191,7 +1241,7 @@ func TestDailyDocumentAttachmentAddsVideoMetadata(t *testing.T) {
 		Size:     12345,
 		Attributes: []tg.DocumentAttributeClass{
 			&tg.DocumentAttributeFilename{FileName: "clip.mp4"},
-			&tg.DocumentAttributeVideo{Duration: 12.5, W: 720, H: 1280},
+			&tg.DocumentAttributeVideo{Duration: 12.5, W: 720, H: 1280, Nosound: true},
 		},
 	})
 
@@ -1203,8 +1253,26 @@ func TestDailyDocumentAttachmentAddsVideoMetadata(t *testing.T) {
 		attachment.FileName != "clip.mp4" ||
 		attachment.DurationSeconds != 12.5 ||
 		attachment.Width != 720 ||
-		attachment.Height != 1280 {
+		attachment.Height != 1280 ||
+		!attachment.NoAudio {
 		t.Fatalf("unexpected attachment metadata: %+v", attachment)
+	}
+}
+
+func TestPhotoDownloadUsesTelegramIdentityAndSelectedThumb(t *testing.T) {
+	media := &tg.MessageMediaPhoto{}
+	media.SetPhoto(&tg.Photo{
+		ID:         42,
+		AccessHash: 99,
+		Date:       123,
+		Sizes: []tg.PhotoSizeClass{
+			&tg.PhotoSize{Type: "m", W: 100, H: 100, Size: 50},
+			&tg.PhotoSize{Type: "x", W: 1000, H: 800, Size: 500},
+		},
+	})
+	_, _, mediaID, size, ok := photoDownload(media)
+	if !ok || mediaID != "photo:42:x" || size != 500 {
+		t.Fatalf("photo download = (media_id=%q size=%d ok=%v)", mediaID, size, ok)
 	}
 }
 

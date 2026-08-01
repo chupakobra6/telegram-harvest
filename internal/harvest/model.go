@@ -73,9 +73,11 @@ type Attachment struct {
 	DurationSeconds  float64 `json:"duration_seconds,omitempty"`
 	Width            int     `json:"width,omitempty"`
 	Height           int     `json:"height,omitempty"`
+	NoAudio          bool    `json:"no_audio,omitempty"`
 	Title            string  `json:"title,omitempty"`
 	URL              string  `json:"url,omitempty"`
 	LocalPath        string  `json:"local_path,omitempty"`
+	MediaCached      bool    `json:"media_cached,omitempty"`
 	DownloadError    string  `json:"download_error,omitempty"`
 	DownloadHint     string  `json:"download_hint,omitempty"`
 	Transcript       string  `json:"transcript,omitempty"`
@@ -302,6 +304,7 @@ type ASRLogEvent struct {
 	DurationSeconds       float64   `json:"duration_seconds,omitempty"`
 	Width                 int       `json:"width,omitempty"`
 	Height                int       `json:"height,omitempty"`
+	NoAudio               bool      `json:"no_audio,omitempty"`
 	TranscriptPath        string    `json:"transcript_path,omitempty"`
 	TranscriptCached      bool      `json:"transcript_cached,omitempty"`
 	DownloadSeconds       float64   `json:"download_seconds,omitempty"`
