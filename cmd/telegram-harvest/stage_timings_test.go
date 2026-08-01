@@ -30,6 +30,7 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 		Threads:          2,
 		Seconds:          2,
 	})
+	first.ObserveDownloadQueueWait(750 * time.Millisecond)
 	first.ObserveDialogCheckpoint(
 		harvest.DailyDialogCheckpointDecision{Enabled: true},
 		harvest.OutgoingStats{
@@ -53,7 +54,12 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 			SpacingMillis:        500,
 			Calls:                12,
 			ScheduledWaitSeconds: 5.5,
+			ServiceSeconds:       1.75,
 			Operations:           map[string]int{"get_history": 7, "get_dialogs": 5},
+			OperationTimings: map[string]harvest.RPCOperationTiming{
+				"get_dialogs": {Calls: 5, WallSeconds: 3, WaitSeconds: 2.5, ServiceSeconds: 0.5},
+				"get_history": {Calls: 7, WallSeconds: 5, WaitSeconds: 3.75, ServiceSeconds: 1.25},
+			},
 		},
 	})
 	first.startedAt = time.Now().UTC().Add(-13 * time.Second)
@@ -109,11 +115,20 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 		t.Fatalf("history pagination metrics = %+v", decoded.HistoryPagination)
 	}
 	if decoded.TelegramRPC.SpacingMillis != 500 || decoded.TelegramRPC.Calls != 12 ||
-		decoded.TelegramRPC.ScheduledWaitSeconds != 5.5 || decoded.TelegramRPC.Operations["get_history"] != 7 {
+		decoded.TelegramRPC.ScheduledWaitSeconds != 5.5 || decoded.TelegramRPC.ServiceSeconds != 1.75 ||
+		decoded.TelegramRPC.Operations["get_history"] != 7 || decoded.TelegramRPC.OperationTimings["get_history"].Calls != 7 {
 		t.Fatalf("telegram RPC metrics = %+v", decoded.TelegramRPC)
 	}
-	if decoded.DownloadTransport.Files != 1 || decoded.DownloadTransport.PeakThreads != 2 || decoded.DownloadTransport.ThroughputMiBPerS != 4 {
+	if decoded.DownloadTransport.Files != 1 || decoded.DownloadTransport.PeakThreads != 2 ||
+		decoded.DownloadTransport.ThroughputMiBPerS != 4 || decoded.DownloadTransport.QueueWaitSeconds != 0.75 {
 		t.Fatalf("download transport = %+v", decoded.DownloadTransport)
+	}
+	if decoded.TelegramBreakdown.GetDialogsCalls != 5 || decoded.TelegramBreakdown.GetDialogsWallSeconds != 3 ||
+		decoded.TelegramBreakdown.GetDialogsWaitSeconds != 2.5 || decoded.TelegramBreakdown.GetHistoryCalls != 7 ||
+		decoded.TelegramBreakdown.GetHistoryWallSeconds != 5 || decoded.TelegramBreakdown.GetHistoryWaitSeconds != 3.75 ||
+		decoded.TelegramBreakdown.RPCServiceSeconds != 1.75 || decoded.TelegramBreakdown.DownloadQueueWaitSeconds != 0.75 ||
+		decoded.TelegramBreakdown.DownloadTransferSeconds != 2 {
+		t.Fatalf("telegram breakdown = %+v", decoded.TelegramBreakdown)
 	}
 	if decoded.StageWorkSeconds <= 0 {
 		t.Fatalf("stage work = %f, want positive work total", decoded.StageWorkSeconds)
@@ -131,6 +146,8 @@ func TestDailyStageTimingReportPersistsAllStagesWithoutOverwrite(t *testing.T) {
 
 func TestDailyStageTimingReportAggregatesDownloadTransport(t *testing.T) {
 	collector := newDailyStageTimingCollector("daily", "2026-07-30", "2026-07-31")
+	collector.ObserveDownloadQueueWait(250 * time.Millisecond)
+	collector.ObserveDownloadQueueWait(750 * time.Millisecond)
 	collector.ObserveDownloadTransfer(stages.DownloadTransferMetrics{
 		Policy:           "size-tiered-cap2",
 		ExpectedBytes:    512 << 10,
@@ -157,7 +174,7 @@ func TestDailyStageTimingReportAggregatesDownloadTransport(t *testing.T) {
 	if metrics.ExpectedBytes != (8<<20)+(512<<10) || metrics.TransferredBytes != (7<<20)+(512<<10) {
 		t.Fatalf("download bytes = %+v", metrics)
 	}
-	if metrics.Seconds != 3 || metrics.PeakThreads != 2 || metrics.ThreadDecisions["1"] != 1 || metrics.ThreadDecisions["2"] != 1 {
+	if metrics.Seconds != 3 || metrics.QueueWaitSeconds != 1 || metrics.PeakThreads != 2 || metrics.ThreadDecisions["1"] != 1 || metrics.ThreadDecisions["2"] != 1 {
 		t.Fatalf("download decisions = %+v", metrics)
 	}
 	if metrics.Retries != 2 || metrics.DownloaderFloods != 1 || metrics.DownloaderTransportFloods != 1 || metrics.ThroughputMiBPerS != 2.5 {
@@ -177,8 +194,8 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 		"audio=", "asr_speed=", "pipeline_speed=", "checkpoint_enabled=", "checkpoint_history_dialogs=",
 		"checkpoint_unchanged=", "checkpoint_changed=", "checkpoint_new=", "checkpoint_fallback=",
 		"stage_work=", "pipeline_mode=", "pipeline_span=", "pipeline_overlap=", "pipeline_workers=", "pipeline_queue_peak=", "total=", "report=",
-		"download_files=", "download_bytes=", "download_mib_s=", "download_peak_threads=", "download_retries=", "download_floods=", "download_transport_floods=",
-		"rpc_spacing_ms=", "rpc_calls=", "rpc_wait=", "transport_floods=", "history_data_pages=", "history_empty_proof_pages=", "history_sparse_continuations=",
+		"download_files=", "download_bytes=", "download_mib_s=", "download_peak_threads=", "download_retries=", "download_floods=", "download_transport_floods=", "download_queue_wait=", "download_transfer=",
+		"rpc_spacing_ms=", "rpc_calls=", "rpc_wait=", "rpc_service=", "get_dialogs_calls=", "get_dialogs_wall=", "get_dialogs_wait=", "get_history_calls=", "get_history_wall=", "get_history_wait=", "transport_floods=", "history_data_pages=", "history_empty_proof_pages=", "history_sparse_continuations=",
 		"checkpoint_proof_candidates=", "checkpoint_proof_stops=", "checkpoint_proof_shadow_confirmed=", "checkpoint_proof_shadow_rejected=",
 	} {
 		if !strings.Contains(output.String(), field) {
@@ -191,6 +208,41 @@ func TestFinishDailyStageTimingsPrintsMetricsAndReportPath(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("timing report count = %d", len(entries))
+	}
+}
+
+func TestDailyStageTimingCollectorCopiesRPCMaps(t *testing.T) {
+	operations := map[string]int{"get_history": 1}
+	timings := map[string]harvest.RPCOperationTiming{
+		"get_history": {Calls: 1, WallSeconds: 2, WaitSeconds: 1, ServiceSeconds: 1},
+	}
+	collector := newDailyStageTimingCollector("daily", "2026-07-31", "2026-07-31")
+	collector.ObserveDownloadTransfer(stages.DownloadTransferMetrics{Threads: 1})
+	collector.ObserveMediaPipeline(stages.MediaPipelineMetrics{Workers: []stages.MediaWorkerMetrics{{ID: 1, Jobs: 2}}})
+	collector.ObserveOutgoingStats(harvest.OutgoingStats{RPCPacing: harvest.RPCPacingStats{
+		Operations:       operations,
+		OperationTimings: timings,
+		ServiceSeconds:   1,
+	}, CheckpointProofRejections: map[string]int{"head_mismatch": 1}})
+
+	operations["get_history"] = 99
+	timings["get_history"] = harvest.RPCOperationTiming{Calls: 99}
+	report := collector.Report(nil)
+	if report.TelegramRPC.Operations["get_history"] != 1 || report.TelegramRPC.OperationTimings["get_history"].Calls != 1 {
+		t.Fatalf("collector retained caller-owned maps: %+v", report.TelegramRPC)
+	}
+
+	report.TelegramRPC.Operations["get_history"] = 77
+	report.TelegramRPC.OperationTimings["get_history"] = harvest.RPCOperationTiming{Calls: 77}
+	report.DownloadTransport.ThreadDecisions["1"] = 77
+	report.HistoryPagination.ProofRejections["head_mismatch"] = 77
+	report.MediaPipeline.Workers[0].Jobs = 77
+	second := collector.Report(nil)
+	if second.TelegramRPC.Operations["get_history"] != 1 || second.TelegramRPC.OperationTimings["get_history"].Calls != 1 {
+		t.Fatalf("report exposed collector-owned maps: %+v", second.TelegramRPC)
+	}
+	if second.DownloadTransport.ThreadDecisions["1"] != 1 || second.HistoryPagination.ProofRejections["head_mismatch"] != 1 || second.MediaPipeline.Workers[0].Jobs != 2 {
+		t.Fatalf("report exposed collector-owned aggregate state: download=%+v pagination=%+v pipeline=%+v", second.DownloadTransport, second.HistoryPagination, second.MediaPipeline)
 	}
 }
 

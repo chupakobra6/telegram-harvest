@@ -17,6 +17,7 @@ type Observer func(Name, time.Duration)
 type AudioDurationObserver func(float64)
 type MediaPipelineObserver func(MediaPipelineMetrics)
 type DownloadTransferObserver func(DownloadTransferMetrics)
+type DownloadQueueWaitObserver func(time.Duration)
 
 type DownloadTransferMetrics struct {
 	Policy           string  `json:"policy,omitempty"`
@@ -37,12 +38,20 @@ type DownloadTransportMetrics struct {
 	ExpectedBytes             int64          `json:"expected_bytes"`
 	TransferredBytes          int64          `json:"transferred_bytes"`
 	Seconds                   float64        `json:"seconds"`
+	QueueWaitSeconds          float64        `json:"queue_wait_seconds"`
 	ThroughputMiBPerS         float64        `json:"throughput_mib_per_second"`
 	PeakThreads               int            `json:"peak_threads"`
 	ThreadDecisions           map[string]int `json:"thread_decisions,omitempty"`
 	Retries                   int            `json:"retries"`
 	DownloaderFloods          int            `json:"downloader_flood_waits"`
 	DownloaderTransportFloods int            `json:"downloader_transport_floods"`
+}
+
+func ObserveDownloadQueueWait(observer DownloadQueueWaitObserver, duration time.Duration) {
+	if observer == nil || duration < 0 {
+		return
+	}
+	observer(duration)
 }
 
 type MediaPipelineMetrics struct {

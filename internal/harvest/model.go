@@ -171,6 +171,7 @@ type HistoryOptions struct {
 	ASRLog                func(ASRLogEvent) error
 	StageTiming           stages.Observer
 	DownloadTiming        stages.DownloadTransferObserver
+	DownloadQueueTiming   stages.DownloadQueueWaitObserver
 	AudioDurationTiming   stages.AudioDurationObserver
 	MediaPipelineTiming   stages.MediaPipelineObserver
 	DialogCheckpoint      DailyDialogCheckpointDecision
@@ -267,11 +268,23 @@ type OutgoingStats struct {
 }
 
 type RPCPacingStats struct {
-	SpacingMillis        int            `json:"spacing_ms"`
-	Calls                int            `json:"calls"`
-	ScheduledWaitSeconds float64        `json:"scheduled_wait_seconds"`
-	Operations           map[string]int `json:"operations,omitempty"`
-	TransportFloods      int            `json:"transport_floods"`
+	SpacingMillis        int                           `json:"spacing_ms"`
+	Calls                int                           `json:"calls"`
+	ScheduledWaitSeconds float64                       `json:"scheduled_wait_seconds"`
+	ServiceSeconds       float64                       `json:"service_seconds"`
+	Operations           map[string]int                `json:"operations,omitempty"`
+	OperationTimings     map[string]RPCOperationTiming `json:"operation_timings,omitempty"`
+	TransportFloods      int                           `json:"transport_floods"`
+}
+
+// RPCOperationTiming measures completed Telegram RPC attempts. WallSeconds is
+// the sum of pacing wait and service time; FloodWait retries are separate
+// attempts, while the FloodWait sleep between attempts is reported elsewhere.
+type RPCOperationTiming struct {
+	Calls          int     `json:"calls"`
+	WallSeconds    float64 `json:"wall_seconds"`
+	WaitSeconds    float64 `json:"wait_seconds"`
+	ServiceSeconds float64 `json:"service_seconds"`
 }
 
 type OutgoingProgress struct {

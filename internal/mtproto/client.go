@@ -76,6 +76,8 @@ type Session struct {
 	rpcCalls         int
 	rpcScheduledWait time.Duration
 	rpcOperations    map[string]int
+	rpcServiceTime   time.Duration
+	rpcTimings       map[string]rpcOperationTiming
 	floodWaits       int
 	transportFloods  int
 	floodEvents      []FloodEvent
@@ -85,10 +87,11 @@ type Session struct {
 }
 
 type DownloadMediaOptions struct {
-	MediaDir       string
-	Index          int
-	Overwrite      bool
-	DownloadTiming stages.DownloadTransferObserver
+	MediaDir            string
+	Index               int
+	Overwrite           bool
+	DownloadTiming      stages.DownloadTransferObserver
+	DownloadQueueTiming stages.DownloadQueueWaitObserver
 }
 
 type DownloadMediaResult struct {
@@ -100,6 +103,13 @@ type resolvedTarget struct {
 	Raw       string
 	Chat      harvest.Chat
 	InputPeer tg.InputPeerClass
+}
+
+type rpcOperationTiming struct {
+	calls   int
+	wall    time.Duration
+	wait    time.Duration
+	service time.Duration
 }
 
 func New(cfg config.Config) *Client {
@@ -521,7 +531,18 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 	if strings.TrimSpace(mediaDir) == "" {
 		mediaDir = "media-manual"
 	}
-	s.saveAttachmentFile(ctx, &record, 0, location, fileName, mediaDir, opts.Overwrite, nil, opts.DownloadTiming)
+	s.saveAttachmentFile(
+		ctx,
+		&record,
+		0,
+		location,
+		fileName,
+		mediaDir,
+		opts.Overwrite,
+		nil,
+		opts.DownloadTiming,
+		opts.DownloadQueueTiming,
+	)
 	result := DownloadMediaResult{Record: record, Attachment: record.Attachments[0]}
 	if result.Attachment.DownloadError != "" {
 		return result, errors.New(result.Attachment.DownloadError)
@@ -598,7 +619,11 @@ func (s *Session) fetchMessageByIDDirect(ctx context.Context, target resolvedTar
 	return nil, entities, fmt.Errorf("direct message lookup returned no message %d", messageID)
 }
 
-func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRangeOptions, emit func(harvest.MessageRecord) error) (harvest.OutgoingStats, error) {
+func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRangeOptions, emit func(harvest.MessageRecord) error) (stats harvest.OutgoingStats, err error) {
+	defer func() {
+		stats.FloodWaits = s.FloodWaits()
+		stats.RPCPacing = s.RPCPacingStats()
+	}()
 	opts = normalizeOutgoingRangeOptions(opts)
 	if opts.Start.IsZero() {
 		return harvest.OutgoingStats{}, fmt.Errorf("start time is required")
@@ -623,7 +648,7 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		return harvest.OutgoingStats{}, err
 	}
 
-	stats := harvest.OutgoingStats{DialogsScanned: len(dialogs)}
+	stats = harvest.OutgoingStats{DialogsScanned: len(dialogs)}
 	records := make([]harvest.MessageRecord, 0)
 	for _, chat := range dialogs {
 		stats.DialogHeads = append(stats.DialogHeads, dailyDialogHead(chat, opts.End))
@@ -760,8 +785,6 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 			}
 		}
 	}
-	stats.FloodWaits = s.FloodWaits()
-	stats.RPCPacing = s.RPCPacingStats()
 	stats.Complete = len(stats.DialogErrors) == 0
 	return stats, nil
 }
@@ -1525,12 +1548,22 @@ func (s *Session) cacheTarget(chat harvest.Chat, inputPeer tg.InputPeerClass) {
 
 func (s *Session) performRPC(ctx context.Context, operation string, fn func(context.Context) error) error {
 	attempt := func() error {
+		attemptStarted := time.Now()
 		if err := s.beforeRPC(ctx, operation); err != nil {
 			return err
 		}
+		serviceStarted := time.Now()
 		callCtx, cancel := context.WithTimeout(ctx, rpcTimeoutForOperation(operation))
 		defer cancel()
-		return fn(callCtx)
+		err := fn(callCtx)
+		finished := time.Now()
+		s.observeRPCOperationTiming(
+			operation,
+			finished.Sub(attemptStarted),
+			serviceStarted.Sub(attemptStarted),
+			finished.Sub(serviceStarted),
+		)
+		return err
 	}
 	err := withFloodWaitRetrySleep(ctx, func(ctx context.Context, delay time.Duration) error {
 		s.noteFloodWait(operation, delay)
@@ -1562,16 +1595,16 @@ func (s *Session) beforeRPC(ctx context.Context, operation string) error {
 }
 
 func (s *Session) reserveRPCSlot(operation string, now time.Time) time.Duration {
-	if s.rpcSpacing <= 0 {
-		return 0
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.nextRPCAt.IsZero() || s.nextRPCAt.Before(now) {
-		s.nextRPCAt = now
+	delay := time.Duration(0)
+	if s.rpcSpacing > 0 {
+		if s.nextRPCAt.IsZero() || s.nextRPCAt.Before(now) {
+			s.nextRPCAt = now
+		}
+		delay = s.nextRPCAt.Sub(now)
+		s.nextRPCAt = s.nextRPCAt.Add(s.rpcSpacing)
 	}
-	delay := s.nextRPCAt.Sub(now)
-	s.nextRPCAt = s.nextRPCAt.Add(s.rpcSpacing)
 	s.rpcCalls++
 	s.rpcScheduledWait += delay
 	if s.rpcOperations == nil {
@@ -1581,6 +1614,24 @@ func (s *Session) reserveRPCSlot(operation string, now time.Time) time.Duration 
 	return delay
 }
 
+func (s *Session) observeRPCOperationTiming(operation string, wall, wait, service time.Duration) {
+	if strings.TrimSpace(operation) == "" || wall < 0 || wait < 0 || service < 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rpcTimings == nil {
+		s.rpcTimings = make(map[string]rpcOperationTiming)
+	}
+	timing := s.rpcTimings[operation]
+	timing.calls++
+	timing.wall += wall
+	timing.wait += wait
+	timing.service += service
+	s.rpcTimings[operation] = timing
+	s.rpcServiceTime += service
+}
+
 func (s *Session) RPCPacingStats() harvest.RPCPacingStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1588,11 +1639,22 @@ func (s *Session) RPCPacingStats() harvest.RPCPacingStats {
 	for operation, count := range s.rpcOperations {
 		operations[operation] = count
 	}
+	timings := make(map[string]harvest.RPCOperationTiming, len(s.rpcTimings))
+	for operation, timing := range s.rpcTimings {
+		timings[operation] = harvest.RPCOperationTiming{
+			Calls:          timing.calls,
+			WallSeconds:    timing.wall.Seconds(),
+			WaitSeconds:    timing.wait.Seconds(),
+			ServiceSeconds: timing.service.Seconds(),
+		}
+	}
 	return harvest.RPCPacingStats{
 		SpacingMillis:        int(s.rpcSpacing / time.Millisecond),
 		Calls:                s.rpcCalls,
 		ScheduledWaitSeconds: s.rpcScheduledWait.Seconds(),
+		ServiceSeconds:       s.rpcServiceTime.Seconds(),
 		Operations:           operations,
+		OperationTimings:     timings,
 		TransportFloods:      s.transportFloods,
 	}
 }
@@ -2349,7 +2411,18 @@ func (s *Session) downloadAttachment(
 		record.Attachments[index].DownloadError = "media dir is empty"
 		return
 	}
-	s.saveAttachmentFile(ctx, record, index, location, fileName, opts.MediaDir, false, opts.StageTiming, opts.DownloadTiming)
+	s.saveAttachmentFile(
+		ctx,
+		record,
+		index,
+		location,
+		fileName,
+		opts.MediaDir,
+		false,
+		opts.StageTiming,
+		opts.DownloadTiming,
+		opts.DownloadQueueTiming,
+	)
 }
 
 func (s *Session) saveAttachmentFile(
@@ -2362,6 +2435,7 @@ func (s *Session) saveAttachmentFile(
 	overwrite bool,
 	stageTiming stages.Observer,
 	downloadTiming stages.DownloadTransferObserver,
+	downloadQueueTiming stages.DownloadQueueWaitObserver,
 ) {
 	if s.client == nil || record == nil || index < 0 || index >= len(record.Attachments) || location == nil {
 		return
@@ -2406,11 +2480,14 @@ func (s *Session) saveAttachmentFile(
 		}
 	}
 	downloadStart := time.Now()
+	queueWaitStart := time.Now()
 	if err := s.beforeRPC(ctx, "download_media"); err != nil {
+		stages.ObserveDownloadQueueWait(downloadQueueTiming, time.Since(queueWaitStart))
 		stages.ObserveSince(stageTiming, stages.Download, downloadStart)
 		attachment.DownloadError = err.Error()
 		return
 	}
+	stages.ObserveDownloadQueueWait(downloadQueueTiming, time.Since(queueWaitStart))
 	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
 	defer cancel()
 	if err := s.downloadFile(downloadCtx, location, downloadTarget, attachment.Size, downloadTiming); err != nil {
@@ -2496,7 +2573,9 @@ func (s *Session) transcribeAttachmentMedia(
 	}()
 	emitASRLog(opts, asrLogEvent("download_start", "download", "", *record, index, *attachment))
 	downloadStageStart := time.Now()
+	queueWaitStart := time.Now()
 	if err := s.beforeRPC(ctx, "download_media"); err != nil {
+		stages.ObserveDownloadQueueWait(opts.DownloadQueueTiming, time.Since(queueWaitStart))
 		stages.ObserveSince(opts.StageTiming, stages.Download, downloadStageStart)
 		attachment.DownloadError = err.Error()
 		if pipeline != nil {
@@ -2505,6 +2584,7 @@ func (s *Session) transcribeAttachmentMedia(
 		emitASRLog(opts, asrLogEvent("error", "download", attachment.DownloadError, *record, index, *attachment))
 		return
 	}
+	stages.ObserveDownloadQueueWait(opts.DownloadQueueTiming, time.Since(queueWaitStart))
 	downloadCtx, cancelDownload := context.WithTimeout(ctx, defaultDownloadTimeout)
 	defer cancelDownload()
 	downloadStart := time.Now()

@@ -45,8 +45,21 @@ type dailyStageTimingReport struct {
 	DialogCheckpoint  dailyDialogCheckpointMetrics    `json:"dialog_checkpoint"`
 	HistoryPagination dailyHistoryPaginationMetrics   `json:"history_pagination"`
 	TelegramRPC       harvest.RPCPacingStats          `json:"telegram_rpc"`
+	TelegramBreakdown dailyTelegramBreakdown          `json:"telegram_breakdown"`
 	StageWorkSeconds  float64                         `json:"stage_work_seconds"`
 	TotalSeconds      float64                         `json:"total_seconds"`
+}
+
+type dailyTelegramBreakdown struct {
+	GetDialogsCalls          int     `json:"get_dialogs_calls"`
+	GetDialogsWallSeconds    float64 `json:"get_dialogs_wall_seconds"`
+	GetDialogsWaitSeconds    float64 `json:"get_dialogs_wait_seconds"`
+	GetHistoryCalls          int     `json:"get_history_calls"`
+	GetHistoryWallSeconds    float64 `json:"get_history_wall_seconds"`
+	GetHistoryWaitSeconds    float64 `json:"get_history_wait_seconds"`
+	RPCServiceSeconds        float64 `json:"rpc_service_seconds"`
+	DownloadQueueWaitSeconds float64 `json:"download_queue_wait_seconds"`
+	DownloadTransferSeconds  float64 `json:"download_transfer_seconds"`
 }
 
 type dailyDialogCheckpointMetrics struct {
@@ -124,6 +137,7 @@ func (c *dailyStageTimingCollector) ObserveMediaPipeline(metrics stages.MediaPip
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	copy := metrics
+	copy.Workers = append([]stages.MediaWorkerMetrics(nil), metrics.Workers...)
 	c.mediaPipeline = &copy
 }
 
@@ -151,6 +165,15 @@ func (c *dailyStageTimingCollector) ObserveDownloadTransfer(metrics stages.Downl
 	c.downloadTransport.Retries += metrics.Retries
 	c.downloadTransport.DownloaderFloods += metrics.FloodWaits
 	c.downloadTransport.DownloaderTransportFloods += metrics.TransportFloods
+}
+
+func (c *dailyStageTimingCollector) ObserveDownloadQueueWait(duration time.Duration) {
+	if c == nil || duration < 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.downloadTransport.QueueWaitSeconds += duration.Seconds()
 }
 
 func (c *dailyStageTimingCollector) ObserveDialogCheckpoint(decision harvest.DailyDialogCheckpointDecision, stats harvest.OutgoingStats) {
@@ -187,7 +210,7 @@ func (c *dailyStageTimingCollector) ObserveOutgoingStats(stats harvest.OutgoingS
 		ProofShadowRejected:  stats.CheckpointProofShadowRejected,
 		ProofRejections:      cloneStringIntMap(stats.CheckpointProofRejections),
 	}
-	c.telegramRPC = stats.RPCPacing
+	c.telegramRPC = cloneRPCPacingStats(stats.RPCPacing)
 }
 
 func cloneStringIntMap(source map[string]int) map[string]int {
@@ -199,6 +222,51 @@ func cloneStringIntMap(source map[string]int) map[string]int {
 		result[key] = value
 	}
 	return result
+}
+
+func cloneRPCPacingStats(source harvest.RPCPacingStats) harvest.RPCPacingStats {
+	result := source
+	result.Operations = cloneStringIntMap(source.Operations)
+	if len(source.OperationTimings) == 0 {
+		result.OperationTimings = nil
+		return result
+	}
+	result.OperationTimings = make(map[string]harvest.RPCOperationTiming, len(source.OperationTimings))
+	for operation, timing := range source.OperationTimings {
+		result.OperationTimings[operation] = timing
+	}
+	return result
+}
+
+func cloneDownloadTransportMetrics(source stages.DownloadTransportMetrics) stages.DownloadTransportMetrics {
+	result := source
+	result.ThreadDecisions = cloneStringIntMap(source.ThreadDecisions)
+	return result
+}
+
+func cloneMediaPipelineMetrics(source *stages.MediaPipelineMetrics) *stages.MediaPipelineMetrics {
+	if source == nil {
+		return nil
+	}
+	result := *source
+	result.Workers = append([]stages.MediaWorkerMetrics(nil), source.Workers...)
+	return &result
+}
+
+func buildDailyTelegramBreakdown(rpc harvest.RPCPacingStats, download stages.DownloadTransportMetrics) dailyTelegramBreakdown {
+	dialogs := rpc.OperationTimings["get_dialogs"]
+	history := rpc.OperationTimings["get_history"]
+	return dailyTelegramBreakdown{
+		GetDialogsCalls:          dialogs.Calls,
+		GetDialogsWallSeconds:    dialogs.WallSeconds,
+		GetDialogsWaitSeconds:    dialogs.WaitSeconds,
+		GetHistoryCalls:          history.Calls,
+		GetHistoryWallSeconds:    history.WallSeconds,
+		GetHistoryWaitSeconds:    history.WaitSeconds,
+		RPCServiceSeconds:        rpc.ServiceSeconds,
+		DownloadQueueWaitSeconds: download.QueueWaitSeconds,
+		DownloadTransferSeconds:  download.Seconds,
+	}
 }
 
 func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport {
@@ -220,14 +288,18 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 	total := completedAt.Sub(c.startedAt).Seconds()
 	asrSpeedX := speedRatio(c.audioSeconds, stageSeconds.ASR)
 	pipelineSpeedX := speedRatio(c.audioSeconds, stageSeconds.ModelColdStart+stageSeconds.FFmpeg+stageSeconds.ASR)
-	downloadTransport := c.downloadTransport
+	downloadTransport := cloneDownloadTransportMetrics(c.downloadTransport)
 	if downloadTransport.Seconds > 0 && downloadTransport.TransferredBytes > 0 {
 		downloadTransport.ThroughputMiBPerS = float64(downloadTransport.TransferredBytes) / (1024 * 1024) / downloadTransport.Seconds
 	}
-	if c.mediaPipeline != nil {
-		asrSpeedX = c.mediaPipeline.WorkerWorkSpeedX
-		pipelineSpeedX = c.mediaPipeline.PoolSpeedX
+	mediaPipeline := cloneMediaPipelineMetrics(c.mediaPipeline)
+	if mediaPipeline != nil {
+		asrSpeedX = mediaPipeline.WorkerWorkSpeedX
+		pipelineSpeedX = mediaPipeline.PoolSpeedX
 	}
+	telegramRPC := cloneRPCPacingStats(c.telegramRPC)
+	historyPagination := c.historyPagination
+	historyPagination.ProofRejections = cloneStringIntMap(c.historyPagination.ProofRejections)
 	report := dailyStageTimingReport{
 		RunID:             c.runID,
 		Command:           c.command,
@@ -240,11 +312,12 @@ func (c *dailyStageTimingCollector) Report(runErr error) dailyStageTimingReport 
 		AudioSeconds:      c.audioSeconds,
 		ASRSpeedX:         asrSpeedX,
 		PipelineSpeedX:    pipelineSpeedX,
-		MediaPipeline:     c.mediaPipeline,
+		MediaPipeline:     mediaPipeline,
 		DownloadTransport: downloadTransport,
 		DialogCheckpoint:  c.dialogCheckpoint,
-		HistoryPagination: c.historyPagination,
-		TelegramRPC:       c.telegramRPC,
+		HistoryPagination: historyPagination,
+		TelegramRPC:       telegramRPC,
+		TelegramBreakdown: buildDailyTelegramBreakdown(telegramRPC, downloadTransport),
 		StageWorkSeconds:  stageWork,
 		TotalSeconds:      total,
 	}
@@ -278,7 +351,7 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			pipelineQueuePeak = report.MediaPipeline.QueuePeak
 		}
 		fmt.Fprintf(out,
-			"timings telegram_scan=%.3fs download=%.3fs download_files=%d download_bytes=%d download_mib_s=%.2f download_peak_threads=%d download_retries=%d download_floods=%d download_transport_floods=%d ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
+			"timings telegram_scan=%.3fs download=%.3fs download_files=%d download_bytes=%d download_mib_s=%.2f download_peak_threads=%d download_retries=%d download_floods=%d download_transport_floods=%d download_queue_wait=%.3fs download_transfer=%.3fs ffmpeg=%.3fs model_cold_start=%.3fs asr=%.3fs render=%.3fs stage_work=%.3fs audio=%.3fs asr_speed=%.2fx pipeline_speed=%.2fx pipeline_mode=%s pipeline_span=%.3fs pipeline_overlap=%.3fs pipeline_workers=%d pipeline_queue_peak=%d rpc_spacing_ms=%d rpc_calls=%d rpc_wait=%.3fs rpc_service=%.3fs get_dialogs_calls=%d get_dialogs_wall=%.3fs get_dialogs_wait=%.3fs get_history_calls=%d get_history_wall=%.3fs get_history_wait=%.3fs transport_floods=%d history_data_pages=%d history_empty_proof_pages=%d history_sparse_continuations=%d checkpoint_proof_candidates=%d checkpoint_proof_stops=%d checkpoint_proof_shadow_confirmed=%d checkpoint_proof_shadow_rejected=%d checkpoint_enabled=%t checkpoint_history_dialogs=%d checkpoint_unchanged=%d checkpoint_changed=%d checkpoint_new=%d checkpoint_fallback=%s total=%.3fs report=%s\n",
 			report.Stages.TelegramScan,
 			report.Stages.Download,
 			report.DownloadTransport.Files,
@@ -288,6 +361,8 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			report.DownloadTransport.Retries,
 			report.DownloadTransport.DownloaderFloods,
 			report.DownloadTransport.DownloaderTransportFloods,
+			report.TelegramBreakdown.DownloadQueueWaitSeconds,
+			report.TelegramBreakdown.DownloadTransferSeconds,
 			report.Stages.FFmpeg,
 			report.Stages.ModelColdStart,
 			report.Stages.ASR,
@@ -304,6 +379,13 @@ func finishDailyStageTimings(stateDir string, collector *dailyStageTimingCollect
 			report.TelegramRPC.SpacingMillis,
 			report.TelegramRPC.Calls,
 			report.TelegramRPC.ScheduledWaitSeconds,
+			report.TelegramBreakdown.RPCServiceSeconds,
+			report.TelegramBreakdown.GetDialogsCalls,
+			report.TelegramBreakdown.GetDialogsWallSeconds,
+			report.TelegramBreakdown.GetDialogsWaitSeconds,
+			report.TelegramBreakdown.GetHistoryCalls,
+			report.TelegramBreakdown.GetHistoryWallSeconds,
+			report.TelegramBreakdown.GetHistoryWaitSeconds,
 			report.TelegramRPC.TransportFloods,
 			report.HistoryPagination.DataPages,
 			report.HistoryPagination.EmptyProofPages,

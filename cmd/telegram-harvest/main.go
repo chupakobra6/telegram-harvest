@@ -1026,6 +1026,7 @@ func runDailyJobsWithCheckpoint(
 	if timings != nil {
 		history.StageTiming = timings.Observe
 		history.DownloadTiming = timings.ObserveDownloadTransfer
+		history.DownloadQueueTiming = timings.ObserveDownloadQueueWait
 		history.AudioDurationTiming = timings.ObserveAudioDuration
 		history.MediaPipelineTiming = timings.ObserveMediaPipeline
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -932,6 +934,139 @@ func TestRPCPacerReservesStrictSequentialSlotsAndReportsEvidence(t *testing.T) {
 	stats.Operations["get_history"] = 99
 	if got := s.RPCPacingStats().Operations["get_history"]; got != 2 {
 		t.Fatalf("RPC stats exposed mutable state: %d", got)
+	}
+}
+
+func TestRPCPacerReportsReservationsWhenSpacingIsDisabled(t *testing.T) {
+	s := &Session{}
+
+	if delay := s.reserveRPCSlot("get_dialogs", time.Now()); delay != 0 {
+		t.Fatalf("delay = %s, want zero", delay)
+	}
+	stats := s.RPCPacingStats()
+	if stats.SpacingMillis != 0 || stats.Calls != 1 || stats.Operations["get_dialogs"] != 1 {
+		t.Fatalf("pacing stats = %+v", stats)
+	}
+}
+
+func TestRPCOperationTimingsAggregateAttemptsAndCopyState(t *testing.T) {
+	s := &Session{}
+	s.observeRPCOperationTiming("get_dialogs", 3*time.Second, time.Second, 2*time.Second)
+	s.observeRPCOperationTiming("get_dialogs", 4*time.Second, 1500*time.Millisecond, 2500*time.Millisecond)
+	s.observeRPCOperationTiming("get_history", 2*time.Second, 500*time.Millisecond, 1500*time.Millisecond)
+
+	stats := s.RPCPacingStats()
+	dialogs := stats.OperationTimings["get_dialogs"]
+	if dialogs.Calls != 2 || dialogs.WallSeconds != 7 || dialogs.WaitSeconds != 2.5 || dialogs.ServiceSeconds != 4.5 {
+		t.Fatalf("get_dialogs timing = %+v", dialogs)
+	}
+	if stats.ServiceSeconds != 6 {
+		t.Fatalf("service seconds = %f, want 6", stats.ServiceSeconds)
+	}
+	if dialogs.WallSeconds != dialogs.WaitSeconds+dialogs.ServiceSeconds {
+		t.Fatalf("wall = %f, wait + service = %f", dialogs.WallSeconds, dialogs.WaitSeconds+dialogs.ServiceSeconds)
+	}
+
+	stats.OperationTimings["get_dialogs"] = harvest.RPCOperationTiming{Calls: 99}
+	if got := s.RPCPacingStats().OperationTimings["get_dialogs"].Calls; got != 2 {
+		t.Fatalf("RPC timing stats exposed mutable state: %d", got)
+	}
+}
+
+func TestPerformRPCMeasuresFailedNetworkAttempt(t *testing.T) {
+	s := &Session{}
+	wantErr := errors.New("telegram unavailable")
+	err := s.performRPC(context.Background(), "get_history", func(context.Context) error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("performRPC error = %v, want %v", err, wantErr)
+	}
+	timing := s.RPCPacingStats().OperationTimings["get_history"]
+	if timing.Calls != 1 {
+		t.Fatalf("get_history attempts = %d, want 1", timing.Calls)
+	}
+	if math.Abs(timing.WallSeconds-(timing.WaitSeconds+timing.ServiceSeconds)) > 1e-9 {
+		t.Fatalf("wall = %.9f, wait + service = %.9f", timing.WallSeconds, timing.WaitSeconds+timing.ServiceSeconds)
+	}
+}
+
+func TestPerformRPCDoesNotReportServiceWhenPacingIsCanceled(t *testing.T) {
+	s := &Session{
+		rpcSpacing: 500 * time.Millisecond,
+		nextRPCAt:  time.Now().Add(time.Hour),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	err := s.performRPC(ctx, "get_history", func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("performRPC error = %v, want context canceled", err)
+	}
+	if called {
+		t.Fatal("network callback ran after pacing cancellation")
+	}
+	if timing := s.RPCPacingStats().OperationTimings["get_history"]; timing.Calls != 0 {
+		t.Fatalf("canceled pacing reported a network attempt: %+v", timing)
+	}
+}
+
+func TestDumpOutgoingRangeReportsRPCMetricsOnValidationFailure(t *testing.T) {
+	s := &Session{}
+	s.observeRPCOperationTiming("get_dialogs", 3*time.Second, time.Second, 2*time.Second)
+
+	stats, err := s.DumpOutgoingRange(context.Background(), harvest.OutgoingRangeOptions{}, nil)
+	if err == nil {
+		t.Fatal("expected invalid range to fail")
+	}
+	if stats.RPCPacing.ServiceSeconds != 2 || stats.RPCPacing.OperationTimings["get_dialogs"].Calls != 1 {
+		t.Fatalf("failure stats lost RPC timings: %+v", stats.RPCPacing)
+	}
+}
+
+func TestSaveAttachmentReportsQueueWaitWhenPacingIsCanceled(t *testing.T) {
+	s := &Session{
+		client:     &telegram.Client{},
+		rpcSpacing: 500 * time.Millisecond,
+		nextRPCAt:  time.Now().Add(time.Hour),
+	}
+	record := harvest.MessageRecord{
+		Chat:        harvest.Chat{ID: 1},
+		MessageID:   2,
+		Attachments: []harvest.Attachment{{Kind: "document", FileName: "document.bin"}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	observed := false
+	s.saveAttachmentFile(
+		ctx,
+		&record,
+		0,
+		&tg.InputDocumentFileLocation{},
+		"document.bin",
+		t.TempDir(),
+		false,
+		nil,
+		nil,
+		func(duration time.Duration) {
+			if duration < 0 {
+				t.Fatalf("queue wait = %s, want non-negative", duration)
+			}
+			observed = true
+		},
+	)
+
+	if !observed {
+		t.Fatal("download queue wait was not observed")
+	}
+	if !strings.Contains(record.Attachments[0].DownloadError, context.Canceled.Error()) {
+		t.Fatalf("download error = %q, want context canceled", record.Attachments[0].DownloadError)
+	}
+	if stats := s.RPCPacingStats(); stats.Operations["download_media"] != 1 {
+		t.Fatalf("download reservation metrics = %+v", stats)
 	}
 }
 
