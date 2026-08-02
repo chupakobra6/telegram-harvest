@@ -91,20 +91,22 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	defer cleanup()
 	wavBytes := fileSize(wavPath)
 	diagnostics := &Diagnostics{}
-	var leadingTrimDuration time.Duration
+	var longFormPreparationDuration time.Duration
 	var leadingSpeechOffset float64
+	var lastDetectedSpeechEnd float64
 	if r.opts.WhisperLongForm.Enabled {
-		trimStart := time.Now()
-		trimmedPath, offset, trimCleanup, trimErr := prepareLeadingSpeechWAV(ctx, r.opts, wavPath, filepath.Dir(outputPath))
-		leadingTrimDuration = time.Since(trimStart)
-		if trimErr != nil {
-			return Result{}, trimErr
+		preparationStart := time.Now()
+		prepared, preparationErr := prepareLongFormWAV(ctx, r.opts, wavPath, filepath.Dir(outputPath))
+		longFormPreparationDuration = time.Since(preparationStart)
+		if preparationErr != nil {
+			return Result{}, preparationErr
 		}
-		defer trimCleanup()
-		wavPath = trimmedPath
+		defer prepared.cleanup()
+		wavPath = prepared.path
 		wavBytes = fileSize(wavPath)
-		leadingSpeechOffset = offset
-		diagnostics.LeadingSpeechOffsetSeconds = offset
+		leadingSpeechOffset = prepared.leadingSpeechOffset
+		lastDetectedSpeechEnd = prepared.lastSpeechEnd
+		diagnostics.LeadingSpeechOffsetSeconds = leadingSpeechOffset
 	}
 
 	r.mu.Lock()
@@ -153,7 +155,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	var text string
 	var inferenceDiagnostics *Diagnostics
 	if r.opts.WhisperLongForm.Enabled {
-		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath)
+		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath, lastDetectedSpeechEnd)
 	} else {
 		text, inferenceDiagnostics, err = r.inferLocked(ctx, wavPath)
 	}
@@ -181,7 +183,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 		ModelColdStartDuration:      modelColdStartDuration,
 		ASRDuration:                 asrDuration,
 		SpeechGateDuration:          speechGateDuration,
-		LongFormPreparationDuration: leadingTrimDuration,
+		LongFormPreparationDuration: longFormPreparationDuration,
 		LeadingSpeechOffset:         leadingSpeechOffset,
 		TotalDuration:               time.Since(start),
 		InputBytes:                  fileSize(inputPath),
@@ -192,7 +194,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	}, nil
 }
 
-func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath string) (string, *Diagnostics, error) {
+func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath string, lastDetectedSpeechEnd float64) (string, *Diagnostics, error) {
 	duration := wavPCM16MonoDuration(fileSize(wavPath))
 	if duration <= 0 {
 		return "", nil, fmt.Errorf("trusted long-form inference received empty audio")
@@ -201,7 +203,9 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	if err != nil {
 		return "", nil, err
 	}
-	if err := validateTimestampedLongFormResponse(decoded, duration); err != nil {
+	settings := r.opts.WhisperLongForm.normalized()
+	coverageGap, err := validateTimestampedLongFormResponse(decoded, duration, lastDetectedSpeechEnd, settings.TrailingCoverageToleranceSeconds)
+	if err != nil {
 		return "", nil, err
 	}
 	diagnostics := whisperDiagnostics(decoded.Segments)
@@ -209,80 +213,173 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	diagnostics.DecodedAudioDurationSeconds = decoded.Duration
 	diagnostics.FirstSegmentStartSeconds = *decoded.Segments[0].Start
 	diagnostics.LastSegmentEndSeconds = *decoded.Segments[len(decoded.Segments)-1].End
+	diagnostics.LastDetectedSpeechEndSeconds = lastDetectedSpeechEnd
+	diagnostics.TrailingSpeechCoverageGapSeconds = coverageGap
+	diagnostics.TrailingCoverageToleranceSeconds = settings.TrailingCoverageToleranceSeconds
+	diagnostics.CoverageValidated = true
 	text, removed := stripWhisperLongFormTerminalRepetitions(decoded.Text)
 	diagnostics.RemovedTerminalHallucinations = append(diagnostics.RemovedTerminalHallucinations, removed...)
 	return text, diagnostics, nil
 }
 
-func validateTimestampedLongFormResponse(decoded whisperResponse, expectedDuration float64) error {
+func validateTimestampedLongFormResponse(decoded whisperResponse, expectedDuration, lastDetectedSpeechEnd, coverageTolerance float64) (float64, error) {
 	if decoded.Duration <= 0 || math.Abs(decoded.Duration-expectedDuration) > 1 {
-		return fmt.Errorf("whisper.cpp long-form duration %.3fs does not match input %.3fs", decoded.Duration, expectedDuration)
+		return 0, fmt.Errorf("whisper.cpp long-form duration %.3fs does not match input %.3fs", decoded.Duration, expectedDuration)
 	}
 	if strings.TrimSpace(decoded.Text) == "" || len(decoded.Segments) == 0 {
-		return fmt.Errorf("whisper.cpp long-form returned no timestamped speech")
+		return 0, fmt.Errorf("whisper.cpp long-form returned no timestamped speech")
+	}
+	if lastDetectedSpeechEnd <= 0 || lastDetectedSpeechEnd > expectedDuration+1 {
+		return 0, fmt.Errorf("trusted long-form VAD returned invalid last speech end %.3fs for %.3fs input", lastDetectedSpeechEnd, expectedDuration)
+	}
+	if coverageTolerance <= 0 {
+		return 0, fmt.Errorf("trusted long-form coverage tolerance must be positive")
 	}
 	previousStart := -1.0
 	previousEnd := -1.0
 	for index, segment := range decoded.Segments {
 		if segment.Start == nil || segment.End == nil {
-			return fmt.Errorf("whisper.cpp long-form segment %d has no timestamps", index)
+			return 0, fmt.Errorf("whisper.cpp long-form segment %d has no timestamps", index)
 		}
 		start := *segment.Start
 		end := *segment.End
 		if start < 0 || end < start || start < previousStart || end < previousEnd || end > decoded.Duration+1 {
-			return fmt.Errorf("whisper.cpp long-form segment %d has invalid timestamps %.3f..%.3f", index, start, end)
+			return 0, fmt.Errorf("whisper.cpp long-form segment %d has invalid timestamps %.3f..%.3f", index, start, end)
 		}
 		previousStart = start
 		previousEnd = end
 	}
-	return nil
+	coverageGap := math.Max(0, lastDetectedSpeechEnd-previousEnd)
+	if coverageGap > coverageTolerance {
+		return coverageGap, fmt.Errorf("whisper.cpp long-form ended at %.3fs, %.3fs before the last detected speech at %.3fs (tolerance %.3fs)", previousEnd, coverageGap, lastDetectedSpeechEnd, coverageTolerance)
+	}
+	return coverageGap, nil
 }
 
-var leadingSpeechPattern = regexp.MustCompile(`(?m)^Speech segment \d+: start = ([0-9]+(?:\.[0-9]+)?),`)
+type longFormAudioPreparation struct {
+	path                string
+	leadingSpeechOffset float64
+	lastSpeechEnd       float64
+	cleanup             func()
+}
 
-func prepareLeadingSpeechWAV(ctx context.Context, opts Options, wavPath, tempDir string) (string, float64, func(), error) {
+type vadSpeechSegment struct {
+	start float64
+	end   float64
+}
+
+var (
+	vadSpeechCountPattern   = regexp.MustCompile(`(?m)^Detected (\d+) speech segments:\r?$`)
+	vadSpeechSegmentPattern = regexp.MustCompile(`(?m)^Speech segment \d+: start = ([0-9]+(?:\.[0-9]+)?), end = ([0-9]+(?:\.[0-9]+)?)\r?$`)
+)
+
+func prepareLongFormWAV(ctx context.Context, opts Options, wavPath, tempDir string) (longFormAudioPreparation, error) {
 	duration := wavPCM16MonoDuration(fileSize(wavPath))
 	if duration <= 0 {
-		return "", 0, func() {}, fmt.Errorf("leading-speech trim received empty audio")
+		return longFormAudioPreparation{}, fmt.Errorf("trusted long-form preparation received empty audio")
 	}
+	settings := opts.WhisperLongForm.normalized()
+	firstSpeech, lastSpeechInFirstWindow, firstWindowCoversEnd, err := findFirstSpeech(ctx, opts, wavPath, tempDir, duration)
+	if err != nil {
+		return longFormAudioPreparation{}, err
+	}
+	lastSpeechEnd := lastSpeechInFirstWindow
+	if !firstWindowCoversEnd {
+		lastSpeechEnd, err = findLastSpeech(ctx, opts, wavPath, tempDir, duration)
+		if err != nil {
+			return longFormAudioPreparation{}, err
+		}
+	}
+	trimOffset := math.Max(0, firstSpeech-float64(settings.LeadInMS)/1000)
+	relativeLastSpeechEnd := lastSpeechEnd - trimOffset
+	if relativeLastSpeechEnd <= 0 {
+		return longFormAudioPreparation{}, fmt.Errorf("trusted long-form speech bounds %.3f..%.3f are invalid", firstSpeech, lastSpeechEnd)
+	}
+	if trimOffset < 0.001 {
+		return longFormAudioPreparation{
+			path:          wavPath,
+			lastSpeechEnd: relativeLastSpeechEnd,
+			cleanup:       func() {},
+		}, nil
+	}
+	trimmedPath, cleanup, err := temporaryWAV(tempDir, ".asr-leading-trimmed-*.wav")
+	if err != nil {
+		return longFormAudioPreparation{}, err
+	}
+	if err := extractASRWAVRange(ctx, opts, wavPath, trimmedPath, trimOffset, duration-trimOffset); err != nil {
+		cleanup()
+		return longFormAudioPreparation{}, err
+	}
+	return longFormAudioPreparation{
+		path:                trimmedPath,
+		leadingSpeechOffset: trimOffset,
+		lastSpeechEnd:       relativeLastSpeechEnd,
+		cleanup:             cleanup,
+	}, nil
+}
+
+func findFirstSpeech(ctx context.Context, opts Options, wavPath, tempDir string, duration float64) (float64, float64, bool, error) {
 	settings := opts.WhisperLongForm.normalized()
 	window := float64(settings.ScanWindowSeconds)
 	step := float64(settings.ScanWindowSeconds - settings.ScanOverlapSeconds)
 	for offset := 0.0; offset < duration; offset += step {
 		windowDuration := math.Min(window, duration-offset)
-		chunkPath, chunkCleanup, err := temporaryWAV(tempDir, ".asr-leading-window-*.wav")
+		segments, err := probeSpeechWindow(ctx, opts, wavPath, tempDir, offset, windowDuration, ".asr-leading-window-*.wav")
 		if err != nil {
-			return "", 0, func() {}, err
+			return 0, 0, false, err
 		}
-		if err := extractASRWAVRange(ctx, opts, wavPath, chunkPath, offset, windowDuration); err != nil {
-			chunkCleanup()
-			return "", 0, func() {}, err
-		}
-		localStart, found, err := runLeadingSpeechProbe(ctx, opts, chunkPath)
-		chunkCleanup()
-		if err != nil {
-			return "", 0, func() {}, err
-		}
-		if found {
-			trimOffset := math.Max(0, offset+localStart-float64(settings.LeadInMS)/1000)
-			if trimOffset < 0.001 {
-				return wavPath, 0, func() {}, nil
-			}
-			trimmedPath, cleanup, err := temporaryWAV(tempDir, ".asr-leading-trimmed-*.wav")
-			if err != nil {
-				return "", 0, func() {}, err
-			}
-			if err := extractASRWAVRange(ctx, opts, wavPath, trimmedPath, trimOffset, duration-trimOffset); err != nil {
-				cleanup()
-				return "", 0, func() {}, err
-			}
-			return trimmedPath, trimOffset, cleanup, nil
+		if len(segments) > 0 {
+			first := offset + segments[0].start
+			last := offset + segments[len(segments)-1].end
+			return first, last, offset+windowDuration >= duration, nil
 		}
 		if offset+windowDuration >= duration {
 			break
 		}
 	}
-	return "", 0, func() {}, fmt.Errorf("leading-speech trim found no speech in %.3fs", duration)
+	return 0, 0, false, fmt.Errorf("trusted long-form preparation found no speech in %.3fs", duration)
+}
+
+func findLastSpeech(ctx context.Context, opts Options, wavPath, tempDir string, duration float64) (float64, error) {
+	settings := opts.WhisperLongForm.normalized()
+	window := float64(settings.ScanWindowSeconds)
+	overlap := float64(settings.ScanOverlapSeconds)
+	windowEnd := duration
+	for windowEnd > 0 {
+		offset := math.Max(0, windowEnd-window)
+		windowDuration := windowEnd - offset
+		segments, err := probeSpeechWindow(ctx, opts, wavPath, tempDir, offset, windowDuration, ".asr-trailing-window-*.wav")
+		if err != nil {
+			return 0, err
+		}
+		if len(segments) > 0 {
+			return offset + segments[len(segments)-1].end, nil
+		}
+		if offset == 0 {
+			break
+		}
+		windowEnd = offset + overlap
+	}
+	return 0, fmt.Errorf("trusted long-form trailing scan found no speech in %.3fs", duration)
+}
+
+func probeSpeechWindow(ctx context.Context, opts Options, wavPath, tempDir string, offset, duration float64, pattern string) ([]vadSpeechSegment, error) {
+	chunkPath, cleanup, err := temporaryWAV(tempDir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	if err := extractASRWAVRange(ctx, opts, wavPath, chunkPath, offset, duration); err != nil {
+		return nil, err
+	}
+	segments, err := runSpeechProbe(ctx, opts, chunkPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(segments) > 0 && segments[len(segments)-1].end > duration+1 {
+		return nil, fmt.Errorf("whisper speech-boundary probe ended at %.3fs beyond %.3fs window", segments[len(segments)-1].end, duration)
+	}
+	return segments, nil
 }
 
 func temporaryWAV(dir, pattern string) (string, func(), error) {
@@ -318,7 +415,7 @@ func extractASRWAVRange(ctx context.Context, opts Options, inputPath, outputPath
 	return nil
 }
 
-func runLeadingSpeechProbe(ctx context.Context, opts Options, wavPath string) (float64, bool, error) {
+func runSpeechProbe(ctx context.Context, opts Options, wavPath string) ([]vadSpeechSegment, error) {
 	settings := opts.WhisperLongForm.normalized()
 	args := whisperVADArgs(
 		opts.WhisperLongForm.ModelPath,
@@ -332,24 +429,48 @@ func runLeadingSpeechProbe(ctx context.Context, opts Options, wavPath string) (f
 	command.Env = commandEnvironment(opts.Environment)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		return 0, false, fmt.Errorf("whisper leading-speech probe: %w: %s", err, trimDetail(string(output)))
+		return nil, fmt.Errorf("whisper speech-boundary probe: %w: %s", err, trimDetail(string(output)))
 	}
-	return parseLeadingSpeechStart(string(output))
+	return parseVADSpeechSegments(string(output))
 }
 
-func parseLeadingSpeechStart(output string) (float64, bool, error) {
-	if strings.Contains(output, "Detected 0 speech segments:") {
-		return 0, false, nil
+func parseVADSpeechSegments(output string) ([]vadSpeechSegment, error) {
+	countMatch := vadSpeechCountPattern.FindStringSubmatch(output)
+	if len(countMatch) != 2 {
+		return nil, fmt.Errorf("whisper speech-boundary probe returned an unrecognized result: %s", trimDetail(output))
 	}
-	match := leadingSpeechPattern.FindStringSubmatch(output)
-	if len(match) != 2 {
-		return 0, false, fmt.Errorf("whisper leading-speech probe returned an unrecognized result: %s", trimDetail(output))
-	}
-	centiseconds, err := strconv.ParseFloat(match[1], 64)
+	declaredCount, err := strconv.Atoi(countMatch[1])
 	if err != nil {
-		return 0, false, fmt.Errorf("parse leading-speech timestamp %q: %w", match[1], err)
+		return nil, fmt.Errorf("parse speech segment count %q: %w", countMatch[1], err)
 	}
-	return centiseconds / 100, true, nil
+	if declaredCount == 0 {
+		return nil, nil
+	}
+	matches := vadSpeechSegmentPattern.FindAllStringSubmatch(output, -1)
+	if len(matches) != declaredCount {
+		return nil, fmt.Errorf("whisper speech-boundary probe declared %d segments but returned %d", declaredCount, len(matches))
+	}
+	segments := make([]vadSpeechSegment, 0, len(matches))
+	previousStart := -1.0
+	previousEnd := -1.0
+	for index, match := range matches {
+		startCentiseconds, err := strconv.ParseFloat(match[1], 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse speech segment %d start %q: %w", index, match[1], err)
+		}
+		endCentiseconds, err := strconv.ParseFloat(match[2], 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse speech segment %d end %q: %w", index, match[2], err)
+		}
+		segment := vadSpeechSegment{start: startCentiseconds / 100, end: endCentiseconds / 100}
+		if segment.start < 0 || segment.end < segment.start || segment.start < previousStart || segment.end < previousEnd {
+			return nil, fmt.Errorf("whisper speech-boundary probe returned invalid segment %d: %.3f..%.3f", index, segment.start, segment.end)
+		}
+		segments = append(segments, segment)
+		previousStart = segment.start
+		previousEnd = segment.end
+	}
+	return segments, nil
 }
 
 func (r *WhisperServerRunner) startLocked(ctx context.Context) (time.Duration, error) {

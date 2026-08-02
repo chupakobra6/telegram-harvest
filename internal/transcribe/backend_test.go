@@ -139,7 +139,9 @@ func TestProductionWhisperProfileCanTrimOnlyLeadingSilence(t *testing.T) {
 	}
 	if descriptor.LongForm == nil || descriptor.LongForm.Model != ProductionSpeechGateFile ||
 		descriptor.LongForm.ScanWindowSeconds != 300 || descriptor.LongForm.ScanOverlapSeconds != 10 ||
-		descriptor.LongForm.LeadInMS != 1000 || descriptor.LongForm.DecodeStrategy != whisperLongFormStrategy {
+		descriptor.LongForm.LeadInMS != 1000 ||
+		descriptor.LongForm.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds ||
+		descriptor.LongForm.DecodeStrategy != whisperLongFormStrategy {
 		t.Fatalf("long form = %#v", descriptor.LongForm)
 	}
 	if opts.WhisperLongForm.Command != "/runtime/bin/whisper-vad-speech-segments" {

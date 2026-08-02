@@ -15,13 +15,14 @@ import (
 )
 
 const (
-	BackendWhisperCPP        = "whispercpp"
-	AcceleratorMetal         = "metal"
-	ProductionLanguage       = "ru"
-	ProductionThreads        = 4
-	ProductionModelFile      = "ggml-large-v3-turbo-q5_0.bin"
-	ProductionSpeechGateFile = "ggml-silero-v6.2.0.bin"
-	whisperLongFormStrategy  = "native-timestamped-v1"
+	BackendWhisperCPP                = "whispercpp"
+	AcceleratorMetal                 = "metal"
+	ProductionLanguage               = "ru"
+	ProductionThreads                = 4
+	ProductionModelFile              = "ggml-large-v3-turbo-q5_0.bin"
+	ProductionSpeechGateFile         = "ggml-silero-v6.2.0.bin"
+	whisperLongFormStrategy          = "native-timestamped-v2"
+	longFormCoverageToleranceSeconds = 2.0
 )
 
 // Descriptor is the stable identity of the production ASR implementation.
@@ -85,50 +86,56 @@ type WhisperSpeechGateDescriptor struct {
 	SpeechPadMS          int     `json:"speech_pad_ms"`
 }
 
-// WhisperLongFormOptions finds the first speech with short Silero windows.
-// The remaining audio is decoded by Whisper's native timestamped long-form
-// loop, which owns window boundaries and carries its confirmed text context.
+// WhisperLongFormOptions finds the first and last speech with bounded Silero
+// windows. The remaining audio is decoded by Whisper's native timestamped
+// long-form loop, which owns window boundaries and carries confirmed context.
 type WhisperLongFormOptions struct {
-	Enabled              bool
-	Command              string
-	ModelPath            string
-	Threshold            *float64
-	MinSpeechDurationMS  *int
-	MinSilenceDurationMS *int
-	SpeechPadMS          *int
-	ScanWindowSeconds    int
-	ScanOverlapSeconds   int
-	LeadInMS             int
+	Enabled                          bool
+	Command                          string
+	ModelPath                        string
+	Threshold                        *float64
+	MinSpeechDurationMS              *int
+	MinSilenceDurationMS             *int
+	SpeechPadMS                      *int
+	ScanWindowSeconds                int
+	ScanOverlapSeconds               int
+	LeadInMS                         int
+	TrailingCoverageToleranceSeconds float64
 }
 
 type WhisperLongFormDescriptor struct {
-	Enabled              bool    `json:"enabled"`
-	Model                string  `json:"model"`
-	Threshold            float64 `json:"threshold"`
-	MinSpeechDurationMS  int     `json:"min_speech_duration_ms"`
-	MinSilenceDurationMS int     `json:"min_silence_duration_ms"`
-	SpeechPadMS          int     `json:"speech_pad_ms"`
-	ScanWindowSeconds    int     `json:"scan_window_seconds"`
-	ScanOverlapSeconds   int     `json:"scan_overlap_seconds"`
-	LeadInMS             int     `json:"lead_in_ms"`
-	DecodeStrategy       string  `json:"decode_strategy"`
+	Enabled                          bool    `json:"enabled"`
+	Model                            string  `json:"model"`
+	Threshold                        float64 `json:"threshold"`
+	MinSpeechDurationMS              int     `json:"min_speech_duration_ms"`
+	MinSilenceDurationMS             int     `json:"min_silence_duration_ms"`
+	SpeechPadMS                      int     `json:"speech_pad_ms"`
+	ScanWindowSeconds                int     `json:"scan_window_seconds"`
+	ScanOverlapSeconds               int     `json:"scan_overlap_seconds"`
+	LeadInMS                         int     `json:"lead_in_ms"`
+	TrailingCoverageToleranceSeconds float64 `json:"trailing_coverage_tolerance_seconds"`
+	DecodeStrategy                   string  `json:"decode_strategy"`
 }
 
 // Diagnostics are backend confidence signals. They are evidence for benchmark
 // analysis, not a generic automatic rejection rule.
 type Diagnostics struct {
-	Segments                      int      `json:"segments"`
-	MeanAverageLogProb            float64  `json:"mean_average_log_probability,omitempty"`
-	MinimumAverageLogProb         float64  `json:"minimum_average_log_probability,omitempty"`
-	MeanNoSpeechProb              float64  `json:"mean_no_speech_probability,omitempty"`
-	MaximumNoSpeechProb           float64  `json:"maximum_no_speech_probability,omitempty"`
-	SpeechGatePassed              *bool    `json:"speech_gate_passed,omitempty"`
-	LeadingSpeechOffsetSeconds    float64  `json:"leading_speech_offset_seconds,omitempty"`
-	TimestampedSegments           bool     `json:"timestamped_segments,omitempty"`
-	DecodedAudioDurationSeconds   float64  `json:"decoded_audio_duration_seconds,omitempty"`
-	FirstSegmentStartSeconds      float64  `json:"first_segment_start_seconds,omitempty"`
-	LastSegmentEndSeconds         float64  `json:"last_segment_end_seconds,omitempty"`
-	RemovedTerminalHallucinations []string `json:"removed_terminal_hallucinations,omitempty"`
+	Segments                         int      `json:"segments"`
+	MeanAverageLogProb               float64  `json:"mean_average_log_probability,omitempty"`
+	MinimumAverageLogProb            float64  `json:"minimum_average_log_probability,omitempty"`
+	MeanNoSpeechProb                 float64  `json:"mean_no_speech_probability,omitempty"`
+	MaximumNoSpeechProb              float64  `json:"maximum_no_speech_probability,omitempty"`
+	SpeechGatePassed                 *bool    `json:"speech_gate_passed,omitempty"`
+	LeadingSpeechOffsetSeconds       float64  `json:"leading_speech_offset_seconds,omitempty"`
+	TimestampedSegments              bool     `json:"timestamped_segments,omitempty"`
+	DecodedAudioDurationSeconds      float64  `json:"decoded_audio_duration_seconds,omitempty"`
+	FirstSegmentStartSeconds         float64  `json:"first_segment_start_seconds,omitempty"`
+	LastSegmentEndSeconds            float64  `json:"last_segment_end_seconds,omitempty"`
+	LastDetectedSpeechEndSeconds     float64  `json:"last_detected_speech_end_seconds,omitempty"`
+	TrailingSpeechCoverageGapSeconds float64  `json:"trailing_speech_coverage_gap_seconds"`
+	TrailingCoverageToleranceSeconds float64  `json:"trailing_coverage_tolerance_seconds,omitempty"`
+	CoverageValidated                bool     `json:"coverage_validated,omitempty"`
+	RemovedTerminalHallucinations    []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
 // ProductionOptions is the only ASR profile used by product commands. Paths
@@ -156,23 +163,24 @@ func (o Options) WithoutSpeechGate() Options {
 	return o
 }
 
-// WithTrustedLongForm reuses canonical Silero only to find the first speech,
+// WithTrustedLongForm reuses canonical Silero in bounded boundary scans,
 // disables the whole-file gate, and enables Whisper's native timestamped
 // long-form decode for the remaining continuous audio.
 func (o Options) WithTrustedLongForm() Options {
 	gate := o.WhisperSpeechGate
 	normalized := gate.normalized()
 	o.WhisperLongForm = WhisperLongFormOptions{
-		Enabled:              true,
-		Command:              gate.command(o),
-		ModelPath:            gate.ModelPath,
-		Threshold:            floatPointer(normalized.Threshold),
-		MinSpeechDurationMS:  intPointer(normalized.MinSpeechDurationMS),
-		MinSilenceDurationMS: intPointer(normalized.MinSilenceDurationMS),
-		SpeechPadMS:          intPointer(normalized.SpeechPadMS),
-		ScanWindowSeconds:    300,
-		ScanOverlapSeconds:   10,
-		LeadInMS:             1000,
+		Enabled:                          true,
+		Command:                          gate.command(o),
+		ModelPath:                        gate.ModelPath,
+		Threshold:                        floatPointer(normalized.Threshold),
+		MinSpeechDurationMS:              intPointer(normalized.MinSpeechDurationMS),
+		MinSilenceDurationMS:             intPointer(normalized.MinSilenceDurationMS),
+		SpeechPadMS:                      intPointer(normalized.SpeechPadMS),
+		ScanWindowSeconds:                300,
+		ScanOverlapSeconds:               10,
+		LeadInMS:                         1000,
+		TrailingCoverageToleranceSeconds: longFormCoverageToleranceSeconds,
 	}
 	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
 	return o
@@ -398,16 +406,17 @@ func (o WhisperSpeechGateOptions) command(parent Options) string {
 
 func (o WhisperLongFormOptions) normalized() WhisperLongFormDescriptor {
 	return WhisperLongFormDescriptor{
-		Enabled:              o.Enabled,
-		Model:                stableModelIdentity(o.ModelPath),
-		Threshold:            floatValue(o.Threshold, 0.5),
-		MinSpeechDurationMS:  intValue(o.MinSpeechDurationMS, 250),
-		MinSilenceDurationMS: intValue(o.MinSilenceDurationMS, 100),
-		SpeechPadMS:          intValue(o.SpeechPadMS, 30),
-		ScanWindowSeconds:    positiveOr(o.ScanWindowSeconds, 300),
-		ScanOverlapSeconds:   positiveOr(o.ScanOverlapSeconds, 10),
-		LeadInMS:             positiveOr(o.LeadInMS, 1000),
-		DecodeStrategy:       whisperLongFormStrategy,
+		Enabled:                          o.Enabled,
+		Model:                            stableModelIdentity(o.ModelPath),
+		Threshold:                        floatValue(o.Threshold, 0.5),
+		MinSpeechDurationMS:              intValue(o.MinSpeechDurationMS, 250),
+		MinSilenceDurationMS:             intValue(o.MinSilenceDurationMS, 100),
+		SpeechPadMS:                      intValue(o.SpeechPadMS, 30),
+		ScanWindowSeconds:                positiveOr(o.ScanWindowSeconds, 300),
+		ScanOverlapSeconds:               positiveOr(o.ScanOverlapSeconds, 10),
+		LeadInMS:                         positiveOr(o.LeadInMS, 1000),
+		TrailingCoverageToleranceSeconds: positiveFloatOr(o.TrailingCoverageToleranceSeconds, longFormCoverageToleranceSeconds),
+		DecodeStrategy:                   whisperLongFormStrategy,
 	}
 }
 
@@ -431,6 +440,9 @@ func (o WhisperLongFormOptions) validate(parent Options) error {
 	if value.ScanWindowSeconds <= value.ScanOverlapSeconds {
 		return fmt.Errorf("whisper trusted long-form scan window must exceed overlap")
 	}
+	if value.TrailingCoverageToleranceSeconds <= 0 {
+		return fmt.Errorf("whisper trusted long-form coverage tolerance must be positive")
+	}
 	return nil
 }
 
@@ -446,6 +458,13 @@ func (o WhisperLongFormOptions) command(parent Options) string {
 }
 
 func positiveOr(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func positiveFloatOr(value, fallback float64) float64 {
 	if value > 0 {
 		return value
 	}

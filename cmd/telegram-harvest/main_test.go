@@ -71,7 +71,8 @@ func TestRunTranscribeFileCheckUsesProductionRuntime(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
 		t.Fatalf("decode response: %v\n%s", err, stdout)
 	}
-	if response.ContractVersion != transcribeFileContractVersion || response.Status != "ok" {
+	if response.ContractVersion != transcribeFileContractVersion || response.Status != "ok" ||
+		response.ProfileID != transcribeProfileShortMessage || response.ValidationStatus != transcribeValidationRuntimeReady {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 	if response.Backend.Backend != transcribe.BackendWhisperCPP || response.Backend.Accelerator != transcribe.AcceleratorMetal {
@@ -112,6 +113,9 @@ func TestRunTranscribeFileCheckCanSkipSpeechGateRuntime(t *testing.T) {
 	if response.Backend.SpeechGate != nil {
 		t.Fatalf("speech gate = %#v, want disabled", response.Backend.SpeechGate)
 	}
+	if response.ProfileID != transcribeProfileTrustedSpeech || response.ValidationStatus != transcribeValidationRuntimeReady {
+		t.Fatalf("unexpected trusted-speech contract: %+v", response)
+	}
 	if response.Backend.Model != transcribe.ProductionModelFile || response.Backend.Decode == nil || response.Backend.Decode.BeamSize != 5 {
 		t.Fatalf("production profile changed: %#v", response.Backend)
 	}
@@ -149,6 +153,9 @@ func TestRunTranscribeFileCheckCanUseTrustedLongFormWithoutWholeFileGate(t *test
 	}
 	if response.Backend.SpeechGate != nil || response.Backend.LongForm == nil {
 		t.Fatalf("unexpected backend: %#v", response.Backend)
+	}
+	if response.ProfileID != transcribeProfileTrustedLongForm || response.ValidationStatus != transcribeValidationRuntimeReady {
+		t.Fatalf("unexpected trusted long-form contract: %+v", response)
 	}
 }
 

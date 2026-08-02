@@ -1991,24 +1991,35 @@ func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 	)
 }
 
-const transcribeFileContractVersion = 1
+const (
+	transcribeFileContractVersion    = 2
+	transcribeProfileShortMessage    = "short-message-v1"
+	transcribeProfileTrustedSpeech   = "trusted-speech-v1"
+	transcribeProfileTrustedLongForm = "trusted-long-form-v2"
+	transcribeValidationRuntimeReady = "runtime-ready"
+	transcribeValidationTranscribed  = "transcribed"
+	transcribeValidationNoSpeech     = "no-speech"
+	transcribeValidationCoverage     = "coverage-validated"
+)
 
 type transcribeFileResponse struct {
-	ContractVersion int                     `json:"contract_version"`
-	Status          string                  `json:"status"`
-	Text            string                  `json:"text,omitempty"`
-	SpeechDetected  bool                    `json:"speech_detected"`
-	MetalConfirmed  bool                    `json:"metal_confirmed"`
-	Engine          string                  `json:"engine"`
-	Backend         transcribe.Descriptor   `json:"backend"`
-	FFmpeg          time.Duration           `json:"ffmpeg"`
-	ModelColdStart  time.Duration           `json:"model_cold_start"`
-	SpeechGate      time.Duration           `json:"speech_gate"`
-	LongFormPrep    time.Duration           `json:"long_form_preparation"`
-	LeadingOffset   float64                 `json:"leading_speech_offset_seconds,omitempty"`
-	Diagnostics     *transcribe.Diagnostics `json:"diagnostics,omitempty"`
-	Inference       time.Duration           `json:"inference"`
-	Total           time.Duration           `json:"total"`
+	ContractVersion  int                     `json:"contract_version"`
+	Status           string                  `json:"status"`
+	ProfileID        string                  `json:"profile_id"`
+	ValidationStatus string                  `json:"validation_status"`
+	Text             string                  `json:"text,omitempty"`
+	SpeechDetected   bool                    `json:"speech_detected"`
+	MetalConfirmed   bool                    `json:"metal_confirmed"`
+	Engine           string                  `json:"engine"`
+	Backend          transcribe.Descriptor   `json:"backend"`
+	FFmpeg           time.Duration           `json:"ffmpeg"`
+	ModelColdStart   time.Duration           `json:"model_cold_start"`
+	SpeechGate       time.Duration           `json:"speech_gate"`
+	LongFormPrep     time.Duration           `json:"long_form_preparation"`
+	LeadingOffset    float64                 `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics      *transcribe.Diagnostics `json:"diagnostics,omitempty"`
+	Inference        time.Duration           `json:"inference"`
+	Total            time.Duration           `json:"total"`
 }
 
 func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error {
@@ -2036,20 +2047,25 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	if *trustedLongForm && *assumeSpeech {
 		return fmt.Errorf("--trusted-long-form and --assume-speech are mutually exclusive")
 	}
+	profileID := transcribeProfileShortMessage
 	if *trustedLongForm {
 		opts = opts.WithTrustedLongForm()
+		profileID = transcribeProfileTrustedLongForm
 	} else if *assumeSpeech {
 		opts = opts.WithoutSpeechGate()
+		profileID = transcribeProfileTrustedSpeech
 	}
 	if err := opts.ValidateRuntime(); err != nil {
 		return fmt.Errorf("production ASR runtime: %w", err)
 	}
 	if *check {
 		return writeTranscribeFileResponse(out, transcribeFileResponse{
-			ContractVersion: transcribeFileContractVersion,
-			Status:          "ok",
-			Engine:          opts.EngineName(),
-			Backend:         opts.Descriptor(),
+			ContractVersion:  transcribeFileContractVersion,
+			Status:           "ok",
+			ProfileID:        profileID,
+			ValidationStatus: transcribeValidationRuntimeReady,
+			Engine:           opts.EngineName(),
+			Backend:          opts.Descriptor(),
 		})
 	}
 	if strings.TrimSpace(*inputPath) == "" || strings.TrimSpace(*outputPath) == "" {
@@ -2081,26 +2097,38 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	if result.Diagnostics != nil && result.Diagnostics.SpeechGatePassed != nil {
 		speechDetected = *result.Diagnostics.SpeechGatePassed
 	}
+	validationStatus := transcribeValidationTranscribed
+	if !speechDetected {
+		validationStatus = transcribeValidationNoSpeech
+	}
+	if *trustedLongForm {
+		if result.Diagnostics == nil || !result.Diagnostics.CoverageValidated {
+			return fmt.Errorf("trusted long-form result did not prove trailing speech coverage")
+		}
+		validationStatus = transcribeValidationCoverage
+	}
 	inference := result.ASRDuration - result.SpeechGateDuration
 	if inference < 0 {
 		inference = 0
 	}
 	return writeTranscribeFileResponse(out, transcribeFileResponse{
-		ContractVersion: transcribeFileContractVersion,
-		Status:          "ok",
-		Text:            result.Text,
-		SpeechDetected:  speechDetected,
-		MetalConfirmed:  speechDetected,
-		Engine:          result.Engine,
-		Backend:         result.Backend,
-		FFmpeg:          result.FFmpegDuration,
-		ModelColdStart:  result.ModelColdStartDuration,
-		SpeechGate:      result.SpeechGateDuration,
-		LongFormPrep:    result.LongFormPreparationDuration,
-		LeadingOffset:   result.LeadingSpeechOffset,
-		Diagnostics:     result.Diagnostics,
-		Inference:       inference,
-		Total:           result.TotalDuration,
+		ContractVersion:  transcribeFileContractVersion,
+		Status:           "ok",
+		ProfileID:        profileID,
+		ValidationStatus: validationStatus,
+		Text:             result.Text,
+		SpeechDetected:   speechDetected,
+		MetalConfirmed:   speechDetected,
+		Engine:           result.Engine,
+		Backend:          result.Backend,
+		FFmpeg:           result.FFmpegDuration,
+		ModelColdStart:   result.ModelColdStartDuration,
+		SpeechGate:       result.SpeechGateDuration,
+		LongFormPrep:     result.LongFormPreparationDuration,
+		LeadingOffset:    result.LeadingSpeechOffset,
+		Diagnostics:      result.Diagnostics,
+		Inference:        inference,
+		Total:            result.TotalDuration,
 	})
 }
 

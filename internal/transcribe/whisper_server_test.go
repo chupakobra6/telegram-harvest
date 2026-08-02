@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -147,17 +148,23 @@ func TestWhisperSpeechGateAppliesMinSpeechAfterMinSilence(t *testing.T) {
 	}
 }
 
-func TestParseLeadingSpeechStart(t *testing.T) {
-	start, found, err := parseLeadingSpeechStart("Detected 2 speech segments:\nSpeech segment 0: start = 17949.00, end = 18285.00\n")
+func TestParseVADSpeechSegments(t *testing.T) {
+	segments, err := parseVADSpeechSegments("Detected 2 speech segments:\nSpeech segment 0: start = 17949.00, end = 18285.00\nSpeech segment 1: start = 29306.00, end = 29344.00\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found || start != 179.49 {
-		t.Fatalf("start = %.3f, found = %t", start, found)
+	if len(segments) != 2 || segments[0].start != 179.49 || segments[0].end != 182.85 || segments[1].end != 293.44 {
+		t.Fatalf("segments = %#v", segments)
 	}
-	start, found, err = parseLeadingSpeechStart("Detected 0 speech segments:\n")
-	if err != nil || found || start != 0 {
-		t.Fatalf("silence result: start = %.3f, found = %t, err = %v", start, found, err)
+	segments, err = parseVADSpeechSegments("Detected 0 speech segments:\n")
+	if err != nil || len(segments) != 0 {
+		t.Fatalf("silence result: segments = %#v, err = %v", segments, err)
+	}
+	if _, err := parseVADSpeechSegments("unexpected output"); err == nil {
+		t.Fatal("malformed VAD output was accepted")
+	}
+	if _, err := parseVADSpeechSegments("Detected 2 speech segments:\nSpeech segment 0: start = 10.00, end = 20.00\n"); err == nil {
+		t.Fatal("incomplete VAD output was accepted")
 	}
 }
 
@@ -204,7 +211,7 @@ func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
 		baseURL: "http://" + listener.Addr().String(),
 		client:  &http.Client{},
 	}
-	text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath)
+	text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 239.5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +223,9 @@ func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
 	}
 	if diagnostics == nil || !diagnostics.TimestampedSegments || diagnostics.Segments != 3 ||
 		diagnostics.DecodedAudioDurationSeconds != 240 || diagnostics.FirstSegmentStartSeconds != 0.05 ||
-		diagnostics.LastSegmentEndSeconds != 239.7 {
+		diagnostics.LastSegmentEndSeconds != 239.7 || diagnostics.LastDetectedSpeechEndSeconds != 239.5 ||
+		!diagnostics.CoverageValidated || diagnostics.TrailingSpeechCoverageGapSeconds != 0 ||
+		diagnostics.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds {
 		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
 }
@@ -235,10 +244,26 @@ func TestValidateTimestampedLongFormResponseRejectsIncompleteMetadata(t *testing
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := validateTimestampedLongFormResponse(test.response, 1); err == nil {
+			if _, err := validateTimestampedLongFormResponse(test.response, 1, 0.8, 0.2); err == nil {
 				t.Fatal("invalid long-form response was accepted")
 			}
 		})
+	}
+}
+
+func TestValidateTimestampedLongFormResponseRequiresTrailingSpeechCoverage(t *testing.T) {
+	start, end := 0.1, 6.5
+	decoded := whisperResponse{
+		Text:     "речь",
+		Duration: 10,
+		Segments: []whisperSegment{{Start: &start, End: &end}},
+	}
+	if gap, err := validateTimestampedLongFormResponse(decoded, 10, 9, 2); err == nil || gap != 2.5 {
+		t.Fatalf("uncovered tail: gap=%.3f err=%v", gap, err)
+	}
+	end = 7.2
+	if gap, err := validateTimestampedLongFormResponse(decoded, 10, 9, 2); err != nil || math.Abs(gap-1.8) > 0.001 {
+		t.Fatalf("covered tail: gap=%.3f err=%v", gap, err)
 	}
 }
 
