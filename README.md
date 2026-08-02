@@ -19,7 +19,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
-| ASR | Один долгоживущий whisper.cpp large-v3-turbo q5_0 server на Metal, whole-file Silero gate и один GPU worker. |
+| Daily ASR | Один долгоживущий whisper.cpp large-v3-turbo q5_0 server на Metal, whole-file Silero gate и один GPU worker. OBS использует отдельную адаптивную long-form policy того же backend. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
 | Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. History и выбор файлов идут последовательно и с pacing; внутри одного достаточно большого файла downloader использует не более двух chunk workers. |
@@ -198,7 +198,7 @@ Downloader выбирает chunk concurrency автоматически по р
 
 ## ASR pipeline
 
-Единственный production-профиль — `whisper.cpp large-v3-turbo q5_0 + Metal`, русский язык, четыре CPU helper threads, `beam_size=5` и отдельный whole-file Silero speech gate. Эти параметры зафиксированы в коде. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
+Канонический production backend — `whisper.cpp large-v3-turbo q5_0 + Metal`, четыре CPU helper threads и `beam_size=5`. Публичный `short-message-v1` фиксирует русский язык и отдельный whole-file Silero speech gate; `trusted-long-form-v3` переиспользует тот же backend с адаптивной long-form policy. Эти параметры зафиксированы в коде. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
 
 Тот же production-профиль доступен локальным автоматизациям без Telegram RPC:
 
@@ -206,6 +206,12 @@ Downloader выбирает chunk concurrency автоматически по р
 bin/telegram-harvest --profile main transcribe-file \
   --input /absolute/path/recording.mp4 \
   --output /absolute/path/transcript.txt
+
+# Адаптивный long-form профиль для доверенного локального caller вроде OBS:
+bin/telegram-harvest --profile main transcribe-file \
+  --trusted-long-form \
+  --input /absolute/path/interview.mp4 \
+  --output /absolute/path/interview.txt
 ```
 
 Команда пишет plain UTF-8 transcript в `--output`, а в stdout — ASR contract v3 с `profile_id`, `validation_status`, backend descriptor, diagnostics и timings. `transcribe-file --check` проверяет текущие runtime/model paths без обработки медиа и возвращает `validation_status: runtime-ready`. Публичных профиля ровно два: обычный Telegram/file-вход — `short-message-v1`, OBS long-form — `trusted-long-form-v3`. OBS Interview Pipeline использует только этот публичный контракт, поэтому Whisper profile, VAD, Metal/decode validation, language policy, prompt и post-filter обновляются только здесь, в `internal/transcribe`.

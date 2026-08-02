@@ -7,15 +7,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - run: make check
-      - run: make audit
-      - run: go test -race ./...
+      - name: Check
+        run: make check
+      - name: Audit
+        run: make audit
+      - name: Test with race detector
+        run: go test -race ./...
