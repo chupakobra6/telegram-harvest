@@ -1994,20 +1994,21 @@ func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 const transcribeFileContractVersion = 1
 
 type transcribeFileResponse struct {
-	ContractVersion int                   `json:"contract_version"`
-	Status          string                `json:"status"`
-	Text            string                `json:"text,omitempty"`
-	SpeechDetected  bool                  `json:"speech_detected"`
-	MetalConfirmed  bool                  `json:"metal_confirmed"`
-	Engine          string                `json:"engine"`
-	Backend         transcribe.Descriptor `json:"backend"`
-	FFmpeg          time.Duration         `json:"ffmpeg"`
-	ModelColdStart  time.Duration         `json:"model_cold_start"`
-	SpeechGate      time.Duration         `json:"speech_gate"`
-	LongFormPrep    time.Duration         `json:"long_form_preparation"`
-	LeadingOffset   float64               `json:"leading_speech_offset_seconds,omitempty"`
-	Inference       time.Duration         `json:"inference"`
-	Total           time.Duration         `json:"total"`
+	ContractVersion int                     `json:"contract_version"`
+	Status          string                  `json:"status"`
+	Text            string                  `json:"text,omitempty"`
+	SpeechDetected  bool                    `json:"speech_detected"`
+	MetalConfirmed  bool                    `json:"metal_confirmed"`
+	Engine          string                  `json:"engine"`
+	Backend         transcribe.Descriptor   `json:"backend"`
+	FFmpeg          time.Duration           `json:"ffmpeg"`
+	ModelColdStart  time.Duration           `json:"model_cold_start"`
+	SpeechGate      time.Duration           `json:"speech_gate"`
+	LongFormPrep    time.Duration           `json:"long_form_preparation"`
+	LeadingOffset   float64                 `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics     *transcribe.Diagnostics `json:"diagnostics,omitempty"`
+	Inference       time.Duration           `json:"inference"`
+	Total           time.Duration           `json:"total"`
 }
 
 func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error {
@@ -2017,7 +2018,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	outputPath := fs.String("output", "", "plain UTF-8 transcript output path")
 	check := fs.Bool("check", false, "validate the configured production ASR runtime and exit")
 	assumeSpeech := fs.Bool("assume-speech", false, "skip the whole-file speech gate for a trusted speech recording")
-	trustedLongForm := fs.Bool("trusted-long-form", false, "trim silent pre-roll and reset Whisper context across bounded chunks")
+	trustedLongForm := fs.Bool("trusted-long-form", false, "trim silent pre-roll and use native timestamped long-form decoding")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2097,6 +2098,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		SpeechGate:      result.SpeechGateDuration,
 		LongFormPrep:    result.LongFormPreparationDuration,
 		LeadingOffset:   result.LeadingSpeechOffset,
+		Diagnostics:     result.Diagnostics,
 		Inference:       inference,
 		Total:           result.TotalDuration,
 	})

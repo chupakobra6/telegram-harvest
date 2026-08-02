@@ -21,6 +21,7 @@ const (
 	ProductionThreads        = 4
 	ProductionModelFile      = "ggml-large-v3-turbo-q5_0.bin"
 	ProductionSpeechGateFile = "ggml-silero-v6.2.0.bin"
+	whisperLongFormStrategy  = "native-timestamped-v1"
 )
 
 // Descriptor is the stable identity of the production ASR implementation.
@@ -84,8 +85,9 @@ type WhisperSpeechGateDescriptor struct {
 	SpeechPadMS          int     `json:"speech_pad_ms"`
 }
 
-// WhisperLongFormOptions finds the first speech with short Silero windows and
-// transcribes bounded overlapping chunks with one long-lived Whisper model.
+// WhisperLongFormOptions finds the first speech with short Silero windows.
+// The remaining audio is decoded by Whisper's native timestamped long-form
+// loop, which owns window boundaries and carries its confirmed text context.
 type WhisperLongFormOptions struct {
 	Enabled              bool
 	Command              string
@@ -97,8 +99,6 @@ type WhisperLongFormOptions struct {
 	ScanWindowSeconds    int
 	ScanOverlapSeconds   int
 	LeadInMS             int
-	ChunkSeconds         int
-	ChunkOverlapSeconds  int
 }
 
 type WhisperLongFormDescriptor struct {
@@ -111,8 +111,7 @@ type WhisperLongFormDescriptor struct {
 	ScanWindowSeconds    int     `json:"scan_window_seconds"`
 	ScanOverlapSeconds   int     `json:"scan_overlap_seconds"`
 	LeadInMS             int     `json:"lead_in_ms"`
-	ChunkSeconds         int     `json:"chunk_seconds"`
-	ChunkOverlapSeconds  int     `json:"chunk_overlap_seconds"`
+	DecodeStrategy       string  `json:"decode_strategy"`
 }
 
 // Diagnostics are backend confidence signals. They are evidence for benchmark
@@ -125,6 +124,10 @@ type Diagnostics struct {
 	MaximumNoSpeechProb           float64  `json:"maximum_no_speech_probability,omitempty"`
 	SpeechGatePassed              *bool    `json:"speech_gate_passed,omitempty"`
 	LeadingSpeechOffsetSeconds    float64  `json:"leading_speech_offset_seconds,omitempty"`
+	TimestampedSegments           bool     `json:"timestamped_segments,omitempty"`
+	DecodedAudioDurationSeconds   float64  `json:"decoded_audio_duration_seconds,omitempty"`
+	FirstSegmentStartSeconds      float64  `json:"first_segment_start_seconds,omitempty"`
+	LastSegmentEndSeconds         float64  `json:"last_segment_end_seconds,omitempty"`
 	RemovedTerminalHallucinations []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
@@ -154,7 +157,8 @@ func (o Options) WithoutSpeechGate() Options {
 }
 
 // WithTrustedLongForm reuses canonical Silero only to find the first speech,
-// disables the whole-file gate, and resets Whisper context between chunks.
+// disables the whole-file gate, and enables Whisper's native timestamped
+// long-form decode for the remaining continuous audio.
 func (o Options) WithTrustedLongForm() Options {
 	gate := o.WhisperSpeechGate
 	normalized := gate.normalized()
@@ -169,8 +173,6 @@ func (o Options) WithTrustedLongForm() Options {
 		ScanWindowSeconds:    300,
 		ScanOverlapSeconds:   10,
 		LeadInMS:             1000,
-		ChunkSeconds:         120,
-		ChunkOverlapSeconds:  1,
 	}
 	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
 	return o
@@ -405,8 +407,7 @@ func (o WhisperLongFormOptions) normalized() WhisperLongFormDescriptor {
 		ScanWindowSeconds:    positiveOr(o.ScanWindowSeconds, 300),
 		ScanOverlapSeconds:   positiveOr(o.ScanOverlapSeconds, 10),
 		LeadInMS:             positiveOr(o.LeadInMS, 1000),
-		ChunkSeconds:         positiveOr(o.ChunkSeconds, 120),
-		ChunkOverlapSeconds:  positiveOr(o.ChunkOverlapSeconds, 1),
+		DecodeStrategy:       whisperLongFormStrategy,
 	}
 }
 
@@ -429,9 +430,6 @@ func (o WhisperLongFormOptions) validate(parent Options) error {
 	}
 	if value.ScanWindowSeconds <= value.ScanOverlapSeconds {
 		return fmt.Errorf("whisper trusted long-form scan window must exceed overlap")
-	}
-	if value.ChunkSeconds <= value.ChunkOverlapSeconds {
-		return fmt.Errorf("whisper trusted long-form chunk must exceed overlap")
 	}
 	return nil
 }

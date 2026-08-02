@@ -20,7 +20,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
 )
@@ -47,12 +46,19 @@ type WhisperServerRunner struct {
 type whisperResponse struct {
 	Text     string           `json:"text"`
 	Error    string           `json:"error"`
+	Duration float64          `json:"duration,omitempty"`
 	Segments []whisperSegment `json:"segments,omitempty"`
 }
 
 type whisperSegment struct {
-	AverageLogProbability float64 `json:"avg_logprob"`
-	NoSpeechProbability   float64 `json:"no_speech_prob"`
+	Start                 *float64 `json:"start,omitempty"`
+	End                   *float64 `json:"end,omitempty"`
+	AverageLogProbability float64  `json:"avg_logprob"`
+	NoSpeechProbability   float64  `json:"no_speech_prob"`
+}
+
+type whisperRequestOptions struct {
+	SegmentTimestamps bool
 }
 
 func (r *WhisperServerRunner) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
@@ -147,7 +153,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	var text string
 	var inferenceDiagnostics *Diagnostics
 	if r.opts.WhisperLongForm.Enabled {
-		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath, filepath.Dir(outputPath))
+		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath)
 	} else {
 		text, inferenceDiagnostics, err = r.inferLocked(ctx, wavPath)
 	}
@@ -186,104 +192,50 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	}, nil
 }
 
-func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath, tempDir string) (string, *Diagnostics, error) {
+func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath string) (string, *Diagnostics, error) {
 	duration := wavPCM16MonoDuration(fileSize(wavPath))
 	if duration <= 0 {
 		return "", nil, fmt.Errorf("trusted long-form inference received empty audio")
 	}
-	settings := r.opts.WhisperLongForm.normalized()
-	chunkSeconds := float64(settings.ChunkSeconds)
-	overlapSeconds := float64(settings.ChunkOverlapSeconds)
-	combinedText := ""
-	combinedDiagnostics := &Diagnostics{}
-	for offset := 0.0; offset < duration; offset += chunkSeconds {
-		chunkDuration := math.Min(chunkSeconds+overlapSeconds, duration-offset)
-		chunkPath, cleanup, err := temporaryWAV(tempDir, ".asr-long-form-chunk-*.wav")
-		if err != nil {
-			return "", nil, err
-		}
-		if err := extractASRWAVRange(ctx, r.opts, wavPath, chunkPath, offset, chunkDuration); err != nil {
-			cleanup()
-			return "", nil, err
-		}
-		chunkText, chunkDiagnostics, err := r.inferLocked(ctx, chunkPath)
-		cleanup()
-		if err != nil {
-			return "", nil, fmt.Errorf("transcribe long-form chunk at %.3fs: %w", offset, err)
-		}
-		chunkText, removed := stripWhisperTerminalHallucinations(strings.TrimSpace(chunkText))
-		if chunkDiagnostics == nil {
-			chunkDiagnostics = &Diagnostics{}
-		}
-		chunkDiagnostics.RemovedTerminalHallucinations = append(chunkDiagnostics.RemovedTerminalHallucinations, removed...)
-		appendWhisperDiagnostics(combinedDiagnostics, chunkDiagnostics)
-		combinedText = mergeTranscriptOverlap(combinedText, chunkText)
+	decoded, err := r.inferRequestLocked(ctx, wavPath, whisperRequestOptions{SegmentTimestamps: true})
+	if err != nil {
+		return "", nil, err
 	}
-	return strings.TrimSpace(combinedText), combinedDiagnostics, nil
+	if err := validateTimestampedLongFormResponse(decoded, duration); err != nil {
+		return "", nil, err
+	}
+	diagnostics := whisperDiagnostics(decoded.Segments)
+	diagnostics.TimestampedSegments = true
+	diagnostics.DecodedAudioDurationSeconds = decoded.Duration
+	diagnostics.FirstSegmentStartSeconds = *decoded.Segments[0].Start
+	diagnostics.LastSegmentEndSeconds = *decoded.Segments[len(decoded.Segments)-1].End
+	text, removed := stripWhisperLongFormTerminalRepetitions(decoded.Text)
+	diagnostics.RemovedTerminalHallucinations = append(diagnostics.RemovedTerminalHallucinations, removed...)
+	return text, diagnostics, nil
 }
 
-func mergeTranscriptOverlap(existing, next string) string {
-	existing = strings.TrimSpace(existing)
-	next = strings.TrimSpace(next)
-	if existing == "" {
-		return next
+func validateTimestampedLongFormResponse(decoded whisperResponse, expectedDuration float64) error {
+	if decoded.Duration <= 0 || math.Abs(decoded.Duration-expectedDuration) > 1 {
+		return fmt.Errorf("whisper.cpp long-form duration %.3fs does not match input %.3fs", decoded.Duration, expectedDuration)
 	}
-	if next == "" {
-		return existing
+	if strings.TrimSpace(decoded.Text) == "" || len(decoded.Segments) == 0 {
+		return fmt.Errorf("whisper.cpp long-form returned no timestamped speech")
 	}
-	existingWords := strings.Fields(existing)
-	nextWords := strings.Fields(next)
-	limit := min(40, len(existingWords), len(nextWords))
-	overlap := 0
-	for count := limit; count >= 2; count-- {
-		matched := true
-		for index := 0; index < count; index++ {
-			left := normalizeMergeWord(existingWords[len(existingWords)-count+index])
-			right := normalizeMergeWord(nextWords[index])
-			if left == "" || left != right {
-				matched = false
-				break
-			}
+	previousStart := -1.0
+	previousEnd := -1.0
+	for index, segment := range decoded.Segments {
+		if segment.Start == nil || segment.End == nil {
+			return fmt.Errorf("whisper.cpp long-form segment %d has no timestamps", index)
 		}
-		if matched {
-			overlap = count
-			break
+		start := *segment.Start
+		end := *segment.End
+		if start < 0 || end < start || start < previousStart || end < previousEnd || end > decoded.Duration+1 {
+			return fmt.Errorf("whisper.cpp long-form segment %d has invalid timestamps %.3f..%.3f", index, start, end)
 		}
+		previousStart = start
+		previousEnd = end
 	}
-	remaining := strings.Join(nextWords[overlap:], " ")
-	if remaining == "" {
-		return existing
-	}
-	return existing + "\n " + remaining
-}
-
-func normalizeMergeWord(value string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return unicode.ToLower(r)
-		}
-		return -1
-	}, value)
-}
-
-func appendWhisperDiagnostics(target, source *Diagnostics) {
-	if target == nil || source == nil {
-		return
-	}
-	previousSegments := target.Segments
-	totalSegments := previousSegments + source.Segments
-	if totalSegments > 0 {
-		target.MeanAverageLogProb = (target.MeanAverageLogProb*float64(previousSegments) + source.MeanAverageLogProb*float64(source.Segments)) / float64(totalSegments)
-		target.MeanNoSpeechProb = (target.MeanNoSpeechProb*float64(previousSegments) + source.MeanNoSpeechProb*float64(source.Segments)) / float64(totalSegments)
-	}
-	if previousSegments == 0 || (source.Segments > 0 && source.MinimumAverageLogProb < target.MinimumAverageLogProb) {
-		target.MinimumAverageLogProb = source.MinimumAverageLogProb
-	}
-	if source.MaximumNoSpeechProb > target.MaximumNoSpeechProb {
-		target.MaximumNoSpeechProb = source.MaximumNoSpeechProb
-	}
-	target.Segments = totalSegments
-	target.RemovedTerminalHallucinations = append(target.RemovedTerminalHallucinations, source.RemovedTerminalHallucinations...)
+	return nil
 }
 
 var leadingSpeechPattern = regexp.MustCompile(`(?m)^Speech segment \d+: start = ([0-9]+(?:\.[0-9]+)?),`)
@@ -487,44 +439,52 @@ func (r *WhisperServerRunner) verifyAccelerationLocked() error {
 }
 
 func (r *WhisperServerRunner) inferLocked(ctx context.Context, wavPath string) (string, *Diagnostics, error) {
+	decoded, err := r.inferRequestLocked(ctx, wavPath, whisperRequestOptions{})
+	if err != nil {
+		return "", nil, err
+	}
+	return decoded.Text, whisperDiagnostics(decoded.Segments), nil
+}
+
+func (r *WhisperServerRunner) inferRequestLocked(ctx context.Context, wavPath string, requestOptions whisperRequestOptions) (whisperResponse, error) {
 	file, err := os.Open(wavPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("open whisper.cpp WAV: %w", err)
+		return whisperResponse{}, fmt.Errorf("open whisper.cpp WAV: %w", err)
 	}
 	bodyReader, bodyWriter := io.Pipe()
 	writer := multipart.NewWriter(bodyWriter)
 	contentType := writer.FormDataContentType()
-	go streamWhisperRequest(writer, bodyWriter, file, wavPath, normalizedLanguage(r.opts.Language), r.opts.WhisperDecode)
+	go streamWhisperRequest(writer, bodyWriter, file, wavPath, normalizedLanguage(r.opts.Language), r.opts.WhisperDecode, requestOptions)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/inference", bodyReader)
 	if err != nil {
 		_ = bodyReader.Close()
-		return "", nil, fmt.Errorf("prepare whisper.cpp request: %w", err)
+		return whisperResponse{}, fmt.Errorf("prepare whisper.cpp request: %w", err)
 	}
 	request.Header.Set("Content-Type", contentType)
 	response, err := r.client.Do(request)
 	if err != nil {
-		return "", nil, fmt.Errorf("whisper.cpp inference: %w%s", err, r.processDetailLocked())
+		return whisperResponse{}, fmt.Errorf("whisper.cpp inference: %w%s", err, r.processDetailLocked())
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
 	if err != nil {
-		return "", nil, fmt.Errorf("read whisper.cpp response: %w", err)
+		return whisperResponse{}, fmt.Errorf("read whisper.cpp response: %w", err)
 	}
 	var decoded whisperResponse
 	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return "", nil, fmt.Errorf("decode whisper.cpp response: %w: %s", err, trimDetail(string(payload)))
+		return whisperResponse{}, fmt.Errorf("decode whisper.cpp response: %w: %s", err, trimDetail(string(payload)))
 	}
 	if response.StatusCode != http.StatusOK {
 		detail := strings.TrimSpace(decoded.Error)
 		if detail == "" {
 			detail = trimDetail(string(payload))
 		}
-		return "", nil, fmt.Errorf("whisper.cpp inference status %s: %s", response.Status, detail)
+		return whisperResponse{}, fmt.Errorf("whisper.cpp inference status %s: %s", response.Status, detail)
 	}
 	if detail := strings.TrimSpace(decoded.Error); detail != "" {
-		return "", nil, fmt.Errorf("whisper.cpp inference: %s", detail)
+		return whisperResponse{}, fmt.Errorf("whisper.cpp inference: %s", detail)
 	}
-	return decoded.Text, whisperDiagnostics(decoded.Segments), nil
+	return decoded, nil
 }
 
 func streamWhisperRequest(
@@ -534,6 +494,7 @@ func streamWhisperRequest(
 	wavPath string,
 	language string,
 	decode WhisperDecodeOptions,
+	requestOptions whisperRequestOptions,
 ) {
 	fail := func(err error) {
 		_ = file.Close()
@@ -554,16 +515,18 @@ func streamWhisperRequest(
 	}
 	settings := decode.normalized()
 	for key, value := range map[string]string{
-		"response_format": "verbose_json",
-		"language":        language,
-		"temperature":     strconv.FormatFloat(settings.Temperature, 'f', -1, 64),
-		"temperature_inc": strconv.FormatFloat(settings.TemperatureIncrement, 'f', -1, 64),
-		"best_of":         strconv.Itoa(settings.BestOf),
-		"beam_size":       strconv.Itoa(settings.BeamSize),
-		"no_speech_thold": strconv.FormatFloat(settings.NoSpeechThreshold, 'f', -1, 64),
-		"logprob_thold":   strconv.FormatFloat(settings.LogProbabilityThreshold, 'f', -1, 64),
-		"entropy_thold":   strconv.FormatFloat(settings.EntropyThreshold, 'f', -1, 64),
-		"suppress_nst":    strconv.FormatBool(settings.SuppressNonSpeechTokens),
+		"response_format":  "verbose_json",
+		"language":         language,
+		"temperature":      strconv.FormatFloat(settings.Temperature, 'f', -1, 64),
+		"temperature_inc":  strconv.FormatFloat(settings.TemperatureIncrement, 'f', -1, 64),
+		"best_of":          strconv.Itoa(settings.BestOf),
+		"beam_size":        strconv.Itoa(settings.BeamSize),
+		"no_speech_thold":  strconv.FormatFloat(settings.NoSpeechThreshold, 'f', -1, 64),
+		"logprob_thold":    strconv.FormatFloat(settings.LogProbabilityThreshold, 'f', -1, 64),
+		"entropy_thold":    strconv.FormatFloat(settings.EntropyThreshold, 'f', -1, 64),
+		"suppress_nst":     strconv.FormatBool(settings.SuppressNonSpeechTokens),
+		"no_timestamps":    strconv.FormatBool(!requestOptions.SegmentTimestamps),
+		"token_timestamps": "false",
 	} {
 		if err := writer.WriteField(key, value); err != nil {
 			_ = pipe.CloseWithError(fmt.Errorf("prepare whisper.cpp field %s: %w", key, err))
@@ -653,6 +616,28 @@ var whisperTerminalHallucinations = map[string]struct{}{
 	"субтитры создавал dimatorzok": {},
 	"спасибо за просмотр":          {},
 	"подпишись":                    {},
+}
+
+// stripWhisperLongFormTerminalRepetitions removes only consecutive identical
+// lines at the very end of a timestamped long-form result. Repetition loops are
+// a known terminal failure mode; keeping the first occurrence preserves a real
+// closing word while avoiding a broad phrase blacklist.
+func stripWhisperLongFormTerminalRepetitions(text string) (string, []string) {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	var removed []string
+	for len(lines) > 1 {
+		last := strings.TrimSpace(lines[len(lines)-1])
+		previous := strings.TrimSpace(lines[len(lines)-2])
+		if last == "" || normalizeWhisperHallucination(last) != normalizeWhisperHallucination(previous) {
+			break
+		}
+		removed = append(removed, last)
+		lines = lines[:len(lines)-1]
+	}
+	for left, right := 0, len(removed)-1; left < right; left, right = left+1, right-1 {
+		removed[left], removed[right] = removed[right], removed[left]
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n")), removed
 }
 
 func stripWhisperTerminalHallucinations(text string) (string, []string) {

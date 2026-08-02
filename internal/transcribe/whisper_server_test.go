@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -160,17 +161,84 @@ func TestParseLeadingSpeechStart(t *testing.T) {
 	}
 }
 
-func TestMergeTranscriptOverlapRemovesOnlyMatchingBoundary(t *testing.T) {
-	got := mergeTranscriptOverlap(
-		"Первый вопрос. Ответ начинается прямо здесь.",
-		"ответ начинается прямо здесь. Затем новый вопрос.",
-	)
-	if got != "Первый вопрос. Ответ начинается прямо здесь.\n Затем новый вопрос." {
-		t.Fatalf("merged transcript = %q", got)
+func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
+	dir := t.TempDir()
+	wavPath := filepath.Join(dir, "long.wav")
+	if err := os.WriteFile(wavPath, make([]byte, 44+240*32000), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	got = mergeTranscriptOverlap("Одна фраза.", "Совсем другая фраза.")
-	if got != "Одна фраза.\n Совсем другая фраза." {
-		t.Fatalf("unrelated transcript = %q", got)
+	requests := 0
+	server := http.Server{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests++
+		if err := request.ParseMultipartForm(2 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer request.MultipartForm.RemoveAll()
+		if request.FormValue("no_timestamps") != "false" || request.FormValue("token_timestamps") != "false" {
+			http.Error(w, "timestamp mode", http.StatusBadRequest)
+			return
+		}
+		start0, end0 := 0.05, 119.8
+		start1, end1 := 119.8, 120.2
+		start2, end2 := 120.2, 239.7
+		_ = json.NewEncoder(w).Encode(whisperResponse{
+			Text:     " Игорь объясняет Kubernetes прямо через прежнюю границу без разрыва контекста ",
+			Duration: 240,
+			Segments: []whisperSegment{
+				{Start: &start0, End: &end0, AverageLogProbability: -0.2},
+				{Start: &start1, End: &end1, AverageLogProbability: -0.1},
+				{Start: &start2, End: &end2, AverageLogProbability: -0.1},
+			},
+		})
+	})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	runner := &WhisperServerRunner{
+		opts:    Options{Language: "ru"},
+		baseURL: "http://" + listener.Addr().String(),
+		client:  &http.Client{},
+	}
+	text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one native long-form request", requests)
+	}
+	if strings.TrimSpace(text) != "Игорь объясняет Kubernetes прямо через прежнюю границу без разрыва контекста" {
+		t.Fatalf("text = %q", text)
+	}
+	if diagnostics == nil || !diagnostics.TimestampedSegments || diagnostics.Segments != 3 ||
+		diagnostics.DecodedAudioDurationSeconds != 240 || diagnostics.FirstSegmentStartSeconds != 0.05 ||
+		diagnostics.LastSegmentEndSeconds != 239.7 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestValidateTimestampedLongFormResponseRejectsIncompleteMetadata(t *testing.T) {
+	start0, end0 := 0.1, 0.8
+	start1, end1 := 0.7, 0.6
+	tests := []struct {
+		name     string
+		response whisperResponse
+	}{
+		{name: "duration", response: whisperResponse{Text: "речь", Duration: 4, Segments: []whisperSegment{{Start: &start0, End: &end0}}}},
+		{name: "missing timestamps", response: whisperResponse{Text: "речь", Duration: 1, Segments: []whisperSegment{{}}}},
+		{name: "invalid order", response: whisperResponse{Text: "речь", Duration: 1, Segments: []whisperSegment{{Start: &start1, End: &end1}}}},
+		{name: "empty transcript", response: whisperResponse{Duration: 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateTimestampedLongFormResponse(test.response, 1); err == nil {
+				t.Fatal("invalid long-form response was accepted")
+			}
+		})
 	}
 }
 
@@ -195,6 +263,22 @@ func TestStripWhisperTerminalHallucinationsIsConservative(t *testing.T) {
 	}
 }
 
+func TestStripWhisperLongFormTerminalRepetitionsKeepsOneClosingPhrase(t *testing.T) {
+	text := "Спасибо тебе большое.\nУдачи.\nСпасибо.\nспасибо!\nСПАСИБО"
+	got, removed := stripWhisperLongFormTerminalRepetitions(text)
+	if got != "Спасибо тебе большое.\nУдачи.\nСпасибо." {
+		t.Fatalf("filtered text = %q", got)
+	}
+	if len(removed) != 2 || removed[0] != "спасибо!" || removed[1] != "СПАСИБО" {
+		t.Fatalf("removed = %#v", removed)
+	}
+
+	got, removed = stripWhisperLongFormTerminalRepetitions("Да.\nДа.\nПродолжаем.")
+	if got != "Да.\nДа.\nПродолжаем." || len(removed) != 0 {
+		t.Fatalf("non-terminal repetition changed: text=%q removed=%#v", got, removed)
+	}
+}
+
 func runWhisperServerHelper() {
 	args := os.Args
 	portRaw := args[len(args)-1]
@@ -216,15 +300,17 @@ func runWhisperServerHelper() {
 			return
 		}
 		expected := map[string]string{
-			"response_format": "verbose_json",
-			"temperature":     "0",
-			"temperature_inc": "0.2",
-			"best_of":         "2",
-			"beam_size":       "-1",
-			"no_speech_thold": "0.6",
-			"logprob_thold":   "-1",
-			"entropy_thold":   "2.4",
-			"suppress_nst":    "false",
+			"response_format":  "verbose_json",
+			"temperature":      "0",
+			"temperature_inc":  "0.2",
+			"best_of":          "2",
+			"beam_size":        "-1",
+			"no_speech_thold":  "0.6",
+			"logprob_thold":    "-1",
+			"entropy_thold":    "2.4",
+			"suppress_nst":     "false",
+			"no_timestamps":    "true",
+			"token_timestamps": "false",
 		}
 		for key, value := range expected {
 			if request.FormValue(key) != value {
