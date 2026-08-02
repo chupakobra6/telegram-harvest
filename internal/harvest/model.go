@@ -323,6 +323,7 @@ type ASRLogEvent struct {
 	DownloadSeconds       float64   `json:"download_seconds,omitempty"`
 	FFmpegSeconds         float64   `json:"ffmpeg_seconds,omitempty"`
 	SpeechGateSeconds     float64   `json:"speech_gate_seconds,omitempty"`
+	LongFormPrepSeconds   float64   `json:"long_form_preparation_seconds,omitempty"`
 	ModelColdStartSeconds float64   `json:"model_cold_start_seconds,omitempty"`
 	ASRSeconds            float64   `json:"asr_seconds,omitempty"`
 	TotalSeconds          float64   `json:"total_seconds,omitempty"`
@@ -335,6 +336,15 @@ type ASRLogEvent struct {
 	ASRMeanLogProbability float64   `json:"asr_mean_log_probability,omitempty"`
 	ASRMaxNoSpeechProb    float64   `json:"asr_max_no_speech_probability,omitempty"`
 	SpeechGatePassed      *bool     `json:"speech_gate_passed,omitempty"`
+	ASRStrategy           string    `json:"asr_strategy,omitempty"`
+	ASRRouteReason        string    `json:"asr_route_reason,omitempty"`
+	SourceAudioSeconds    float64   `json:"source_audio_seconds,omitempty"`
+	CoverageValidated     bool      `json:"coverage_validated,omitempty"`
+	RepetitionValidated   bool      `json:"repetition_validated,omitempty"`
+	ExtremeRepetition     bool      `json:"extreme_repetition_detected,omitempty"`
+	RepeatedTokenBlock    int       `json:"maximum_repeated_token_block,omitempty"`
+	TokenBlockRepeats     int       `json:"maximum_token_block_repetitions,omitempty"`
+	RepeatedTokenSpan     int       `json:"maximum_repeated_token_span,omitempty"`
 	RemovedHallucinations []string  `json:"removed_terminal_hallucinations,omitempty"`
 	VideoTranscribeMode   string    `json:"video_transcribe_mode,omitempty"`
 }

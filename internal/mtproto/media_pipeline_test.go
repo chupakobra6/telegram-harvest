@@ -64,21 +64,30 @@ func (r *pipelineRunnerHarness) RunDetailed(ctx context.Context, inputPath strin
 	text := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 	speechGatePassed := true
 	return transcribe.Result{
-		Text:                   text,
-		Engine:                 "fake",
-		FFmpegDuration:         time.Millisecond,
-		SpeechGateDuration:     2 * time.Millisecond,
-		ModelColdStartDuration: 10 * time.Millisecond,
-		ASRDuration:            r.reportedASR,
-		TotalDuration:          r.delay,
-		InputBytes:             localFileSize(inputPath),
-		WAVDurationSeconds:     r.reportedAudio,
-		TranscriptBytes:        int64(len(text)),
+		Text:                        text,
+		Engine:                      "fake",
+		FFmpegDuration:              time.Millisecond,
+		SpeechGateDuration:          2 * time.Millisecond,
+		LongFormPreparationDuration: 3 * time.Millisecond,
+		ModelColdStartDuration:      10 * time.Millisecond,
+		ASRDuration:                 r.reportedASR,
+		TotalDuration:               r.delay,
+		InputBytes:                  localFileSize(inputPath),
+		WAVDurationSeconds:          r.reportedAudio,
+		TranscriptBytes:             int64(len(text)),
 		Diagnostics: &transcribe.Diagnostics{
 			Segments:                      2,
 			MeanAverageLogProb:            -0.25,
 			MaximumNoSpeechProb:           0.1,
 			SpeechGatePassed:              &speechGatePassed,
+			Strategy:                      transcribe.StrategyLongForm,
+			RouteReason:                   "duration-threshold",
+			SourceAudioDurationSeconds:    15,
+			CoverageValidated:             true,
+			RepetitionValidated:           true,
+			MaximumRepeatedTokenBlock:     4,
+			MaximumTokenBlockRepetitions:  3,
+			MaximumRepeatedTokenSpan:      12,
 			RemovedTerminalHallucinations: []string{"Продолжение следует..."},
 		},
 	}, nil
@@ -295,6 +304,9 @@ func TestMediaPipelineSingleWorkerCollectsDeterministicallyAndAtomically(t *test
 	if math.Abs(observed.SpeechGateSeconds-0.006) > 1e-9 {
 		t.Fatalf("speech-gate seconds = %.3f, want 0.006", observed.SpeechGateSeconds)
 	}
+	if math.Abs(observed.LongFormPrepSeconds-0.009) > 1e-9 {
+		t.Fatalf("long-form preparation seconds = %.3f, want 0.009", observed.LongFormPrepSeconds)
+	}
 	var finalEvent *harvest.ASRLogEvent
 	for index := range events {
 		if events[index].Action == "transcribed" {
@@ -307,6 +319,12 @@ func TestMediaPipelineSingleWorkerCollectsDeterministicallyAndAtomically(t *test
 	}
 	if finalEvent.ASRSegments != 2 || len(finalEvent.RemovedHallucinations) != 1 {
 		t.Fatalf("transcribed diagnostics event = %+v", finalEvent)
+	}
+	if finalEvent.LongFormPrepSeconds != 0.003 || finalEvent.ASRStrategy != transcribe.StrategyLongForm ||
+		finalEvent.ASRRouteReason != "duration-threshold" || finalEvent.SourceAudioSeconds != 15 ||
+		!finalEvent.CoverageValidated || !finalEvent.RepetitionValidated ||
+		finalEvent.RepeatedTokenBlock != 4 || finalEvent.TokenBlockRepeats != 3 || finalEvent.RepeatedTokenSpan != 12 {
+		t.Fatalf("adaptive diagnostics event = %+v", finalEvent)
 	}
 	if matches, err := filepath.Glob(filepath.Join(dir, ".transcript-*.tmp")); err != nil || len(matches) != 0 {
 		t.Fatalf("temporary transcripts = %v, err=%v", matches, err)

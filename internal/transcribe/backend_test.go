@@ -30,22 +30,28 @@ func TestDescriptorAndCacheIdentitySeparateWhisperVariants(t *testing.T) {
 		Command:   "/tmp/whisper-vad-speech-segments",
 		ModelPath: "/models/ggml-silero-v6.2.0.bin",
 	}
-	longForm := base
-	longForm.WhisperLongForm = WhisperLongFormOptions{Enabled: true, ModelPath: "/models/ggml-silero-v6.2.0.bin", RussianInitialPrompt: "Первый prompt."}
-	differentPrompt := longForm
-	differentPrompt.WhisperLongForm.RussianInitialPrompt = "Второй prompt."
+	adaptive := speechGate
+	adaptive.WhisperAdaptive = WhisperAdaptiveOptions{Enabled: true, RussianInitialPrompt: "Первый prompt."}
+	differentPrompt := adaptive
+	differentPrompt.WhisperAdaptive.RussianInitialPrompt = "Второй prompt."
+	differentThreshold := adaptive
+	differentThreshold.WhisperAdaptive.LongMediaSeconds = 240
+	differentRepetitionPolicy := adaptive
+	differentRepetitionPolicy.WhisperAdaptive.RepetitionMinRepeats = 7
 
 	identities := map[string]bool{}
 	for name, opts := range map[string]Options{
-		"base":             base,
-		"quantized":        quantized,
-		"english":          english,
-		"different-binary": differentBinary,
-		"beam-search":      beamSearch,
-		"no-fallback":      noFallback,
-		"speech-gate":      speechGate,
-		"long-form":        longForm,
-		"different-prompt": differentPrompt,
+		"base":                        base,
+		"quantized":                   quantized,
+		"english":                     english,
+		"different-binary":            differentBinary,
+		"beam-search":                 beamSearch,
+		"no-fallback":                 noFallback,
+		"speech-gate":                 speechGate,
+		"adaptive":                    adaptive,
+		"different-prompt":            differentPrompt,
+		"different-threshold":         differentThreshold,
+		"different-repetition-policy": differentRepetitionPolicy,
 	} {
 		identity := opts.CacheIdentity()
 		if identity == "" {
@@ -94,6 +100,9 @@ func TestProductionWhisperProfileIsPinned(t *testing.T) {
 	if descriptor.SpeechGate == nil {
 		t.Fatal("production speech gate is disabled")
 	}
+	if descriptor.Adaptive == nil || descriptor.Adaptive.RoutingPolicy != whisperAdaptiveRoutingPolicy {
+		t.Fatalf("production adaptive policy = %#v", descriptor.Adaptive)
+	}
 	if descriptor.SpeechGate.Threshold != 0.5 ||
 		descriptor.SpeechGate.MinSpeechDurationMS != 250 ||
 		descriptor.SpeechGate.MinSilenceDurationMS != 100 ||
@@ -105,37 +114,40 @@ func TestProductionWhisperProfileIsPinned(t *testing.T) {
 	}
 }
 
-func TestProductionWhisperProfileUsesAdaptiveTrustedLongForm(t *testing.T) {
+func TestProductionWhisperProfileUsesOneAdaptivePolicy(t *testing.T) {
 	opts := ProductionOptions(
 		"/runtime/bin/whisper-server",
 		ProductionModelFile,
 		ProductionSpeechGateFile,
 		"ffmpeg",
 		nil,
-	).WithTrustedLongForm()
+	)
 	if err := opts.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	descriptor := opts.Descriptor()
-	if descriptor.SpeechGate != nil {
-		t.Fatalf("speech gate = %#v, want disabled", descriptor.SpeechGate)
+	if descriptor.SpeechGate == nil || descriptor.SpeechGate.Model != ProductionSpeechGateFile {
+		t.Fatalf("speech gate = %#v", descriptor.SpeechGate)
 	}
-	if descriptor.LongForm == nil || descriptor.LongForm.Model != ProductionSpeechGateFile ||
-		descriptor.LongForm.ScanWindowSeconds != 300 || descriptor.LongForm.ScanOverlapSeconds != 10 ||
-		descriptor.LongForm.LeadInMS != 1000 ||
-		descriptor.LongForm.LanguagePolicy != whisperLongFormLanguagePolicy ||
-		descriptor.LongForm.LanguageProbeSeconds != longFormLanguageProbeSeconds ||
-		descriptor.LongForm.RussianInitialPrompt != longFormRussianInitialPrompt ||
-		descriptor.LongForm.CarryInitialPrompt ||
-		descriptor.LongForm.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds ||
-		descriptor.LongForm.DecodeStrategy != whisperLongFormStrategy {
-		t.Fatalf("long form = %#v", descriptor.LongForm)
+	if descriptor.Adaptive == nil || descriptor.Adaptive.LongMediaSeconds != adaptiveLongMediaSeconds ||
+		descriptor.Adaptive.LeadingSilenceSeconds != adaptiveLeadingSilenceSeconds ||
+		descriptor.Adaptive.ScanWindowSeconds != 300 || descriptor.Adaptive.ScanOverlapSeconds != 10 ||
+		descriptor.Adaptive.LeadInMS != 1000 ||
+		descriptor.Adaptive.LanguagePolicy != whisperLongFormLanguagePolicy ||
+		descriptor.Adaptive.LanguageProbeSeconds != longFormLanguageProbeSeconds ||
+		descriptor.Adaptive.RussianInitialPrompt != longFormRussianInitialPrompt ||
+		descriptor.Adaptive.CarryInitialPrompt ||
+		descriptor.Adaptive.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds ||
+		descriptor.Adaptive.ShortDecodeStrategy != whisperShortFormStrategy ||
+		descriptor.Adaptive.LongDecodeStrategy != whisperLongFormStrategy ||
+		descriptor.Adaptive.RepetitionPolicy != whisperRepetitionPolicy ||
+		descriptor.Adaptive.RepetitionMinRepeats != adaptiveRepetitionMinRepeats ||
+		descriptor.Adaptive.RepetitionMinSpanTokens != adaptiveRepetitionMinSpanTokens ||
+		descriptor.Adaptive.RepetitionMaxBlockTokens != adaptiveRepetitionMaxBlockTokens {
+		t.Fatalf("adaptive = %#v", descriptor.Adaptive)
 	}
-	if descriptor.Language != "auto" {
-		t.Fatalf("long-form language = %q, want auto", descriptor.Language)
-	}
-	if opts.WhisperLongForm.Command != "/runtime/bin/whisper-vad-speech-segments" {
-		t.Fatalf("leading command = %q", opts.WhisperLongForm.Command)
+	if descriptor.Language != ProductionLanguage {
+		t.Fatalf("default short language = %q, want %q", descriptor.Language, ProductionLanguage)
 	}
 }
 

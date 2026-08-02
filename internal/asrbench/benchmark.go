@@ -36,18 +36,19 @@ type Sample struct {
 }
 
 type Variant struct {
-	Name             string                              `json:"name"`
-	Backend          string                              `json:"backend"`
-	Command          string                              `json:"command"`
-	ModelPath        string                              `json:"model_path"`
-	Accelerator      string                              `json:"accelerator"`
-	Language         string                              `json:"language,omitempty"`
-	Threads          int                                 `json:"threads,omitempty"`
-	FFmpegCommand    string                              `json:"ffmpeg_command,omitempty"`
-	ExpectedEvidence string                              `json:"expected_evidence,omitempty"`
-	Environment      map[string]string                   `json:"environment,omitempty"`
-	Decode           transcribe.WhisperDecodeOptions     `json:"decode,omitempty"`
-	SpeechGate       transcribe.WhisperSpeechGateOptions `json:"speech_gate,omitempty"`
+	Name              string                              `json:"name"`
+	Backend           string                              `json:"backend"`
+	Command           string                              `json:"command"`
+	ModelPath         string                              `json:"model_path"`
+	Accelerator       string                              `json:"accelerator"`
+	Language          string                              `json:"language,omitempty"`
+	Threads           int                                 `json:"threads,omitempty"`
+	FFmpegCommand     string                              `json:"ffmpeg_command,omitempty"`
+	ExpectedEvidence  string                              `json:"expected_evidence,omitempty"`
+	Environment       map[string]string                   `json:"environment,omitempty"`
+	Decode            transcribe.WhisperDecodeOptions     `json:"decode,omitempty"`
+	SpeechGate        transcribe.WhisperSpeechGateOptions `json:"speech_gate,omitempty"`
+	ProductionProfile bool                                `json:"production_profile,omitempty"`
 }
 
 type Report struct {
@@ -330,6 +331,18 @@ func runVariant(ctx context.Context, variant Variant, samples []Sample, runs int
 }
 
 func variantOptions(variant Variant) transcribe.Options {
+	if variant.ProductionProfile {
+		opts := transcribe.ProductionOptions(
+			variant.Command,
+			variant.ModelPath,
+			variant.SpeechGate.ModelPath,
+			variant.FFmpegCommand,
+			nil,
+		)
+		opts.Environment = variant.Environment
+		opts.WhisperSpeechGate.Command = variant.SpeechGate.Command
+		return opts
+	}
 	return transcribe.Options{
 		WhisperCommand:    variant.Command,
 		WhisperModelPath:  variant.ModelPath,

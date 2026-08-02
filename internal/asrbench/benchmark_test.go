@@ -33,6 +33,21 @@ func TestValidateVariantAllowsOnlyWhisperMetalExperimentSurface(t *testing.T) {
 	}
 }
 
+func TestVariantOptionsCanUseCanonicalProductionProfile(t *testing.T) {
+	variant := Variant{
+		Backend: transcribe.BackendWhisperCPP, Accelerator: transcribe.AcceleratorMetal,
+		Command: "/runtime/whisper-server", ModelPath: transcribe.ProductionModelFile,
+		Language: transcribe.ProductionLanguage, Threads: transcribe.ProductionThreads,
+		FFmpegCommand: "ffmpeg", ProductionProfile: true,
+		SpeechGate: transcribe.WhisperSpeechGateOptions{Command: "/runtime/vad", ModelPath: transcribe.ProductionSpeechGateFile},
+	}
+	opts := variantOptions(variant)
+	descriptor := opts.Descriptor()
+	if descriptor.Adaptive == nil || descriptor.SpeechGate == nil || opts.WhisperSpeechGate.Command != "/runtime/vad" {
+		t.Fatalf("production benchmark options = %#v", descriptor)
+	}
+}
+
 func TestNormalizeAndQuality(t *testing.T) {
 	if got := Normalize(" Ёж, ПРИВЕТ!! 42 "); got != "еж привет 42" {
 		t.Fatalf("Normalize() = %q", got)

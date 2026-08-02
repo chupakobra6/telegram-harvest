@@ -88,6 +88,8 @@ func TestWhisperSpeechGateParsesPresenceWithoutTrimmingAudio(t *testing.T) {
 	script := `#!/bin/sh
 if [ "$FAKE_GATE_RESULT" = "speech" ]; then
   printf 'Detected 2 speech segments:\n'
+  printf 'Speech segment 0: start = 10.00, end = 20.00\n'
+  printf 'Speech segment 1: start = 30.00, end = 40.00\n'
 else
   printf 'Detected 0 speech segments:\n'
 fi
@@ -104,19 +106,19 @@ fi
 		},
 		Environment: map[string]string{"FAKE_GATE_RESULT": "speech"},
 	}
-	hasSpeech, err := runWhisperSpeechGate(t.Context(), opts, "input.wav")
+	segments, err := runWhisperSpeechGate(t.Context(), opts, "input.wav")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasSpeech {
+	if len(segments) != 2 {
 		t.Fatal("speech gate rejected speech")
 	}
 	opts.Environment["FAKE_GATE_RESULT"] = "silence"
-	hasSpeech, err = runWhisperSpeechGate(t.Context(), opts, "input.wav")
+	segments, err = runWhisperSpeechGate(t.Context(), opts, "input.wav")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hasSpeech {
+	if len(segments) != 0 {
 		t.Fatal("speech gate accepted no-speech input")
 	}
 }
@@ -241,7 +243,7 @@ head -c 480044 /dev/zero > "$last"
 	go func() { _ = server.Serve(listener) }()
 	defer server.Close()
 	runner := &WhisperServerRunner{
-		opts: Options{Language: "auto", FFmpegCommand: ffmpegPath, WhisperLongForm: WhisperLongFormOptions{
+		opts: Options{Language: "auto", FFmpegCommand: ffmpegPath, WhisperAdaptive: WhisperAdaptiveOptions{
 			Enabled:              true,
 			LanguageProbeSeconds: longFormLanguageProbeSeconds,
 			RussianInitialPrompt: longFormRussianInitialPrompt,
@@ -273,7 +275,7 @@ head -c 480044 /dev/zero > "$last"
 }
 
 func TestLongFormDecodeRequestAppliesPromptOnlyToRussian(t *testing.T) {
-	settings := WhisperLongFormOptions{Enabled: true, RussianInitialPrompt: longFormRussianInitialPrompt}.normalized()
+	settings := WhisperAdaptiveOptions{Enabled: true, RussianInitialPrompt: longFormRussianInitialPrompt}.normalized()
 	russian, err := longFormDecodeRequest(settings, "Russian")
 	if err != nil {
 		t.Fatal(err)
@@ -371,6 +373,54 @@ func TestStripWhisperLongFormTerminalRepetitionsKeepsOneClosingPhrase(t *testing
 	got, removed = stripWhisperLongFormTerminalRepetitions("Да.\nДа.\nПродолжаем.")
 	if got != "Да.\nДа.\nПродолжаем." || len(removed) != 0 {
 		t.Fatalf("non-terminal repetition changed: text=%q removed=%#v", got, removed)
+	}
+}
+
+func TestAnalyzeWhisperRepetitionRejectsOnlyExtremeExactCycles(t *testing.T) {
+	policy := ProductionWhisperAdaptive().normalized()
+	normal := analyzeWhisperRepetition("Да, да, продолжаем. Я тестировал, тестировал, тестировал и закончил.", policy)
+	if normal.Extreme {
+		t.Fatalf("normal repetition marked extreme: %#v", normal)
+	}
+	extreme := analyzeWhisperRepetition(strings.Repeat("это выдуманный длинный цикл ", 6), policy)
+	if !extreme.Extreme || extreme.BlockTokens != 4 || extreme.Repetitions < 5 || extreme.SpanTokens < 20 {
+		t.Fatalf("extreme repetition not detected: %#v", extreme)
+	}
+
+	stricter := policy
+	stricter.RepetitionMinRepeats = 7
+	if got := analyzeWhisperRepetition(strings.Repeat("это выдуманный длинный цикл ", 6), stricter); got.Extreme {
+		t.Fatalf("non-default repetition policy was ignored: %#v", got)
+	}
+	limitedBlock := policy
+	limitedBlock.RepetitionMaxBlockTokens = 3
+	if got := analyzeWhisperRepetition(strings.Repeat("это выдуманный длинный цикл ", 6), limitedBlock); got.Extreme {
+		t.Fatalf("max-block policy was ignored: %#v", got)
+	}
+}
+
+func TestSelectAdaptiveRouteKeepsShortPathAndProtectsRiskyAudio(t *testing.T) {
+	settings := ProductionWhisperAdaptive().normalized()
+	tests := []struct {
+		name           string
+		duration       float64
+		firstSpeech    float64
+		speechDetected bool
+		strategy       string
+		reason         string
+	}{
+		{name: "ordinary voice", duration: 150, firstSpeech: 0.4, speechDetected: true, strategy: whisperShortFormStrategy, reason: adaptiveRouteShortMedia},
+		{name: "leading silence boundary", duration: 100, firstSpeech: 10, speechDetected: true, strategy: whisperLongFormStrategy, reason: adaptiveRouteLeadingSilence},
+		{name: "long boundary", duration: 180, firstSpeech: 0.2, speechDetected: true, strategy: whisperLongFormStrategy, reason: adaptiveRouteDuration},
+		{name: "no speech", duration: 900, speechDetected: false, strategy: adaptiveStrategyNoSpeech, reason: adaptiveRouteNoSpeech},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			strategy, reason := selectAdaptiveRoute(settings, test.duration, test.firstSpeech, test.speechDetected)
+			if strategy != test.strategy || reason != test.reason {
+				t.Fatalf("route = %q/%q, want %q/%q", strategy, reason, test.strategy, test.reason)
+			}
+		})
 	}
 }
 

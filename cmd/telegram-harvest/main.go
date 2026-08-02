@@ -210,7 +210,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
-	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt [--trusted-long-form]  # local production ASR; profile main only")
+	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt  # adaptive local production ASR; profile main only")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
 	fmt.Fprintln(out, "  me [--json]")
@@ -1992,9 +1992,8 @@ func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 }
 
 const (
-	transcribeFileContractVersion    = 3
-	transcribeProfileShortMessage    = "short-message-v1"
-	transcribeProfileTrustedLongForm = "trusted-long-form-v3"
+	transcribeFileContractVersion    = 4
+	transcribeProfileAdaptiveMedia   = "adaptive-media-v1"
 	transcribeValidationRuntimeReady = "runtime-ready"
 	transcribeValidationTranscribed  = "transcribed"
 	transcribeValidationNoSpeech     = "no-speech"
@@ -2018,6 +2017,8 @@ type transcribeFileResponse struct {
 	LanguageDetection time.Duration           `json:"language_detection"`
 	LeadingOffset     float64                 `json:"leading_speech_offset_seconds,omitempty"`
 	Diagnostics       *transcribe.Diagnostics `json:"diagnostics,omitempty"`
+	Strategy          string                  `json:"strategy,omitempty"`
+	RouteReason       string                  `json:"route_reason,omitempty"`
 	Inference         time.Duration           `json:"inference"`
 	Total             time.Duration           `json:"total"`
 }
@@ -2028,7 +2029,6 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	inputPath := fs.String("input", "", "local audio or video input path")
 	outputPath := fs.String("output", "", "plain UTF-8 transcript output path")
 	check := fs.Bool("check", false, "validate the configured production ASR runtime and exit")
-	trustedLongForm := fs.Bool("trusted-long-form", false, "trim silent pre-roll and use adaptive native timestamped long-form decoding")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2043,11 +2043,6 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		defaults.FFmpegCommand,
 		nil,
 	)
-	profileID := transcribeProfileShortMessage
-	if *trustedLongForm {
-		opts = opts.WithTrustedLongForm()
-		profileID = transcribeProfileTrustedLongForm
-	}
 	if err := opts.ValidateRuntime(); err != nil {
 		return fmt.Errorf("production ASR runtime: %w", err)
 	}
@@ -2055,7 +2050,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		return writeTranscribeFileResponse(out, transcribeFileResponse{
 			ContractVersion:  transcribeFileContractVersion,
 			Status:           "ok",
-			ProfileID:        profileID,
+			ProfileID:        transcribeProfileAdaptiveMedia,
 			ValidationStatus: transcribeValidationRuntimeReady,
 			Engine:           opts.EngineName(),
 			Backend:          opts.Descriptor(),
@@ -2086,28 +2081,25 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	if err != nil {
 		return err
 	}
-	speechDetected := *trustedLongForm
-	if result.Diagnostics != nil && result.Diagnostics.SpeechGatePassed != nil {
-		speechDetected = *result.Diagnostics.SpeechGatePassed
-	}
+	speechDetected := result.SpeechDetected
 	validationStatus := transcribeValidationTranscribed
 	if !speechDetected {
 		validationStatus = transcribeValidationNoSpeech
 	}
-	if *trustedLongForm {
+	if result.Strategy == transcribe.StrategyLongForm {
 		if result.Diagnostics == nil || !result.Diagnostics.CoverageValidated {
-			return fmt.Errorf("trusted long-form result did not prove trailing speech coverage")
+			return fmt.Errorf("adaptive long-form result did not prove trailing speech coverage")
 		}
 		validationStatus = transcribeValidationCoverage
 	}
-	inference := result.ASRDuration - result.SpeechGateDuration
+	inference := result.ASRDuration - result.SpeechGateDuration - result.LongFormPreparationDuration
 	if inference < 0 {
 		inference = 0
 	}
 	return writeTranscribeFileResponse(out, transcribeFileResponse{
 		ContractVersion:   transcribeFileContractVersion,
 		Status:            "ok",
-		ProfileID:         profileID,
+		ProfileID:         transcribeProfileAdaptiveMedia,
 		ValidationStatus:  validationStatus,
 		Text:              result.Text,
 		SpeechDetected:    speechDetected,
@@ -2121,6 +2113,8 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		LanguageDetection: result.LanguageDetectionDuration,
 		LeadingOffset:     result.LeadingSpeechOffset,
 		Diagnostics:       result.Diagnostics,
+		Strategy:          result.Strategy,
+		RouteReason:       result.RouteReason,
 		Inference:         inference,
 		Total:             result.TotalDuration,
 	})

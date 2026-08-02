@@ -47,7 +47,7 @@
 - Daily media keeps one page-bounded producer and a global two-slot downloader. Consecutive small files may use one slot each; a large file uses both, FIFO order prevents starvation, and history RPC never overlaps a download wave. The bounded local queue feeds independent `ffmpeg → ASR` workers. Apply all results before deterministic sort/render; never let ASR workers own or call the Telegram client.
 - `--asr-workers=auto` is the normal daily mode and its policy is backend-specific. Vosk CPU may grow from one to at most four only for proven queued benefit plus CPU/memory headroom. whisper.cpp Metal/Core ML stays at one GPU worker; fixed `1..4` values are diagnostic overrides.
 - Transcript cache identity must include backend, model/quantization, accelerator, language and material decode settings. Publication must be atomic; in-flight media keys must be deduplicated, and temporary source/WAV/transcript files cleaned on success, failure, cancellation, and interruption.
-- Select trusted long-form changes as complete policies on a multilingual RU/EN/edge corpus. Every transcript-affecting setting belongs in the descriptor/cache identity; add a public ASR profile only for a real caller, and update the versioned OBS contract in the same pass when its semantics change.
+- Keep one public adaptive ASR profile for Telegram, local files, and OBS. Preserve the exact short-message strategy behind tested routing, validate long-form as a complete RU/EN/edge policy, include every transcript-affecting threshold in cache identity, and update the OBS contract atomically when semantics change.
 
 ## Code Policy
 - Prefer small, testable helpers for env loading, MTProto auth, runtime locks, and flood-wait handling.

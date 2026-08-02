@@ -21,11 +21,21 @@ const (
 	ProductionThreads                = 4
 	ProductionModelFile              = "ggml-large-v3-turbo-q5_0.bin"
 	ProductionSpeechGateFile         = "ggml-silero-v6.2.0.bin"
-	whisperLongFormStrategy          = "adaptive-native-timestamped-v3"
+	whisperShortFormStrategy         = "russian-no-timestamps-v1"
+	whisperLongFormStrategy          = "native-timestamped-v3"
+	whisperAdaptiveRoutingPolicy     = "duration-or-leading-silence-v1"
 	whisperLongFormLanguagePolicy    = "detect-russian-punctuation-v1"
+	whisperRepetitionPolicy          = "exact-token-cycle-v1"
+	adaptiveLongMediaSeconds         = 180
+	adaptiveLeadingSilenceSeconds    = 10
+	adaptiveRepetitionMinRepeats     = 5
+	adaptiveRepetitionMinSpanTokens  = 20
+	adaptiveRepetitionMaxBlockTokens = 32
 	longFormLanguageProbeSeconds     = 15
 	longFormRussianInitialPrompt     = "Да. Нет? Хорошо! Пожалуйста, продолжайте."
 	longFormCoverageToleranceSeconds = 2.0
+	StrategyShortMessage             = whisperShortFormStrategy
+	StrategyLongForm                 = whisperLongFormStrategy
 )
 
 // Descriptor is the stable identity of the production ASR implementation.
@@ -40,7 +50,7 @@ type Descriptor struct {
 	Threads      int                          `json:"threads,omitempty"`
 	Decode       *WhisperDecodeDescriptor     `json:"decode,omitempty"`
 	SpeechGate   *WhisperSpeechGateDescriptor `json:"speech_gate,omitempty"`
-	LongForm     *WhisperLongFormDescriptor   `json:"trusted_long_form,omitempty"`
+	Adaptive     *WhisperAdaptiveDescriptor   `json:"adaptive,omitempty"`
 	PostFilter   string                       `json:"post_filter,omitempty"`
 }
 
@@ -68,8 +78,9 @@ type WhisperDecodeDescriptor struct {
 	SuppressNonSpeechTokens bool    `json:"suppress_non_speech_tokens"`
 }
 
-// WhisperSpeechGateOptions runs Silero only as a whole-file speech-presence
-// check. Unlike integrated VAD, it never cuts or concatenates detected speech.
+// WhisperSpeechGateOptions is the single Silero configuration. Short media use
+// one whole-file bounds scan; long media reuse it in bounded boundary windows.
+// Silero never cuts or concatenates speech by itself.
 type WhisperSpeechGateOptions struct {
 	Enabled              bool     `json:"enabled,omitempty"`
 	Command              string   `json:"command,omitempty"`
@@ -89,17 +100,13 @@ type WhisperSpeechGateDescriptor struct {
 	SpeechPadMS          int     `json:"speech_pad_ms"`
 }
 
-// WhisperLongFormOptions finds the first and last speech with bounded Silero
-// windows. The remaining audio is decoded by Whisper's native timestamped
-// long-form loop, which owns window boundaries and carries confirmed context.
-type WhisperLongFormOptions struct {
+// WhisperAdaptiveOptions keeps one production profile while selecting between
+// the exact short-message decode and protected timestamped long-form decode
+// after the WAV duration and Silero speech bounds are known.
+type WhisperAdaptiveOptions struct {
 	Enabled                          bool
-	Command                          string
-	ModelPath                        string
-	Threshold                        *float64
-	MinSpeechDurationMS              *int
-	MinSilenceDurationMS             *int
-	SpeechPadMS                      *int
+	LongMediaSeconds                 float64
+	LeadingSilenceSeconds            float64
 	ScanWindowSeconds                int
 	ScanOverlapSeconds               int
 	LeadInMS                         int
@@ -107,15 +114,16 @@ type WhisperLongFormOptions struct {
 	RussianInitialPrompt             string
 	CarryInitialPrompt               bool
 	TrailingCoverageToleranceSeconds float64
+	RepetitionMinRepeats             int
+	RepetitionMinSpanTokens          int
+	RepetitionMaxBlockTokens         int
 }
 
-type WhisperLongFormDescriptor struct {
+type WhisperAdaptiveDescriptor struct {
 	Enabled                          bool    `json:"enabled"`
-	Model                            string  `json:"model"`
-	Threshold                        float64 `json:"threshold"`
-	MinSpeechDurationMS              int     `json:"min_speech_duration_ms"`
-	MinSilenceDurationMS             int     `json:"min_silence_duration_ms"`
-	SpeechPadMS                      int     `json:"speech_pad_ms"`
+	RoutingPolicy                    string  `json:"routing_policy"`
+	LongMediaSeconds                 float64 `json:"long_media_seconds"`
+	LeadingSilenceSeconds            float64 `json:"leading_silence_seconds"`
 	ScanWindowSeconds                int     `json:"scan_window_seconds"`
 	ScanOverlapSeconds               int     `json:"scan_overlap_seconds"`
 	LeadInMS                         int     `json:"lead_in_ms"`
@@ -124,11 +132,17 @@ type WhisperLongFormDescriptor struct {
 	RussianInitialPrompt             string  `json:"russian_initial_prompt"`
 	CarryInitialPrompt               bool    `json:"carry_initial_prompt"`
 	TrailingCoverageToleranceSeconds float64 `json:"trailing_coverage_tolerance_seconds"`
-	DecodeStrategy                   string  `json:"decode_strategy"`
+	ShortDecodeStrategy              string  `json:"short_decode_strategy"`
+	LongDecodeStrategy               string  `json:"long_decode_strategy"`
+	RepetitionPolicy                 string  `json:"repetition_policy"`
+	RepetitionMinRepeats             int     `json:"repetition_min_repeats"`
+	RepetitionMinSpanTokens          int     `json:"repetition_min_span_tokens"`
+	RepetitionMaxBlockTokens         int     `json:"repetition_max_block_tokens"`
 }
 
-// Diagnostics are backend confidence signals. They are evidence for benchmark
-// analysis, not a generic automatic rejection rule.
+// Diagnostics record backend confidence and routing evidence. Only explicit
+// long-form invariants (timestamps, tail coverage, extreme exact loops) reject
+// a result; probability fields remain benchmark signals.
 type Diagnostics struct {
 	Segments                         int      `json:"segments"`
 	MeanAverageLogProb               float64  `json:"mean_average_log_probability,omitempty"`
@@ -148,6 +162,14 @@ type Diagnostics struct {
 	DetectedLanguage                 string   `json:"detected_language,omitempty"`
 	LanguageDetectionSeconds         float64  `json:"language_detection_seconds,omitempty"`
 	InitialPromptApplied             bool     `json:"initial_prompt_applied"`
+	Strategy                         string   `json:"strategy,omitempty"`
+	RouteReason                      string   `json:"route_reason,omitempty"`
+	SourceAudioDurationSeconds       float64  `json:"source_audio_duration_seconds,omitempty"`
+	RepetitionValidated              bool     `json:"repetition_validated,omitempty"`
+	ExtremeRepetitionDetected        bool     `json:"extreme_repetition_detected,omitempty"`
+	MaximumRepeatedTokenBlock        int      `json:"maximum_repeated_token_block,omitempty"`
+	MaximumTokenBlockRepetitions     int      `json:"maximum_token_block_repetitions,omitempty"`
+	MaximumRepeatedTokenSpan         int      `json:"maximum_repeated_token_span,omitempty"`
 	RemovedTerminalHallucinations    []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
@@ -161,6 +183,7 @@ func ProductionOptions(command, modelPath, gateModelPath, ffmpegCommand string, 
 		WhisperThreads:    ProductionThreads,
 		WhisperDecode:     ProductionWhisperDecode(),
 		WhisperSpeechGate: ProductionWhisperSpeechGate(gateModelPath),
+		WhisperAdaptive:   ProductionWhisperAdaptive(),
 		Language:          ProductionLanguage,
 		FFmpegCommand:     ffmpegCommand,
 		StageTiming:       timing,
@@ -168,21 +191,11 @@ func ProductionOptions(command, modelPath, gateModelPath, ffmpegCommand string, 
 	}
 }
 
-// WithTrustedLongForm reuses canonical Silero in bounded boundary scans,
-// disables the whole-file gate, detects the spoken language on a bounded
-// leading sample, and enables one native timestamped decode. Russian receives
-// a short punctuation-style seed; other languages are decoded without one.
-func (o Options) WithTrustedLongForm() Options {
-	gate := o.WhisperSpeechGate
-	normalized := gate.normalized()
-	o.WhisperLongForm = WhisperLongFormOptions{
+func ProductionWhisperAdaptive() WhisperAdaptiveOptions {
+	return WhisperAdaptiveOptions{
 		Enabled:                          true,
-		Command:                          gate.command(o),
-		ModelPath:                        gate.ModelPath,
-		Threshold:                        floatPointer(normalized.Threshold),
-		MinSpeechDurationMS:              intPointer(normalized.MinSpeechDurationMS),
-		MinSilenceDurationMS:             intPointer(normalized.MinSilenceDurationMS),
-		SpeechPadMS:                      intPointer(normalized.SpeechPadMS),
+		LongMediaSeconds:                 adaptiveLongMediaSeconds,
+		LeadingSilenceSeconds:            adaptiveLeadingSilenceSeconds,
 		ScanWindowSeconds:                300,
 		ScanOverlapSeconds:               10,
 		LeadInMS:                         1000,
@@ -190,10 +203,10 @@ func (o Options) WithTrustedLongForm() Options {
 		RussianInitialPrompt:             longFormRussianInitialPrompt,
 		CarryInitialPrompt:               false,
 		TrailingCoverageToleranceSeconds: longFormCoverageToleranceSeconds,
+		RepetitionMinRepeats:             adaptiveRepetitionMinRepeats,
+		RepetitionMinSpanTokens:          adaptiveRepetitionMinSpanTokens,
+		RepetitionMaxBlockTokens:         adaptiveRepetitionMaxBlockTokens,
 	}
-	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
-	o.Language = "auto"
-	return o
 }
 
 func (o Options) Descriptor() Descriptor {
@@ -212,16 +225,16 @@ func (o Options) Descriptor() Descriptor {
 		gate := o.WhisperSpeechGate.normalized()
 		descriptor.SpeechGate = &gate
 	}
-	if o.WhisperLongForm.Enabled {
-		trim := o.WhisperLongForm.normalized()
-		descriptor.LongForm = &trim
+	if o.WhisperAdaptive.Enabled {
+		adaptive := o.WhisperAdaptive.normalized()
+		descriptor.Adaptive = &adaptive
 	}
 	return descriptor
 }
 
-// CacheIdentity keeps the v2 layout used by the selected production profile.
-// The empty fifth component is the removed integrated-VAD slot; preserving it
-// lets existing tuned-Whisper transcripts remain reusable.
+// CacheIdentity v3 intentionally invalidates the earlier split-profile cache:
+// routing thresholds can change which decode strategy owns the same media.
+// The empty component remains reserved for the removed integrated-VAD slot.
 func (o Options) CacheIdentity() string {
 	descriptorJSON, _ := json.Marshal(o.Descriptor())
 	gateCommand := ""
@@ -230,22 +243,14 @@ func (o Options) CacheIdentity() string {
 		gateCommand = cacheModelIdentity(o.WhisperSpeechGate.command(o))
 		gateModel = cacheModelIdentity(o.WhisperSpeechGate.ModelPath)
 	}
-	trimCommand := ""
-	trimModel := ""
-	if o.WhisperLongForm.Enabled {
-		trimCommand = cacheModelIdentity(o.WhisperLongForm.command(o))
-		trimModel = cacheModelIdentity(o.WhisperLongForm.ModelPath)
-	}
 	parts := []string{
-		"v2",
+		"v3",
 		string(descriptorJSON),
 		cacheModelIdentity(o.WhisperCommand),
 		cacheModelIdentity(o.WhisperModelPath),
 		"",
 		gateCommand,
 		gateModel,
-		trimCommand,
-		trimModel,
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:16])
@@ -267,14 +272,11 @@ func (o Options) Validate() error {
 	if err := o.WhisperSpeechGate.validate(o); err != nil {
 		return err
 	}
-	if err := o.WhisperLongForm.validate(o); err != nil {
+	if err := o.WhisperAdaptive.validate(o); err != nil {
 		return err
 	}
 	if o.productionProfile && o.WhisperSpeechGate.Enabled && filepath.Base(filepath.Clean(o.WhisperSpeechGate.ModelPath)) != ProductionSpeechGateFile {
 		return fmt.Errorf("production whisper speech-gate model must be %s", ProductionSpeechGateFile)
-	}
-	if o.productionProfile && o.WhisperLongForm.Enabled && filepath.Base(filepath.Clean(o.WhisperLongForm.ModelPath)) != ProductionSpeechGateFile {
-		return fmt.Errorf("production whisper trusted long-form VAD model must be %s", ProductionSpeechGateFile)
 	}
 	return nil
 }
@@ -292,9 +294,6 @@ func (o Options) ValidateRuntime() error {
 	if o.WhisperSpeechGate.Enabled {
 		commands["whisper.cpp speech gate"] = o.WhisperSpeechGate.command(o)
 	}
-	if o.WhisperLongForm.Enabled {
-		commands["whisper.cpp trusted long-form VAD"] = o.WhisperLongForm.command(o)
-	}
 	for name, command := range commands {
 		if strings.TrimSpace(command) == "" {
 			return fmt.Errorf("%s command is empty", name)
@@ -306,9 +305,6 @@ func (o Options) ValidateRuntime() error {
 	models := map[string]string{"whisper.cpp model": o.WhisperModelPath}
 	if o.WhisperSpeechGate.Enabled {
 		models["whisper.cpp speech gate"] = o.WhisperSpeechGate.ModelPath
-	}
-	if o.WhisperLongForm.Enabled {
-		models["whisper.cpp trusted long-form VAD"] = o.WhisperLongForm.ModelPath
 	}
 	for name, path := range models {
 		info, err := os.Stat(path)
@@ -414,14 +410,12 @@ func (o WhisperSpeechGateOptions) command(parent Options) string {
 	return filepath.Join(filepath.Dir(server), "whisper-vad-speech-segments")
 }
 
-func (o WhisperLongFormOptions) normalized() WhisperLongFormDescriptor {
-	return WhisperLongFormDescriptor{
+func (o WhisperAdaptiveOptions) normalized() WhisperAdaptiveDescriptor {
+	return WhisperAdaptiveDescriptor{
 		Enabled:                          o.Enabled,
-		Model:                            stableModelIdentity(o.ModelPath),
-		Threshold:                        floatValue(o.Threshold, 0.5),
-		MinSpeechDurationMS:              intValue(o.MinSpeechDurationMS, 250),
-		MinSilenceDurationMS:             intValue(o.MinSilenceDurationMS, 100),
-		SpeechPadMS:                      intValue(o.SpeechPadMS, 30),
+		RoutingPolicy:                    whisperAdaptiveRoutingPolicy,
+		LongMediaSeconds:                 positiveFloatOr(o.LongMediaSeconds, adaptiveLongMediaSeconds),
+		LeadingSilenceSeconds:            positiveFloatOr(o.LeadingSilenceSeconds, adaptiveLeadingSilenceSeconds),
 		ScanWindowSeconds:                positiveOr(o.ScanWindowSeconds, 300),
 		ScanOverlapSeconds:               positiveOr(o.ScanOverlapSeconds, 10),
 		LeadInMS:                         positiveOr(o.LeadInMS, 1000),
@@ -430,48 +424,39 @@ func (o WhisperLongFormOptions) normalized() WhisperLongFormDescriptor {
 		RussianInitialPrompt:             strings.TrimSpace(o.RussianInitialPrompt),
 		CarryInitialPrompt:               o.CarryInitialPrompt,
 		TrailingCoverageToleranceSeconds: positiveFloatOr(o.TrailingCoverageToleranceSeconds, longFormCoverageToleranceSeconds),
-		DecodeStrategy:                   whisperLongFormStrategy,
+		ShortDecodeStrategy:              whisperShortFormStrategy,
+		LongDecodeStrategy:               whisperLongFormStrategy,
+		RepetitionPolicy:                 whisperRepetitionPolicy,
+		RepetitionMinRepeats:             positiveOr(o.RepetitionMinRepeats, adaptiveRepetitionMinRepeats),
+		RepetitionMinSpanTokens:          positiveOr(o.RepetitionMinSpanTokens, adaptiveRepetitionMinSpanTokens),
+		RepetitionMaxBlockTokens:         positiveOr(o.RepetitionMaxBlockTokens, adaptiveRepetitionMaxBlockTokens),
 	}
 }
 
-func (o WhisperLongFormOptions) validate(parent Options) error {
+func (o WhisperAdaptiveOptions) validate(parent Options) error {
 	if !o.Enabled {
 		return nil
 	}
-	if strings.TrimSpace(o.command(parent)) == "" {
-		return fmt.Errorf("whisper trusted long-form VAD command is empty")
-	}
-	if strings.TrimSpace(o.ModelPath) == "" {
-		return fmt.Errorf("whisper trusted long-form VAD model is empty")
+	if !parent.WhisperSpeechGate.Enabled {
+		return fmt.Errorf("whisper adaptive routing requires the speech gate")
 	}
 	value := o.normalized()
-	if value.Threshold < 0 || value.Threshold > 1 {
-		return fmt.Errorf("whisper trusted long-form VAD threshold must be between 0 and 1")
-	}
-	if value.MinSpeechDurationMS < 0 || value.MinSilenceDurationMS < 0 || value.SpeechPadMS < 0 || value.LeadInMS < 0 {
-		return fmt.Errorf("whisper trusted long-form durations must be non-negative")
+	if value.LongMediaSeconds <= value.LeadingSilenceSeconds || value.LeadInMS < 0 {
+		return fmt.Errorf("whisper adaptive routing thresholds are invalid")
 	}
 	if value.ScanWindowSeconds <= value.ScanOverlapSeconds {
-		return fmt.Errorf("whisper trusted long-form scan window must exceed overlap")
+		return fmt.Errorf("whisper adaptive scan window must exceed overlap")
 	}
 	if value.LanguageProbeSeconds <= 0 || value.RussianInitialPrompt == "" {
-		return fmt.Errorf("whisper trusted long-form language policy is incomplete")
+		return fmt.Errorf("whisper adaptive language policy is incomplete")
 	}
 	if value.TrailingCoverageToleranceSeconds <= 0 {
-		return fmt.Errorf("whisper trusted long-form coverage tolerance must be positive")
+		return fmt.Errorf("whisper adaptive coverage tolerance must be positive")
+	}
+	if value.RepetitionMinRepeats < 2 || value.RepetitionMinSpanTokens < value.RepetitionMinRepeats || value.RepetitionMaxBlockTokens < 1 {
+		return fmt.Errorf("whisper adaptive repetition policy is invalid")
 	}
 	return nil
-}
-
-func (o WhisperLongFormOptions) command(parent Options) string {
-	if value := strings.TrimSpace(o.Command); value != "" {
-		return value
-	}
-	server := strings.TrimSpace(parent.WhisperCommand)
-	if server == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(server), "whisper-vad-speech-segments")
 }
 
 func positiveOr(value, fallback int) int {
@@ -487,9 +472,6 @@ func positiveFloatOr(value, fallback float64) float64 {
 	}
 	return fallback
 }
-
-func floatPointer(value float64) *float64 { return &value }
-func intPointer(value int) *int           { return &value }
 
 func normalizedThreads(threads int) int {
 	if threads > 0 {

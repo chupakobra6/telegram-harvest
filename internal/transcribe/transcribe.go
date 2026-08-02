@@ -22,7 +22,7 @@ type Options struct {
 	WhisperThreads    int
 	WhisperDecode     WhisperDecodeOptions
 	WhisperSpeechGate WhisperSpeechGateOptions
-	WhisperLongForm   WhisperLongFormOptions
+	WhisperAdaptive   WhisperAdaptiveOptions
 	Language          string
 	Environment       map[string]string
 	FFmpegCommand     string
@@ -53,6 +53,9 @@ type Result struct {
 	WAVDurationSeconds          float64
 	TranscriptBytes             int64
 	Diagnostics                 *Diagnostics
+	SpeechDetected              bool
+	Strategy                    string
+	RouteReason                 string
 }
 
 func NewManagedRunner(opts Options) ManagedRunner {

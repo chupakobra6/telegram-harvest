@@ -19,7 +19,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
-| Daily ASR | Один долгоживущий whisper.cpp large-v3-turbo q5_0 server на Metal, whole-file Silero gate и один GPU worker. OBS использует отдельную адаптивную long-form policy того же backend. |
+| Daily ASR | Один адаптивный профиль whisper.cpp large-v3-turbo q5_0 на Metal: быстрый short decode для обычных сообщений и защищённый long-form для длинного либо долго молчащего медиа. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
 | Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
@@ -198,7 +198,7 @@ Downloader выбирает chunk concurrency автоматически по р
 
 ## ASR pipeline
 
-Канонический production backend — `whisper.cpp large-v3-turbo q5_0 + Metal`, четыре CPU helper threads и `beam_size=5`. Публичный `short-message-v1` фиксирует русский язык и отдельный whole-file Silero speech gate; `trusted-long-form-v3` переиспользует тот же backend с адаптивной long-form policy. Эти параметры зафиксированы в коде. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
+Канонический production backend — `whisper.cpp large-v3-turbo q5_0 + Metal`, четыре CPU helper threads и `beam_size=5`. Telegram, локальный `transcribe-file` и OBS используют один публичный `adaptive-media-v1`: режим выбирает Harvest после фактического WAV и Silero bounds. CLI позволяет менять только локальные пути к server/model/gate/ffmpeg и включать или выключать транскрибацию.
 
 Тот же production-профиль доступен локальным автоматизациям без Telegram RPC:
 
@@ -206,19 +206,13 @@ Downloader выбирает chunk concurrency автоматически по р
 bin/telegram-harvest --profile main transcribe-file \
   --input /absolute/path/recording.mp4 \
   --output /absolute/path/transcript.txt
-
-# Адаптивный long-form профиль для доверенного локального caller вроде OBS:
-bin/telegram-harvest --profile main transcribe-file \
-  --trusted-long-form \
-  --input /absolute/path/interview.mp4 \
-  --output /absolute/path/interview.txt
 ```
 
-Команда пишет plain UTF-8 transcript в `--output`, а в stdout — ASR contract v3 с `profile_id`, `validation_status`, backend descriptor, diagnostics и timings. `transcribe-file --check` проверяет текущие runtime/model paths без обработки медиа и возвращает `validation_status: runtime-ready`. Публичных профиля ровно два: обычный Telegram/file-вход — `short-message-v1`, OBS long-form — `trusted-long-form-v3`. OBS Interview Pipeline использует только этот публичный контракт, поэтому Whisper profile, VAD, Metal/decode validation, language policy, prompt и post-filter обновляются только здесь, в `internal/transcribe`.
+Команда пишет plain UTF-8 transcript в `--output`, а в stdout — ASR contract v4 с `profile_id=adaptive-media-v1`, `validation_status`, выбранными `strategy`/`route_reason`, backend descriptor, diagnostics и timings. `transcribe-file --check` проверяет runtime/model paths без обработки медиа и возвращает `runtime-ready`. OBS доверяет только этому публичному контракту; Whisper, VAD, Metal/decode, language/prompt и post-filter настраиваются только в `internal/transcribe`.
 
-Для длинной OBS-записи `--trusted-long-form` bounded Silero-окнами находит первую и последнюю речь и сохраняет секундный lead-in. Затем короткий 15-секундный Whisper probe определяет язык без построения transcript: русский получает code-owned punctuation seed `Да. Нет? Хорошо! Пожалуйста, продолжайте.` с `carry_initial_prompt=false`, английский декодируется без prompt, остальные языки — через native auto-language без prompt. После probe выполняется ровно один нативный timestamped long-form decode всего непрерывного аудио. Внутренний декодер сам выбирает границы окон, переносит подтверждённый контекст и продвигается по timestamp-токенам; внешних чанков и текстовой склейки нет.
+Медиа короче 180 секунд, где речь начинается раньше 10 секунд, сохраняет прежний русский `no_timestamps` short decode. Длительность от 180 секунд либо leading silence от 10 секунд автоматически включает long-form: bounded Silero находит границы речи, сохраняется секундный lead-in, физический 15-секундный WAV probe определяет язык, а затем выполняется один timestamped decode. Русский получает punctuation seed `Да. Нет? Хорошо! Пожалуйста, продолжайте.` без carry; английский и остальные языки — без prompt. Внешних чанков и текстовой склейки нет.
 
-Harvest проверяет duration, монотонность timestamps и достижение последней найденной речи с двухсекундным допуском; только после этого возвращается `validation_status: coverage-validated`. Это гарантия структурной целостности и покрытия хвоста, а не оценка WER/CER. Detected language, применение prompt и отдельное время `language_detection` входят в diagnostics/contract; policy и prompt входят в descriptor и cache identity. Модель `large-v3-turbo-q5_0`, Metal, beam/fallback settings и terminal post-filter остаются единым кодовым профилем. Обычные Telegram-команды не используют long-form policy и сохраняют русский профиль, whole-file Silero gate и `no_timestamps=true`.
+Для long-form Harvest проверяет duration, монотонность timestamps, достижение последней Silero-речи и отсутствие только явного exact-token цикла (минимум пять повторов и 20 токенов). Допустимые речевые повторы не переписываются; одинаковые финальные строки по-прежнему схлопываются отдельно. `coverage-validated` доказывает структуру, хвост и отсутствие обнаруженного extreme loop, но не WER/CER. Все routing thresholds, prompt и decode settings входят в descriptor/cache identity.
 
 Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; общий coordinator распределяет ровно два chunk slots между двумя маленькими файлами либо одним большим и не пересекает download wave с history RPC. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 
@@ -258,7 +252,7 @@ TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH=.state/asr-runtime/whisper.cpp/m
 TG_HARVEST_DAILY_FFMPEG_COMMAND=ffmpeg
 ```
 
-Daily всегда использует один GPU worker, `beam_size=5` и Silero с threshold `0.5`, minimum speech `250 ms`, minimum silence `100 ms`, padding `30 ms`. Gate запускается после ffmpeg и только отвечает «есть ли в файле речь»; исходный WAV целиком отправляется в Whisper. Это убирает non-speech hallucinations, не рискуя обрезать отрицания или начало/конец фразы. Известные точные terminal boilerplate-фразы Whisper (`Продолжение следует`, `Субтитры сделал DimaTorzok` и подобные) удаляются только отдельной последней строкой и записываются в diagnostics; совпадение внутри нормального предложения не трогается.
+Daily всегда использует один GPU worker, `beam_size=5` и Silero с threshold `0.5`, minimum speech `250 ms`, minimum silence `100 ms`, padding `30 ms`. На обычном short path Silero только определяет speech bounds, а исходный WAV целиком отправляется в Whisper; поэтому прежний текст и скорость сохраняются. На рискованном long path найденные bounds используются для безопасного leading trim и trailing coverage. Известные точные terminal boilerplate-фразы (`Продолжение следует`, `Субтитры сделал DimaTorzok` и подобные) удаляются только отдельной последней строкой.
 
 Runtime обязан подтвердить `ggml_metal_init: found device`; отсутствие Metal или неожиданная активация Core ML останавливает ASR вместо тихого перехода на другой pipeline.
 

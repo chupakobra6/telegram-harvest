@@ -299,6 +299,7 @@ func (p *mediaPipeline) processJob(worker *mediaPipelineWorker, job mediaPipelin
 	event.Engine = detailed.Engine
 	event.FFmpegSeconds = detailed.FFmpegDuration.Seconds()
 	event.SpeechGateSeconds = detailed.SpeechGateDuration.Seconds()
+	event.LongFormPrepSeconds = detailed.LongFormPreparationDuration.Seconds()
 	event.ModelColdStartSeconds = detailed.ModelColdStartDuration.Seconds()
 	event.ASRSeconds = detailed.ASRDuration.Seconds()
 	event.TotalSeconds = detailed.TotalDuration.Seconds() + job.DownloadSeconds
@@ -311,6 +312,15 @@ func (p *mediaPipeline) processJob(worker *mediaPipelineWorker, job mediaPipelin
 		event.ASRMeanLogProbability = diagnostics.MeanAverageLogProb
 		event.ASRMaxNoSpeechProb = diagnostics.MaximumNoSpeechProb
 		event.SpeechGatePassed = diagnostics.SpeechGatePassed
+		event.ASRStrategy = diagnostics.Strategy
+		event.ASRRouteReason = diagnostics.RouteReason
+		event.SourceAudioSeconds = diagnostics.SourceAudioDurationSeconds
+		event.CoverageValidated = diagnostics.CoverageValidated
+		event.RepetitionValidated = diagnostics.RepetitionValidated
+		event.ExtremeRepetition = diagnostics.ExtremeRepetitionDetected
+		event.RepeatedTokenBlock = diagnostics.MaximumRepeatedTokenBlock
+		event.TokenBlockRepeats = diagnostics.MaximumTokenBlockRepetitions
+		event.RepeatedTokenSpan = diagnostics.MaximumRepeatedTokenSpan
 		event.RemovedHallucinations = append([]string(nil), diagnostics.RemovedTerminalHallucinations...)
 	}
 	if detailed.WAVDurationSeconds > 0 && detailed.ASRDuration > 0 {
@@ -349,6 +359,7 @@ func (p *mediaPipeline) storeResult(worker *mediaPipelineWorker, result mediaPip
 	worker.metrics.AudioSeconds += audioSeconds
 	worker.metrics.FFmpegSeconds += result.Result.FFmpegDuration.Seconds()
 	worker.metrics.SpeechGateSeconds += result.Result.SpeechGateDuration.Seconds()
+	worker.metrics.LongFormPrepSeconds += result.Result.LongFormPreparationDuration.Seconds()
 	worker.metrics.ModelColdStartSeconds += result.Result.ModelColdStartDuration.Seconds()
 	worker.metrics.ASRSeconds += result.Result.ASRDuration.Seconds()
 	if provider, ok := worker.runner.(interface{ ProcessID() int }); ok {
@@ -523,6 +534,7 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 	}
 	workers := make([]stages.MediaWorkerMetrics, 0, 1)
 	var speechGateSeconds float64
+	var longFormPrepSeconds float64
 	for _, worker := range p.workers {
 		metrics := worker.metrics
 		if metrics.Jobs == 0 {
@@ -530,6 +542,7 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		}
 		metrics.ASRSpeedX = speedRatio(metrics.AudioSeconds, metrics.ASRSeconds)
 		speechGateSeconds += metrics.SpeechGateSeconds
+		longFormPrepSeconds += metrics.LongFormPrepSeconds
 		workers = append(workers, metrics)
 	}
 	workersActivated := 0
@@ -554,6 +567,7 @@ func (p *mediaPipeline) metrics() stages.MediaPipelineMetrics {
 		JobsFailed:              p.jobsFailed,
 		AudioSeconds:            p.totalAudio,
 		SpeechGateSeconds:       speechGateSeconds,
+		LongFormPrepSeconds:     longFormPrepSeconds,
 		SpanSeconds:             span.Seconds(),
 		OverlapSeconds:          overlap.Seconds(),
 		PoolSpeedX:              speedRatio(p.totalAudio, span.Seconds()),

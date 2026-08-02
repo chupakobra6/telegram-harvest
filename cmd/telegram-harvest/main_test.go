@@ -72,7 +72,7 @@ func TestRunTranscribeFileCheckUsesProductionRuntime(t *testing.T) {
 		t.Fatalf("decode response: %v\n%s", err, stdout)
 	}
 	if response.ContractVersion != transcribeFileContractVersion || response.Status != "ok" ||
-		response.ProfileID != transcribeProfileShortMessage || response.ValidationStatus != transcribeValidationRuntimeReady {
+		response.ProfileID != transcribeProfileAdaptiveMedia || response.ValidationStatus != transcribeValidationRuntimeReady {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 	if response.Backend.Backend != transcribe.BackendWhisperCPP || response.Backend.Accelerator != transcribe.AcceleratorMetal {
@@ -81,47 +81,16 @@ func TestRunTranscribeFileCheckUsesProductionRuntime(t *testing.T) {
 	if response.Backend.Decode == nil || response.Backend.Decode.BeamSize != 5 {
 		t.Fatalf("production decode profile missing: %+v", response.Backend.Decode)
 	}
+	if response.Backend.SpeechGate == nil || response.Backend.Adaptive == nil ||
+		response.Backend.Adaptive.RoutingPolicy == "" || response.Backend.Adaptive.RussianInitialPrompt == "" {
+		t.Fatalf("adaptive production policy missing: %+v", response.Backend)
+	}
 }
 
-func TestRunTranscribeFileCheckCanUseTrustedLongFormWithoutWholeFileGate(t *testing.T) {
-	dir := t.TempDir()
-	binDir := filepath.Join(dir, "bin")
-	whisperCommand := filepath.Join(binDir, "whisper-server")
-	gateCommand := filepath.Join(binDir, "whisper-vad-speech-segments")
-	ffmpegCommand := filepath.Join(binDir, "ffmpeg")
-	for _, path := range []string{whisperCommand, gateCommand, ffmpegCommand} {
-		mustWriteCLIFile(t, path, "#!/bin/sh\nexit 0\n")
-		if err := os.Chmod(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	modelPath := filepath.Join(dir, transcribe.ProductionModelFile)
-	gateModelPath := filepath.Join(dir, transcribe.ProductionSpeechGateFile)
-	mustWriteCLIFile(t, modelPath, "model")
-	mustWriteCLIFile(t, gateModelPath, "gate")
-	env := map[string]string{
-		"TG_HARVEST_DAILY_WHISPER_COMMAND":                whisperCommand,
-		"TG_HARVEST_DAILY_WHISPER_MODEL_PATH":             modelPath,
-		"TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH": gateModelPath,
-		"TG_HARVEST_DAILY_FFMPEG_COMMAND":                 ffmpegCommand,
-	}
-	code, stdout, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--trusted-long-form"}, env)
-	if code != 0 {
+func TestRunTranscribeFileRejectsRemovedTrustedLongFormMode(t *testing.T) {
+	code, _, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--trusted-long-form"}, nil)
+	if code != 1 || !strings.Contains(stderr, "flag provided but not defined") {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	var response transcribeFileResponse
-	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
-		t.Fatalf("decode response: %v\n%s", err, stdout)
-	}
-	if response.Backend.SpeechGate != nil || response.Backend.LongForm == nil {
-		t.Fatalf("unexpected backend: %#v", response.Backend)
-	}
-	if response.Backend.Language != "auto" || response.Backend.LongForm.LanguagePolicy == "" ||
-		response.Backend.LongForm.RussianInitialPrompt == "" || response.Backend.LongForm.CarryInitialPrompt {
-		t.Fatalf("unexpected adaptive language policy: %#v", response.Backend)
-	}
-	if response.ProfileID != transcribeProfileTrustedLongForm || response.ValidationStatus != transcribeValidationRuntimeReady {
-		t.Fatalf("unexpected trusted long-form contract: %+v", response)
 	}
 }
 
