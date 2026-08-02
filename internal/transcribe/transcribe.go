@@ -45,6 +45,7 @@ type Result struct {
 	ASRDuration                 time.Duration
 	SpeechGateDuration          time.Duration
 	LongFormPreparationDuration time.Duration
+	LanguageDetectionDuration   time.Duration
 	LeadingSpeechOffset         float64
 	TotalDuration               time.Duration
 	InputBytes                  int64

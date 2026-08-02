@@ -30,6 +30,10 @@ func TestDescriptorAndCacheIdentitySeparateWhisperVariants(t *testing.T) {
 		Command:   "/tmp/whisper-vad-speech-segments",
 		ModelPath: "/models/ggml-silero-v6.2.0.bin",
 	}
+	longForm := base
+	longForm.WhisperLongForm = WhisperLongFormOptions{Enabled: true, ModelPath: "/models/ggml-silero-v6.2.0.bin", RussianInitialPrompt: "Первый prompt."}
+	differentPrompt := longForm
+	differentPrompt.WhisperLongForm.RussianInitialPrompt = "Второй prompt."
 
 	identities := map[string]bool{}
 	for name, opts := range map[string]Options{
@@ -40,6 +44,8 @@ func TestDescriptorAndCacheIdentitySeparateWhisperVariants(t *testing.T) {
 		"beam-search":      beamSearch,
 		"no-fallback":      noFallback,
 		"speech-gate":      speechGate,
+		"long-form":        longForm,
+		"different-prompt": differentPrompt,
 	} {
 		identity := opts.CacheIdentity()
 		if identity == "" {
@@ -99,30 +105,7 @@ func TestProductionWhisperProfileIsPinned(t *testing.T) {
 	}
 }
 
-func TestProductionWhisperProfileCanSkipOnlySpeechGate(t *testing.T) {
-	opts := ProductionOptions(
-		"whisper-server",
-		ProductionModelFile,
-		"unused-gate-model.bin",
-		"ffmpeg",
-		nil,
-	).WithoutSpeechGate()
-	if err := opts.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	descriptor := opts.Descriptor()
-	if descriptor.SpeechGate != nil {
-		t.Fatalf("speech gate = %#v, want disabled", descriptor.SpeechGate)
-	}
-	if descriptor.Model != ProductionModelFile || descriptor.Accelerator != AcceleratorMetal || descriptor.Language != ProductionLanguage {
-		t.Fatalf("production identity changed: %#v", descriptor)
-	}
-	if descriptor.Decode == nil || descriptor.Decode.BeamSize != 5 || descriptor.PostFilter != whisperTerminalHallucinationProfile {
-		t.Fatalf("production inference profile changed: %#v", descriptor)
-	}
-}
-
-func TestProductionWhisperProfileCanTrimOnlyLeadingSilence(t *testing.T) {
+func TestProductionWhisperProfileUsesAdaptiveTrustedLongForm(t *testing.T) {
 	opts := ProductionOptions(
 		"/runtime/bin/whisper-server",
 		ProductionModelFile,
@@ -140,9 +123,16 @@ func TestProductionWhisperProfileCanTrimOnlyLeadingSilence(t *testing.T) {
 	if descriptor.LongForm == nil || descriptor.LongForm.Model != ProductionSpeechGateFile ||
 		descriptor.LongForm.ScanWindowSeconds != 300 || descriptor.LongForm.ScanOverlapSeconds != 10 ||
 		descriptor.LongForm.LeadInMS != 1000 ||
+		descriptor.LongForm.LanguagePolicy != whisperLongFormLanguagePolicy ||
+		descriptor.LongForm.LanguageProbeSeconds != longFormLanguageProbeSeconds ||
+		descriptor.LongForm.RussianInitialPrompt != longFormRussianInitialPrompt ||
+		descriptor.LongForm.CarryInitialPrompt ||
 		descriptor.LongForm.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds ||
 		descriptor.LongForm.DecodeStrategy != whisperLongFormStrategy {
 		t.Fatalf("long form = %#v", descriptor.LongForm)
+	}
+	if descriptor.Language != "auto" {
+		t.Fatalf("long-form language = %q, want auto", descriptor.Language)
 	}
 	if opts.WhisperLongForm.Command != "/runtime/bin/whisper-vad-speech-segments" {
 		t.Fatalf("leading command = %q", opts.WhisperLongForm.Command)

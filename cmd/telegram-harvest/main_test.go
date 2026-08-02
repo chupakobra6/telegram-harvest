@@ -83,44 +83,6 @@ func TestRunTranscribeFileCheckUsesProductionRuntime(t *testing.T) {
 	}
 }
 
-func TestRunTranscribeFileCheckCanSkipSpeechGateRuntime(t *testing.T) {
-	dir := t.TempDir()
-	binDir := filepath.Join(dir, "bin")
-	whisperCommand := filepath.Join(binDir, "whisper-server")
-	ffmpegCommand := filepath.Join(binDir, "ffmpeg")
-	for _, path := range []string{whisperCommand, ffmpegCommand} {
-		mustWriteCLIFile(t, path, "#!/bin/sh\nexit 0\n")
-		if err := os.Chmod(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	modelPath := filepath.Join(dir, transcribe.ProductionModelFile)
-	mustWriteCLIFile(t, modelPath, "model")
-	env := map[string]string{
-		"TG_HARVEST_DAILY_WHISPER_COMMAND":                whisperCommand,
-		"TG_HARVEST_DAILY_WHISPER_MODEL_PATH":             modelPath,
-		"TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH": filepath.Join(dir, "missing-gate.bin"),
-		"TG_HARVEST_DAILY_FFMPEG_COMMAND":                 ffmpegCommand,
-	}
-	code, stdout, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--assume-speech"}, env)
-	if code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	var response transcribeFileResponse
-	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
-		t.Fatalf("decode response: %v\n%s", err, stdout)
-	}
-	if response.Backend.SpeechGate != nil {
-		t.Fatalf("speech gate = %#v, want disabled", response.Backend.SpeechGate)
-	}
-	if response.ProfileID != transcribeProfileTrustedSpeech || response.ValidationStatus != transcribeValidationRuntimeReady {
-		t.Fatalf("unexpected trusted-speech contract: %+v", response)
-	}
-	if response.Backend.Model != transcribe.ProductionModelFile || response.Backend.Decode == nil || response.Backend.Decode.BeamSize != 5 {
-		t.Fatalf("production profile changed: %#v", response.Backend)
-	}
-}
-
 func TestRunTranscribeFileCheckCanUseTrustedLongFormWithoutWholeFileGate(t *testing.T) {
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
@@ -154,14 +116,18 @@ func TestRunTranscribeFileCheckCanUseTrustedLongFormWithoutWholeFileGate(t *test
 	if response.Backend.SpeechGate != nil || response.Backend.LongForm == nil {
 		t.Fatalf("unexpected backend: %#v", response.Backend)
 	}
+	if response.Backend.Language != "auto" || response.Backend.LongForm.LanguagePolicy == "" ||
+		response.Backend.LongForm.RussianInitialPrompt == "" || response.Backend.LongForm.CarryInitialPrompt {
+		t.Fatalf("unexpected adaptive language policy: %#v", response.Backend)
+	}
 	if response.ProfileID != transcribeProfileTrustedLongForm || response.ValidationStatus != transcribeValidationRuntimeReady {
 		t.Fatalf("unexpected trusted long-form contract: %+v", response)
 	}
 }
 
-func TestRunTranscribeFileRejectsConflictingTrustedModes(t *testing.T) {
-	code, _, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--assume-speech", "--trusted-long-form"}, nil)
-	if code != 1 || !strings.Contains(stderr, "mutually exclusive") {
+func TestRunTranscribeFileRejectsRemovedAssumeSpeechMode(t *testing.T) {
+	code, _, stderr := runCommand(t, []string{"--profile", "main", "transcribe-file", "--check", "--assume-speech"}, nil)
+	if code != 1 || !strings.Contains(stderr, "flag provided but not defined") {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 }

@@ -210,7 +210,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
-	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt [--assume-speech | --trusted-long-form]  # local production ASR; profile main only")
+	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt [--trusted-long-form]  # local production ASR; profile main only")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
 	fmt.Fprintln(out, "  me [--json]")
@@ -1992,10 +1992,9 @@ func dailyTranscribeOptions(opts harvest.HistoryOptions) transcribe.Options {
 }
 
 const (
-	transcribeFileContractVersion    = 2
+	transcribeFileContractVersion    = 3
 	transcribeProfileShortMessage    = "short-message-v1"
-	transcribeProfileTrustedSpeech   = "trusted-speech-v1"
-	transcribeProfileTrustedLongForm = "trusted-long-form-v2"
+	transcribeProfileTrustedLongForm = "trusted-long-form-v3"
 	transcribeValidationRuntimeReady = "runtime-ready"
 	transcribeValidationTranscribed  = "transcribed"
 	transcribeValidationNoSpeech     = "no-speech"
@@ -2003,23 +2002,24 @@ const (
 )
 
 type transcribeFileResponse struct {
-	ContractVersion  int                     `json:"contract_version"`
-	Status           string                  `json:"status"`
-	ProfileID        string                  `json:"profile_id"`
-	ValidationStatus string                  `json:"validation_status"`
-	Text             string                  `json:"text,omitempty"`
-	SpeechDetected   bool                    `json:"speech_detected"`
-	MetalConfirmed   bool                    `json:"metal_confirmed"`
-	Engine           string                  `json:"engine"`
-	Backend          transcribe.Descriptor   `json:"backend"`
-	FFmpeg           time.Duration           `json:"ffmpeg"`
-	ModelColdStart   time.Duration           `json:"model_cold_start"`
-	SpeechGate       time.Duration           `json:"speech_gate"`
-	LongFormPrep     time.Duration           `json:"long_form_preparation"`
-	LeadingOffset    float64                 `json:"leading_speech_offset_seconds,omitempty"`
-	Diagnostics      *transcribe.Diagnostics `json:"diagnostics,omitempty"`
-	Inference        time.Duration           `json:"inference"`
-	Total            time.Duration           `json:"total"`
+	ContractVersion   int                     `json:"contract_version"`
+	Status            string                  `json:"status"`
+	ProfileID         string                  `json:"profile_id"`
+	ValidationStatus  string                  `json:"validation_status"`
+	Text              string                  `json:"text,omitempty"`
+	SpeechDetected    bool                    `json:"speech_detected"`
+	MetalConfirmed    bool                    `json:"metal_confirmed"`
+	Engine            string                  `json:"engine"`
+	Backend           transcribe.Descriptor   `json:"backend"`
+	FFmpeg            time.Duration           `json:"ffmpeg"`
+	ModelColdStart    time.Duration           `json:"model_cold_start"`
+	SpeechGate        time.Duration           `json:"speech_gate"`
+	LongFormPrep      time.Duration           `json:"long_form_preparation"`
+	LanguageDetection time.Duration           `json:"language_detection"`
+	LeadingOffset     float64                 `json:"leading_speech_offset_seconds,omitempty"`
+	Diagnostics       *transcribe.Diagnostics `json:"diagnostics,omitempty"`
+	Inference         time.Duration           `json:"inference"`
+	Total             time.Duration           `json:"total"`
 }
 
 func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error {
@@ -2028,8 +2028,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	inputPath := fs.String("input", "", "local audio or video input path")
 	outputPath := fs.String("output", "", "plain UTF-8 transcript output path")
 	check := fs.Bool("check", false, "validate the configured production ASR runtime and exit")
-	assumeSpeech := fs.Bool("assume-speech", false, "skip the whole-file speech gate for a trusted speech recording")
-	trustedLongForm := fs.Bool("trusted-long-form", false, "trim silent pre-roll and use native timestamped long-form decoding")
+	trustedLongForm := fs.Bool("trusted-long-form", false, "trim silent pre-roll and use adaptive native timestamped long-form decoding")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2044,16 +2043,10 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		defaults.FFmpegCommand,
 		nil,
 	)
-	if *trustedLongForm && *assumeSpeech {
-		return fmt.Errorf("--trusted-long-form and --assume-speech are mutually exclusive")
-	}
 	profileID := transcribeProfileShortMessage
 	if *trustedLongForm {
 		opts = opts.WithTrustedLongForm()
 		profileID = transcribeProfileTrustedLongForm
-	} else if *assumeSpeech {
-		opts = opts.WithoutSpeechGate()
-		profileID = transcribeProfileTrustedSpeech
 	}
 	if err := opts.ValidateRuntime(); err != nil {
 		return fmt.Errorf("production ASR runtime: %w", err)
@@ -2093,7 +2086,7 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 	if err != nil {
 		return err
 	}
-	speechDetected := *assumeSpeech || *trustedLongForm
+	speechDetected := *trustedLongForm
 	if result.Diagnostics != nil && result.Diagnostics.SpeechGatePassed != nil {
 		speechDetected = *result.Diagnostics.SpeechGatePassed
 	}
@@ -2112,23 +2105,24 @@ func runTranscribeFile(ctx context.Context, args []string, out io.Writer) error 
 		inference = 0
 	}
 	return writeTranscribeFileResponse(out, transcribeFileResponse{
-		ContractVersion:  transcribeFileContractVersion,
-		Status:           "ok",
-		ProfileID:        profileID,
-		ValidationStatus: validationStatus,
-		Text:             result.Text,
-		SpeechDetected:   speechDetected,
-		MetalConfirmed:   speechDetected,
-		Engine:           result.Engine,
-		Backend:          result.Backend,
-		FFmpeg:           result.FFmpegDuration,
-		ModelColdStart:   result.ModelColdStartDuration,
-		SpeechGate:       result.SpeechGateDuration,
-		LongFormPrep:     result.LongFormPreparationDuration,
-		LeadingOffset:    result.LeadingSpeechOffset,
-		Diagnostics:      result.Diagnostics,
-		Inference:        inference,
-		Total:            result.TotalDuration,
+		ContractVersion:   transcribeFileContractVersion,
+		Status:            "ok",
+		ProfileID:         profileID,
+		ValidationStatus:  validationStatus,
+		Text:              result.Text,
+		SpeechDetected:    speechDetected,
+		MetalConfirmed:    speechDetected,
+		Engine:            result.Engine,
+		Backend:           result.Backend,
+		FFmpeg:            result.FFmpegDuration,
+		ModelColdStart:    result.ModelColdStartDuration,
+		SpeechGate:        result.SpeechGateDuration,
+		LongFormPrep:      result.LongFormPreparationDuration,
+		LanguageDetection: result.LanguageDetectionDuration,
+		LeadingOffset:     result.LeadingSpeechOffset,
+		Diagnostics:       result.Diagnostics,
+		Inference:         inference,
+		Total:             result.TotalDuration,
 	})
 }
 

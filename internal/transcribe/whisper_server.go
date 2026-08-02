@@ -46,6 +46,7 @@ type WhisperServerRunner struct {
 type whisperResponse struct {
 	Text     string           `json:"text"`
 	Error    string           `json:"error"`
+	Language string           `json:"language,omitempty"`
 	Duration float64          `json:"duration,omitempty"`
 	Segments []whisperSegment `json:"segments,omitempty"`
 }
@@ -58,7 +59,12 @@ type whisperSegment struct {
 }
 
 type whisperRequestOptions struct {
-	SegmentTimestamps bool
+	SegmentTimestamps  bool
+	Language           string
+	InitialPrompt      string
+	CarryInitialPrompt bool
+	DetectLanguage     bool
+	DurationMS         int
 }
 
 func (r *WhisperServerRunner) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
@@ -167,6 +173,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 		return Result{}, err
 	}
 	mergeDiagnostics(diagnostics, inferenceDiagnostics)
+	languageDetectionDuration := time.Duration(diagnostics.LanguageDetectionSeconds * float64(time.Second))
 	asrDuration := speechGateDuration + inferenceDuration
 	text = strings.TrimSpace(text)
 	var removed []string
@@ -184,6 +191,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 		ASRDuration:                 asrDuration,
 		SpeechGateDuration:          speechGateDuration,
 		LongFormPreparationDuration: longFormPreparationDuration,
+		LanguageDetectionDuration:   languageDetectionDuration,
 		LeadingSpeechOffset:         leadingSpeechOffset,
 		TotalDuration:               time.Since(start),
 		InputBytes:                  fileSize(inputPath),
@@ -199,11 +207,25 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	if duration <= 0 {
 		return "", nil, fmt.Errorf("trusted long-form inference received empty audio")
 	}
-	decoded, err := r.inferRequestLocked(ctx, wavPath, whisperRequestOptions{SegmentTimestamps: true})
+	settings := r.opts.WhisperLongForm.normalized()
+	detectionStart := time.Now()
+	detected, err := r.inferRequestLocked(ctx, wavPath, whisperRequestOptions{
+		Language:       "auto",
+		DetectLanguage: true,
+		DurationMS:     settings.LanguageProbeSeconds * 1000,
+	})
 	if err != nil {
 		return "", nil, err
 	}
-	settings := r.opts.WhisperLongForm.normalized()
+	languageDetectionDuration := time.Since(detectionStart)
+	decodeRequest, err := longFormDecodeRequest(settings, detected.Language)
+	if err != nil {
+		return "", nil, err
+	}
+	decoded, err := r.inferRequestLocked(ctx, wavPath, decodeRequest)
+	if err != nil {
+		return "", nil, err
+	}
 	coverageGap, err := validateTimestampedLongFormResponse(decoded, duration, lastDetectedSpeechEnd, settings.TrailingCoverageToleranceSeconds)
 	if err != nil {
 		return "", nil, err
@@ -217,9 +239,30 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	diagnostics.TrailingSpeechCoverageGapSeconds = coverageGap
 	diagnostics.TrailingCoverageToleranceSeconds = settings.TrailingCoverageToleranceSeconds
 	diagnostics.CoverageValidated = true
+	diagnostics.DetectedLanguage = strings.ToLower(strings.TrimSpace(detected.Language))
+	diagnostics.LanguageDetectionSeconds = languageDetectionDuration.Seconds()
+	diagnostics.InitialPromptApplied = decodeRequest.InitialPrompt != ""
 	text, removed := stripWhisperLongFormTerminalRepetitions(decoded.Text)
 	diagnostics.RemovedTerminalHallucinations = append(diagnostics.RemovedTerminalHallucinations, removed...)
 	return text, diagnostics, nil
+}
+
+func longFormDecodeRequest(settings WhisperLongFormDescriptor, detectedLanguage string) (whisperRequestOptions, error) {
+	detectedLanguage = strings.ToLower(strings.TrimSpace(detectedLanguage))
+	request := whisperRequestOptions{SegmentTimestamps: true}
+	switch detectedLanguage {
+	case "russian", "ru":
+		request.Language = "ru"
+		request.InitialPrompt = settings.RussianInitialPrompt
+		request.CarryInitialPrompt = settings.CarryInitialPrompt
+	case "english", "en":
+		request.Language = "en"
+	case "":
+		return whisperRequestOptions{}, fmt.Errorf("whisper.cpp language probe returned no language")
+	default:
+		request.Language = "auto"
+	}
+	return request, nil
 }
 
 func validateTimestampedLongFormResponse(decoded whisperResponse, expectedDuration, lastDetectedSpeechEnd, coverageTolerance float64) (float64, error) {
@@ -575,7 +618,11 @@ func (r *WhisperServerRunner) inferRequestLocked(ctx context.Context, wavPath st
 	bodyReader, bodyWriter := io.Pipe()
 	writer := multipart.NewWriter(bodyWriter)
 	contentType := writer.FormDataContentType()
-	go streamWhisperRequest(writer, bodyWriter, file, wavPath, normalizedLanguage(r.opts.Language), r.opts.WhisperDecode, requestOptions)
+	requestLanguage := strings.TrimSpace(requestOptions.Language)
+	if requestLanguage == "" {
+		requestLanguage = normalizedLanguage(r.opts.Language)
+	}
+	go streamWhisperRequest(writer, bodyWriter, file, wavPath, requestLanguage, r.opts.WhisperDecode, requestOptions)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/inference", bodyReader)
 	if err != nil {
 		_ = bodyReader.Close()
@@ -635,7 +682,7 @@ func streamWhisperRequest(
 		return
 	}
 	settings := decode.normalized()
-	for key, value := range map[string]string{
+	fields := map[string]string{
 		"response_format":  "verbose_json",
 		"language":         language,
 		"temperature":      strconv.FormatFloat(settings.Temperature, 'f', -1, 64),
@@ -648,7 +695,18 @@ func streamWhisperRequest(
 		"suppress_nst":     strconv.FormatBool(settings.SuppressNonSpeechTokens),
 		"no_timestamps":    strconv.FormatBool(!requestOptions.SegmentTimestamps),
 		"token_timestamps": "false",
-	} {
+	}
+	if requestOptions.DetectLanguage {
+		fields["detect_language"] = "true"
+	}
+	if requestOptions.DurationMS > 0 {
+		fields["duration"] = strconv.Itoa(requestOptions.DurationMS)
+	}
+	if prompt := strings.TrimSpace(requestOptions.InitialPrompt); prompt != "" {
+		fields["prompt"] = prompt
+		fields["carry_initial_prompt"] = strconv.FormatBool(requestOptions.CarryInitialPrompt)
+	}
+	for key, value := range fields {
 		if err := writer.WriteField(key, value); err != nil {
 			_ = pipe.CloseWithError(fmt.Errorf("prepare whisper.cpp field %s: %w", key, err))
 			return

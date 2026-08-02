@@ -168,7 +168,7 @@ func TestParseVADSpeechSegments(t *testing.T) {
 	}
 }
 
-func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
+func TestWhisperServerRunnerLongFormDetectsLanguageThenUsesOneTimestampedRequest(t *testing.T) {
 	dir := t.TempDir()
 	wavPath := filepath.Join(dir, "long.wav")
 	if err := os.WriteFile(wavPath, make([]byte, 44+240*32000), 0o600); err != nil {
@@ -187,7 +187,17 @@ func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
 			return
 		}
 		defer request.MultipartForm.RemoveAll()
-		if request.FormValue("no_timestamps") != "false" || request.FormValue("token_timestamps") != "false" {
+		if request.FormValue("detect_language") == "true" {
+			if request.FormValue("language") != "auto" || request.FormValue("duration") != "15000" || request.FormValue("no_timestamps") != "true" {
+				http.Error(w, "language probe", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(whisperResponse{Language: "russian", Duration: 240})
+			return
+		}
+		if request.FormValue("language") != "ru" || request.FormValue("prompt") != longFormRussianInitialPrompt ||
+			request.FormValue("carry_initial_prompt") != "false" || request.FormValue("no_timestamps") != "false" ||
+			request.FormValue("token_timestamps") != "false" {
 			http.Error(w, "timestamp mode", http.StatusBadRequest)
 			return
 		}
@@ -207,7 +217,11 @@ func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	defer server.Close()
 	runner := &WhisperServerRunner{
-		opts:    Options{Language: "ru"},
+		opts: Options{Language: "auto", WhisperLongForm: WhisperLongFormOptions{
+			Enabled:              true,
+			LanguageProbeSeconds: longFormLanguageProbeSeconds,
+			RussianInitialPrompt: longFormRussianInitialPrompt,
+		}},
 		baseURL: "http://" + listener.Addr().String(),
 		client:  &http.Client{},
 	}
@@ -215,8 +229,8 @@ func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want one native long-form request", requests)
+	if requests != 2 {
+		t.Fatalf("requests = %d, want one language probe and one native long-form request", requests)
 	}
 	if strings.TrimSpace(text) != "Игорь объясняет Kubernetes прямо через прежнюю границу без разрыва контекста" {
 		t.Fatalf("text = %q", text)
@@ -225,8 +239,37 @@ func TestWhisperServerRunnerLongFormUsesOneTimestampedRequest(t *testing.T) {
 		diagnostics.DecodedAudioDurationSeconds != 240 || diagnostics.FirstSegmentStartSeconds != 0.05 ||
 		diagnostics.LastSegmentEndSeconds != 239.7 || diagnostics.LastDetectedSpeechEndSeconds != 239.5 ||
 		!diagnostics.CoverageValidated || diagnostics.TrailingSpeechCoverageGapSeconds != 0 ||
+		diagnostics.DetectedLanguage != "russian" || diagnostics.LanguageDetectionSeconds <= 0 || !diagnostics.InitialPromptApplied ||
 		diagnostics.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds {
 		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestLongFormDecodeRequestAppliesPromptOnlyToRussian(t *testing.T) {
+	settings := WhisperLongFormOptions{Enabled: true, RussianInitialPrompt: longFormRussianInitialPrompt}.normalized()
+	russian, err := longFormDecodeRequest(settings, "Russian")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if russian.Language != "ru" || russian.InitialPrompt != longFormRussianInitialPrompt || russian.CarryInitialPrompt || !russian.SegmentTimestamps {
+		t.Fatalf("russian request = %#v", russian)
+	}
+	english, err := longFormDecodeRequest(settings, "English")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if english.Language != "en" || english.InitialPrompt != "" || !english.SegmentTimestamps {
+		t.Fatalf("english request = %#v", english)
+	}
+	other, err := longFormDecodeRequest(settings, "Spanish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Language != "auto" || other.InitialPrompt != "" {
+		t.Fatalf("other request = %#v", other)
+	}
+	if _, err := longFormDecodeRequest(settings, ""); err == nil {
+		t.Fatal("empty detected language was accepted")
 	}
 }
 

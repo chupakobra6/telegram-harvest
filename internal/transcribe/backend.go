@@ -21,7 +21,10 @@ const (
 	ProductionThreads                = 4
 	ProductionModelFile              = "ggml-large-v3-turbo-q5_0.bin"
 	ProductionSpeechGateFile         = "ggml-silero-v6.2.0.bin"
-	whisperLongFormStrategy          = "native-timestamped-v2"
+	whisperLongFormStrategy          = "adaptive-native-timestamped-v3"
+	whisperLongFormLanguagePolicy    = "detect-russian-punctuation-v1"
+	longFormLanguageProbeSeconds     = 15
+	longFormRussianInitialPrompt     = "Да. Нет? Хорошо! Пожалуйста, продолжайте."
 	longFormCoverageToleranceSeconds = 2.0
 )
 
@@ -100,6 +103,9 @@ type WhisperLongFormOptions struct {
 	ScanWindowSeconds                int
 	ScanOverlapSeconds               int
 	LeadInMS                         int
+	LanguageProbeSeconds             int
+	RussianInitialPrompt             string
+	CarryInitialPrompt               bool
 	TrailingCoverageToleranceSeconds float64
 }
 
@@ -113,6 +119,10 @@ type WhisperLongFormDescriptor struct {
 	ScanWindowSeconds                int     `json:"scan_window_seconds"`
 	ScanOverlapSeconds               int     `json:"scan_overlap_seconds"`
 	LeadInMS                         int     `json:"lead_in_ms"`
+	LanguagePolicy                   string  `json:"language_policy"`
+	LanguageProbeSeconds             int     `json:"language_probe_seconds"`
+	RussianInitialPrompt             string  `json:"russian_initial_prompt"`
+	CarryInitialPrompt               bool    `json:"carry_initial_prompt"`
 	TrailingCoverageToleranceSeconds float64 `json:"trailing_coverage_tolerance_seconds"`
 	DecodeStrategy                   string  `json:"decode_strategy"`
 }
@@ -135,6 +145,9 @@ type Diagnostics struct {
 	TrailingSpeechCoverageGapSeconds float64  `json:"trailing_speech_coverage_gap_seconds"`
 	TrailingCoverageToleranceSeconds float64  `json:"trailing_coverage_tolerance_seconds,omitempty"`
 	CoverageValidated                bool     `json:"coverage_validated,omitempty"`
+	DetectedLanguage                 string   `json:"detected_language,omitempty"`
+	LanguageDetectionSeconds         float64  `json:"language_detection_seconds,omitempty"`
+	InitialPromptApplied             bool     `json:"initial_prompt_applied"`
 	RemovedTerminalHallucinations    []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
@@ -155,17 +168,10 @@ func ProductionOptions(command, modelPath, gateModelPath, ffmpegCommand string, 
 	}
 }
 
-// WithoutSpeechGate keeps the canonical production inference and post-filter
-// profile, but skips the whole-file presence check for trusted inputs that are
-// already known to contain speech (for example, an OBS interview recording).
-func (o Options) WithoutSpeechGate() Options {
-	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
-	return o
-}
-
 // WithTrustedLongForm reuses canonical Silero in bounded boundary scans,
-// disables the whole-file gate, and enables Whisper's native timestamped
-// long-form decode for the remaining continuous audio.
+// disables the whole-file gate, detects the spoken language on a bounded
+// leading sample, and enables one native timestamped decode. Russian receives
+// a short punctuation-style seed; other languages are decoded without one.
 func (o Options) WithTrustedLongForm() Options {
 	gate := o.WhisperSpeechGate
 	normalized := gate.normalized()
@@ -180,9 +186,13 @@ func (o Options) WithTrustedLongForm() Options {
 		ScanWindowSeconds:                300,
 		ScanOverlapSeconds:               10,
 		LeadInMS:                         1000,
+		LanguageProbeSeconds:             longFormLanguageProbeSeconds,
+		RussianInitialPrompt:             longFormRussianInitialPrompt,
+		CarryInitialPrompt:               false,
 		TrailingCoverageToleranceSeconds: longFormCoverageToleranceSeconds,
 	}
 	o.WhisperSpeechGate = WhisperSpeechGateOptions{}
+	o.Language = "auto"
 	return o
 }
 
@@ -415,6 +425,10 @@ func (o WhisperLongFormOptions) normalized() WhisperLongFormDescriptor {
 		ScanWindowSeconds:                positiveOr(o.ScanWindowSeconds, 300),
 		ScanOverlapSeconds:               positiveOr(o.ScanOverlapSeconds, 10),
 		LeadInMS:                         positiveOr(o.LeadInMS, 1000),
+		LanguagePolicy:                   whisperLongFormLanguagePolicy,
+		LanguageProbeSeconds:             positiveOr(o.LanguageProbeSeconds, longFormLanguageProbeSeconds),
+		RussianInitialPrompt:             strings.TrimSpace(o.RussianInitialPrompt),
+		CarryInitialPrompt:               o.CarryInitialPrompt,
 		TrailingCoverageToleranceSeconds: positiveFloatOr(o.TrailingCoverageToleranceSeconds, longFormCoverageToleranceSeconds),
 		DecodeStrategy:                   whisperLongFormStrategy,
 	}
@@ -439,6 +453,9 @@ func (o WhisperLongFormOptions) validate(parent Options) error {
 	}
 	if value.ScanWindowSeconds <= value.ScanOverlapSeconds {
 		return fmt.Errorf("whisper trusted long-form scan window must exceed overlap")
+	}
+	if value.LanguageProbeSeconds <= 0 || value.RussianInitialPrompt == "" {
+		return fmt.Errorf("whisper trusted long-form language policy is incomplete")
 	}
 	if value.TrailingCoverageToleranceSeconds <= 0 {
 		return fmt.Errorf("whisper trusted long-form coverage tolerance must be positive")

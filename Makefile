@@ -98,7 +98,7 @@ transcribe-file:
 	$(REQUIRE_PROFILE)
 	@test -n "$(strip $(INPUT))" || { printf "INPUT is required\\n"; exit 2; }
 	@test -n "$(strip $(OUTPUT))" || { printf "OUTPUT is required\\n"; exit 2; }
-	$(CLI) $(PROFILE_ARG) transcribe-file --input "$(INPUT)" --output "$(OUTPUT)" $(if $(strip $(ASSUME_SPEECH)),--assume-speech,) $(if $(strip $(TRUSTED_LONG_FORM)),--trusted-long-form,)
+	$(CLI) $(PROFILE_ARG) transcribe-file --input "$(INPUT)" --output "$(OUTPUT)" $(if $(strip $(TRUSTED_LONG_FORM)),--trusted-long-form,)
 
 chats:
 	$(REQUIRE_PROFILE)
