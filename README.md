@@ -22,7 +22,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Daily ASR | Один долгоживущий whisper.cpp large-v3-turbo q5_0 server на Metal, whole-file Silero gate и один GPU worker. OBS использует отдельную адаптивную long-form policy того же backend. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
-| Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. History и выбор файлов идут последовательно и с pacing; внутри одного достаточно большого файла downloader использует не более двух chunk workers. |
+| Safety | Инструмент не отправляет сообщения и не мутирует Telegram-состояние. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
 
 ## Быстрый старт
 
@@ -194,7 +194,7 @@ bin/telegram-harvest --profile main daily-download-media \
   --out-dir media-manual
 ```
 
-Downloader выбирает chunk concurrency автоматически по размеру: файлы меньше 1 MiB скачиваются одним worker, от 1 MiB — двумя. Одновременно активен только один Telegram-файл; четыре workers не используются в production, потому что live-матрица дала с ними реальный FloodWait. CPU/RAM не участвуют в этом выборе: это сетевые chunk workers с bounded 512 KiB parts, а безопасная граница определяется Telegram transport evidence, не загрузкой локальной машины.
+Downloader выбирает chunk concurrency автоматически по размеру: файл меньше 1 MiB занимает один из двух глобальных slots, поэтому два маленьких файла могут скачиваться одновременно; файл от 1 MiB занимает оба slots. History RPC получает эксклюзивный доступ и не пересекается с download wave. Четыре slots не используются в production, потому что live-матрица дала с ними реальный FloodWait. CPU/RAM не участвуют в этом выборе: это сетевые chunk workers с bounded 512 KiB parts, а безопасная граница определяется Telegram transport evidence, не загрузкой локальной машины.
 
 ## ASR pipeline
 
@@ -220,7 +220,7 @@ bin/telegram-harvest --profile main transcribe-file \
 
 Harvest проверяет duration, монотонность timestamps и достижение последней найденной речи с двухсекундным допуском; только после этого возвращается `validation_status: coverage-validated`. Это гарантия структурной целостности и покрытия хвоста, а не оценка WER/CER. Detected language, применение prompt и отдельное время `language_detection` входят в diagnostics/contract; policy и prompt входят в descriptor и cache identity. Модель `large-v3-turbo-q5_0`, Metal, beam/fallback settings и terminal post-filter остаются единым кодовым профилем. Обычные Telegram-команды не используют long-form policy и сохраняют русский профиль, whole-file Silero gate и `no_timestamps=true`.
 
-Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; bounded chunk parallelism существует только внутри текущего файла. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
+Один `whisper-server` загружается лениво при первой ASR job и переиспользуется до конца запуска. Telegram scan и выбор следующего download остаются у единственного последовательного paced producer; общий coordinator распределяет ровно два chunk slots между двумя маленькими файлами либо одним большим и не пересекает download wave с history RPC. Отсутствующее в transcript cache медиа попадает в bounded queue ёмкостью два элемента; пока один GPU worker выполняет `ffmpeg → speech gate → Whisper`, producer может скачать следующее медиа. Результаты присоединяются по cache path и публикуются в исходном порядке сообщений.
 
 Несколько Whisper-процессов не запускаются: на Apple Silicon они конкурируют за один GPU и unified memory, а измеренный production workload этого не требует. Transcript cache включает runtime/model/quantization, язык, threads, decode, gate и post-filter; готовый transcript публикуется через `temp → fsync/close → rename`. Cache проверяется до media download, поэтому повторный catch-up не запускает ASR для уже известных вложений.
 
