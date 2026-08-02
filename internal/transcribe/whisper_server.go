@@ -64,7 +64,6 @@ type whisperRequestOptions struct {
 	InitialPrompt      string
 	CarryInitialPrompt bool
 	DetectLanguage     bool
-	DurationMS         int
 }
 
 func (r *WhisperServerRunner) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
@@ -209,11 +208,15 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	}
 	settings := r.opts.WhisperLongForm.normalized()
 	detectionStart := time.Now()
-	detected, err := r.inferRequestLocked(ctx, wavPath, whisperRequestOptions{
+	probePath, cleanupProbe, err := prepareLanguageProbeWAV(ctx, r.opts, wavPath, settings.LanguageProbeSeconds)
+	if err != nil {
+		return "", nil, err
+	}
+	detected, err := r.inferRequestLocked(ctx, probePath, whisperRequestOptions{
 		Language:       "auto",
 		DetectLanguage: true,
-		DurationMS:     settings.LanguageProbeSeconds * 1000,
 	})
+	cleanupProbe()
 	if err != nil {
 		return "", nil, err
 	}
@@ -245,6 +248,28 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	text, removed := stripWhisperLongFormTerminalRepetitions(decoded.Text)
 	diagnostics.RemovedTerminalHallucinations = append(diagnostics.RemovedTerminalHallucinations, removed...)
 	return text, diagnostics, nil
+}
+
+func prepareLanguageProbeWAV(ctx context.Context, opts Options, wavPath string, maxSeconds int) (string, func(), error) {
+	duration := wavPCM16MonoDuration(fileSize(wavPath))
+	if duration <= 0 {
+		return "", func() {}, fmt.Errorf("trusted long-form language probe received empty audio")
+	}
+	if maxSeconds <= 0 {
+		return "", func() {}, fmt.Errorf("trusted long-form language probe duration must be positive")
+	}
+	if duration <= float64(maxSeconds) {
+		return wavPath, func() {}, nil
+	}
+	probePath, cleanup, err := temporaryWAV(filepath.Dir(wavPath), ".asr-language-probe-*.wav")
+	if err != nil {
+		return "", func() {}, err
+	}
+	if err := extractASRWAVRange(ctx, opts, wavPath, probePath, 0, float64(maxSeconds)); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("prepare trusted long-form language probe: %w", err)
+	}
+	return probePath, cleanup, nil
 }
 
 func longFormDecodeRequest(settings WhisperLongFormDescriptor, detectedLanguage string) (whisperRequestOptions, error) {
@@ -698,9 +723,6 @@ func streamWhisperRequest(
 	}
 	if requestOptions.DetectLanguage {
 		fields["detect_language"] = "true"
-	}
-	if requestOptions.DurationMS > 0 {
-		fields["duration"] = strconv.Itoa(requestOptions.DurationMS)
 	}
 	if prompt := strings.TrimSpace(requestOptions.InitialPrompt); prompt != "" {
 		fields["prompt"] = prompt

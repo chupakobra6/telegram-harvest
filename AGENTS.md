@@ -65,6 +65,7 @@
 - Both profiles use explicit Telegram API credentials and CLI `login`; do not read or import Telegram Desktop `tdata`.
 - Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
+- For pinned whisper.cpp behavior, verify the installed source execution path and a real current-head A/B; request-field unit tests alone do not prove that an upstream option is effective.
 - Daily generic `video` ASR defaults to `--transcribe-video=phone`: only vertical phone-like videos with Telegram metadata, <=6 minutes, <=80 MiB, and no more than 1080x1920. Use explicit `--transcribe-video=all` only when the user asks to transcribe generic videos broadly.
 - Default media caps are deliberate: photo/image and generic documents 10 MiB, audio/voice 50 MiB, round/video 200 MiB, plus the generic video ASR prefilter above. If a cap is exceeded, keep the skip reason and manual `download-media` hint in output.
 - When changing CLI commands or flags, update CLI help, Makefile shortcuts, README/.env examples when relevant, and command tests in the same pass.

@@ -174,6 +174,16 @@ func TestWhisperServerRunnerLongFormDetectsLanguageThenUsesOneTimestampedRequest
 	if err := os.WriteFile(wavPath, make([]byte, 44+240*32000), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	ffmpegPath := filepath.Join(dir, "fake-ffmpeg")
+	ffmpegScript := `#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+test "$8" = "15.000" || exit 42
+head -c 480044 /dev/zero > "$last"
+`
+	if err := os.WriteFile(ffmpegPath, []byte(ffmpegScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	requests := 0
 	server := http.Server{}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -187,12 +197,26 @@ func TestWhisperServerRunnerLongFormDetectsLanguageThenUsesOneTimestampedRequest
 			return
 		}
 		defer request.MultipartForm.RemoveAll()
+		file, header, err := request.FormFile("file")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = file.Close()
 		if request.FormValue("detect_language") == "true" {
-			if request.FormValue("language") != "auto" || request.FormValue("duration") != "15000" || request.FormValue("no_timestamps") != "true" {
+			if request.FormValue("language") != "auto" || request.FormValue("duration") != "" || request.FormValue("no_timestamps") != "true" {
 				http.Error(w, "language probe", http.StatusBadRequest)
 				return
 			}
+			if header.Size != 44+15*32000 {
+				http.Error(w, fmt.Sprintf("language probe bytes = %d", header.Size), http.StatusBadRequest)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(whisperResponse{Language: "russian", Duration: 240})
+			return
+		}
+		if header.Size != 44+240*32000 {
+			http.Error(w, fmt.Sprintf("long-form bytes = %d", header.Size), http.StatusBadRequest)
 			return
 		}
 		if request.FormValue("language") != "ru" || request.FormValue("prompt") != longFormRussianInitialPrompt ||
@@ -217,7 +241,7 @@ func TestWhisperServerRunnerLongFormDetectsLanguageThenUsesOneTimestampedRequest
 	go func() { _ = server.Serve(listener) }()
 	defer server.Close()
 	runner := &WhisperServerRunner{
-		opts: Options{Language: "auto", WhisperLongForm: WhisperLongFormOptions{
+		opts: Options{Language: "auto", FFmpegCommand: ffmpegPath, WhisperLongForm: WhisperLongFormOptions{
 			Enabled:              true,
 			LanguageProbeSeconds: longFormLanguageProbeSeconds,
 			RussianInitialPrompt: longFormRussianInitialPrompt,
@@ -242,6 +266,9 @@ func TestWhisperServerRunnerLongFormDetectsLanguageThenUsesOneTimestampedRequest
 		diagnostics.DetectedLanguage != "russian" || diagnostics.LanguageDetectionSeconds <= 0 || !diagnostics.InitialPromptApplied ||
 		diagnostics.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds {
 		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, ".asr-language-probe-*.wav")); err != nil || len(matches) != 0 {
+		t.Fatalf("language probe cleanup: matches=%v err=%v", matches, err)
 	}
 }
 
