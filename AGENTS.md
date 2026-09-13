@@ -25,6 +25,7 @@
 - Login: `make login PROFILE=<main|study>`
 - Send text to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --text <message>`
 - Send a file to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --file </absolute/path> [--caption <message>]`
+- Copy one existing Telegram video unchanged to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --from-chat <id-or-username> --message-id <id>`
 - Daily harvest: `make daily PROFILE=main DATE=yesterday`
 - Daily catch-up through yesterday: `make daily-catchup PROFILE=main`
 - List chats: `bin/telegram-harvest --profile study chats --query вшэ`
@@ -64,7 +65,7 @@
 - Main profile uses `TG_HARVEST_DAILY_*`. Study profile uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
 - `TG_HARVEST_DAILY_ADDITIONAL_SENDERS` contains comma-separated `chat_id:sender_id` pairs. Additional senders must remain scoped to their configured chats; never include all incoming messages from those chats.
 - CLI commands must receive `--profile main|study`; do not add command-based profile defaults or profile env fallbacks.
-- `send-saved` must remain recipient-free and self-only. Never resolve a username, phone, chat, or user for delivery; never route through another account. Its `main` session must identify as `@Pheik13` before the first write, and the sent message must be verified by self-peer readback. For files, filename, MIME type, and byte size must all match.
+- `send-saved` must remain recipient-free and self-only. Never resolve a username, phone, chat, or user for delivery; source-chat resolution for the read-only side of `--from-chat` is allowed, but delivery must remain `InputPeerSelf`. Never route through another account. Its `main` session must identify as `@Pheik13` before the first write, and the sent message must be verified by self-peer readback. For files, filename, MIME type, and byte size must all match. For copied Telegram videos, require a downloadable source preview, hash the exact downloaded source, upload without transcoding, preserve caption/entities and video attributes, and verify filename, MIME type, byte size, duration, resolution, audio flag, streaming attribute, and preview after readback.
 - Telegram pacing/history defaults are code-owned; do not add env knobs for RPC spacing, history batch size, history limit, max batches, or dialog limit.
 - Both profiles use explicit Telegram API credentials and CLI `login`; do not read or import Telegram Desktop `tdata`.
 - Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.

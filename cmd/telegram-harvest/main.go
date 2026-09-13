@@ -223,6 +223,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  send-saved --text <message> [--json]  # @Pheik13 main session -> InputPeerSelf only")
 	fmt.Fprintln(out, "  send-saved --file </absolute/path> [--caption <message>] [--json]")
+	fmt.Fprintln(out, "  send-saved --from-chat <id-or-username> --message-id 123 [--json]  # copy one Telegram video unchanged")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Low-level agent primitives:")
 	fmt.Fprintln(out, "  Relative input/output paths below are resolved inside the selected profile state directory")
@@ -468,6 +469,8 @@ func runSendSaved(cfg config.Config, client *mtproto.Client, args []string, out 
 	textValue := fs.String("text", "", "text message to send to Saved Messages")
 	filePath := fs.String("file", "", "file to send to Saved Messages")
 	caption := fs.String("caption", "", "optional file caption")
+	sourceChat := fs.String("from-chat", "", "source chat containing an existing Telegram video")
+	sourceMessageID := fs.Int("message-id", 0, "source Telegram video message id")
 	jsonOut := fs.Bool("json", false, "print verified readback as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -480,9 +483,11 @@ func runSendSaved(cfg config.Config, client *mtproto.Client, args []string, out 
 	err := withRuntimeLock(cfg, func() error {
 		var sendErr error
 		result, sendErr = client.SendSaved(context.Background(), mtproto.SendSavedOptions{
-			Text:     *textValue,
-			FilePath: *filePath,
-			Caption:  *caption,
+			Text:            *textValue,
+			FilePath:        *filePath,
+			Caption:         *caption,
+			SourceChat:      *sourceChat,
+			SourceMessageID: *sourceMessageID,
 		})
 		return sendErr
 	})
@@ -501,9 +506,20 @@ func runSendSaved(cfg config.Config, client *mtproto.Client, args []string, out 
 	fmt.Fprintf(out, "verified=%t\n", result.Verified)
 	if len(result.Message.Attachments) == 1 {
 		attachment := result.Message.Attachments[0]
+		fmt.Fprintf(out, "media_kind=%s\n", attachment.Kind)
 		fmt.Fprintf(out, "file_name=%s\n", attachment.FileName)
 		fmt.Fprintf(out, "mime_type=%s\n", attachment.MIMEType)
 		fmt.Fprintf(out, "byte_size=%d\n", attachment.Size)
+	}
+	if result.Copy != nil {
+		fmt.Fprintf(out, "source_chat_id=%d\n", result.Copy.SourceChatID)
+		fmt.Fprintf(out, "source_message_id=%d\n", result.Copy.SourceMessageID)
+		fmt.Fprintf(out, "source_media_id=%s\n", result.Copy.SourceMediaID)
+		fmt.Fprintf(out, "destination_media_id=%s\n", result.Copy.DestinationMediaID)
+		fmt.Fprintf(out, "source_sha256=%s\n", result.Copy.SourceSHA256)
+		fmt.Fprintf(out, "exact_file_uploaded=%t\n", result.Copy.ExactFileUploaded)
+		fmt.Fprintf(out, "preview_preserved=%t\n", result.Copy.PreviewPreserved)
+		fmt.Fprintf(out, "supports_streaming=%t\n", result.Copy.SupportsStreaming)
 	}
 	return nil
 }

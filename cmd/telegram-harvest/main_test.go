@@ -30,6 +30,7 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"daily-download-media --chat",
 		"transcribe-file --input",
 		"send-saved --text",
+		"send-saved --from-chat",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
 		"required account profile",
