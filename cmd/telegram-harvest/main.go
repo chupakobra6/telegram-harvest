@@ -23,6 +23,7 @@ import (
 	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
+	"golang.org/x/term"
 )
 
 func main() {
@@ -120,6 +121,14 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 			return printError(stderr, 1, err)
 		}
 		return 0
+	case "login-desktop":
+		if cfg.Mode != config.ModeAccount {
+			return printError(stderr, 1, fmt.Errorf("login-desktop is supported only for registered full-account profiles"))
+		}
+		if err := runDesktopLogin(cfg, client, args[1:], stdin, stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
 	case "send-saved":
 		if err := runSendSaved(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
@@ -200,7 +209,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
+	case "print-config", "doctor", "login", "login-desktop", "daily", "daily-catchup", "daily-download-media",
 		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "compact", "agent-view", "transcribe-file", "send-saved":
 		return true
 	default:
@@ -243,9 +252,99 @@ func runAccountRegistry(args []string, out io.Writer) error {
 			fmt.Fprintln(out, account.String())
 		}
 		return nil
+	case "desktop-list":
+		fs := flag.NewFlagSet("account desktop-list", flag.ContinueOnError)
+		fs.SetOutput(out)
+		defaultPath, err := mtproto.DefaultDesktopTDataPath()
+		if err != nil {
+			return err
+		}
+		tdata := fs.String("tdata", defaultPath, "Telegram Desktop tdata directory")
+		identify := fs.Bool("identify", false, "briefly connect to show usernames")
+		apiProfile := fs.String("api-profile", "main", "API credentials for --identify: main or study")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("account desktop-list accepts no positional arguments")
+		}
+		var accounts []mtproto.DesktopAccount
+		if *identify {
+			var apiCfg config.Config
+			switch *apiProfile {
+			case "main":
+				apiCfg, err = config.LoadMain()
+			case "study":
+				apiCfg, err = config.LoadStudy()
+			default:
+				return fmt.Errorf("--api-profile must be main or study")
+			}
+			if err == nil {
+				accounts, err = mtproto.IdentifyDesktopAccounts(context.Background(), apiCfg, *tdata)
+			}
+		} else {
+			accounts, err = mtproto.ListDesktopAccounts(*tdata)
+		}
+		if err != nil {
+			return err
+		}
+		for _, account := range accounts {
+			fmt.Fprintf(out, "desktop_index=%d telegram_id=%d", account.Index, account.UserID)
+			if *identify {
+				fmt.Fprintf(out, " display=%q username=%q", account.Display, account.Username)
+			}
+			fmt.Fprintln(out)
+		}
+		return nil
 	default:
-		return fmt.Errorf("unknown account command %q; use add or list", args[0])
+		return fmt.Errorf("unknown account command %q; use add, list, or desktop-list", args[0])
 	}
+}
+
+func runDesktopLogin(cfg config.Config, client *mtproto.Client, args []string, in *os.File, out io.Writer) error {
+	fs := flag.NewFlagSet("login-desktop", flag.ContinueOnError)
+	fs.SetOutput(out)
+	defaultPath, err := mtproto.DefaultDesktopTDataPath()
+	if err != nil {
+		return err
+	}
+	tdata := fs.String("tdata", defaultPath, "Telegram Desktop tdata directory")
+	userID := fs.Int64("desktop-user-id", cfg.BoundAccountID, "Telegram user ID from account desktop-list")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("login-desktop accepts no positional arguments")
+	}
+	if *userID <= 0 {
+		return fmt.Errorf("--desktop-user-id is required for an unbound account; use `account desktop-list`")
+	}
+	return withRuntimeLock(cfg, func() error {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		fmt.Fprintln(out, "Creating a separate Harvest session; Telegram Desktop will approve it once.")
+		passwordAttempts := 0
+		if err := client.LoginFromDesktop(ctx, *tdata, *userID, func() (string, error) {
+			if !term.IsTerminal(int(in.Fd())) {
+				return "", fmt.Errorf("telegram 2FA password requires an interactive terminal")
+			}
+			if passwordAttempts == 0 {
+				fmt.Fprintln(out, "Desktop approved the login; Telegram also requires the account's 2FA password.")
+			} else {
+				fmt.Fprintln(out, "Telegram rejected that password. Check the keyboard layout and try again.")
+			}
+			passwordAttempts++
+			fmt.Fprint(out, "Telegram 2FA password: ")
+			password, err := term.ReadPassword(int(in.Fd()))
+			fmt.Fprintln(out)
+			return string(password), err
+		}); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "account=%s telegram_id=%d independent_session=true\n", cfg.AccountName, *userID)
+		fmt.Fprintln(out, "Future reads use the Harvest session; Telegram Desktop is no longer needed.")
+		return nil
+	})
 }
 
 func extractProfileArg(args []string) (string, []string, error) {
@@ -287,7 +386,8 @@ func loadProfileConfig(profile string) (config.Config, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-harvest account add --name <name> --api-profile main|study")
 	fmt.Fprintln(out, "       telegram-harvest account list")
-	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
+	fmt.Fprintln(out, "       telegram-harvest account desktop-list [--identify] [--tdata <path>]")
+	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|login-desktop|me|chats|topics|dump|sync|account-sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Harvesting operations are read-only; send-saved is the only Telegram write operation")
 	fmt.Fprintln(out, "  --profile main|study|<account-name>  # required account profile")
@@ -301,7 +401,9 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "Account and discovery:")
 	fmt.Fprintln(out, "  account add --name work --api-profile main  # register a separate private session and full archive")
 	fmt.Fprintln(out, "  account list  # list registered full-account profiles")
+	fmt.Fprintln(out, "  account desktop-list [--identify]  # list Telegram IDs; --identify also shows usernames")
 	fmt.Fprintln(out, "  --profile work login  # enter this account's phone, Telegram code and optional 2FA password")
+	fmt.Fprintln(out, "  --profile work login-desktop --desktop-user-id <id>  # create an independent Harvest session via Desktop")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")

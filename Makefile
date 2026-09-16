@@ -13,7 +13,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup build fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build fmt fmt-check test race check audit verify account-add account-list account-desktop-list doctor login login-desktop daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -27,8 +27,10 @@ help:
 	@printf "  make verify  # full local and CI validation\\n"
 	@printf "  make account-add ACCOUNT_NAME=work API_PROFILE=main # register a full-account profile\\n"
 	@printf "  make account-list # list registered full-account profiles\\n"
+	@printf "  make account-desktop-list IDENTIFY=1 # list Telegram IDs and usernames in local Desktop tdata\\n"
 	@printf "  make doctor PROFILE=main|study|<account-name> # show config/session status\\n"
-	@printf "  make login PROFILE=main|study|<account-name>  # create MTProto user session\\n"
+	@printf "  make login PROFILE=main|study|<account-name>  # authorize by phone, Telegram code, and optional 2FA\\n"
+	@printf "  make login-desktop PROFILE=<account-name> DESKTOP_USER_ID=... # Desktop approval and optional 2FA\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
 	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
@@ -84,7 +86,7 @@ verify: check race audit
 
 doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync download-media compact agent-view: $(CLI)
 
-account-add account-list: $(CLI)
+account-add account-list account-desktop-list: $(CLI)
 
 account-add:
 	@test -n "$(strip $(ACCOUNT_NAME))" || { printf "ACCOUNT_NAME is required\\n"; exit 2; }
@@ -93,6 +95,13 @@ account-add:
 
 account-list:
 	$(CLI) account list
+
+account-desktop-list:
+	$(CLI) account desktop-list $(if $(filter 1,$(IDENTIFY)),--identify,) $(if $(strip $(API_PROFILE)),--api-profile "$(API_PROFILE)",) $(if $(strip $(TDATA)),--tdata "$(TDATA)",)
+
+login-desktop: $(CLI)
+	$(REQUIRE_PROFILE)
+	$(CLI) $(PROFILE_ARG) login-desktop $(if $(strip $(DESKTOP_USER_ID)),--desktop-user-id "$(DESKTOP_USER_ID)",) $(if $(strip $(TDATA)),--tdata "$(TDATA)",)
 
 doctor:
 	$(REQUIRE_PROFILE)
