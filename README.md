@@ -28,7 +28,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 
 ## Быстрый старт
 
-Требуется Go 1.26.5 или новее. Для daily ASR также нужны `ffmpeg`, Metal-сборка `whisper-server` и две локальные модели; `doctor` показывает готовность каждого компонента.
+Требуется Go 1.26.6 или новее, согласно `go.mod`. Для daily ASR также нужны `ffmpeg`, Metal-сборка `whisper-server` и две локальные модели; `doctor` показывает готовность каждого компонента.
 
 ```bash
 cd telegram-harvest
@@ -297,7 +297,7 @@ TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH=.state/asr-runtime/whisper.cpp/m
 TG_HARVEST_DAILY_FFMPEG_COMMAND=ffmpeg
 ```
 
-Daily всегда использует один GPU worker, `beam_size=5` и Silero с threshold `0.5`, minimum speech `250 ms`, minimum silence `100 ms`, padding `30 ms`. На обычном short path Silero только определяет speech bounds, а исходный WAV целиком отправляется в Whisper; поэтому прежний текст и скорость сохраняются. На рискованном long path найденные bounds используются для безопасного leading trim и trailing coverage. Известные точные terminal boilerplate-фразы (`Продолжение следует`, `Субтитры сделал DimaTorzok` и подобные) удаляются только отдельной последней строкой.
+Daily использует один GPU worker, `beam_size=5` и Silero с threshold `0.5`, minimum speech `250 ms`, minimum silence `100 ms`, padding `30 ms`. Для короткого сообщения Silero определяет границы речи, а исходный WAV целиком отправляется в Whisper. Для длинного аудио или позднего начала речи найденные границы задают обрезку вступительной тишины и проверку достижения последней речи. Качество текста и скорость подтверждаются сравнением на одинаковых входах. Известные точные terminal boilerplate-фразы (`Продолжение следует`, `Субтитры сделал DimaTorzok` и подобные) удаляются только отдельной последней строкой.
 
 Runtime обязан подтвердить `ggml_metal_init: found device`; отсутствие Metal или неожиданная активация Core ML останавливает ASR вместо тихого перехода на другой pipeline.
 
@@ -424,9 +424,9 @@ bin/telegram-harvest --profile main daily-catchup --help
 | `internal/runlock` | Per-session lock по файлу вида `.sessions/<session>.json.runtime.lock`, чтобы не запускать два MTProto процесса на одну session file и не блокировать другой аккаунт. |
 | `reports/daily` | Локальные Markdown-отчеты для пользователя, ignored by git. |
 
-## Safety model
+## Границы доступа
 
-- Telegram operations read-only: никаких send/click/delete/join/pin/mark-read.
+- Сбор читает Telegram. Единственная запись — явно запрошенный `main send-saved` в собственное «Избранное» `@Pheik13` с проверкой отправленного; другие send/click/delete/join/pin/mark-read операции не поддерживаются.
 - Broad daily scan пишет только outgoing/self messages и явно настроенных sender IDs строго в их настроенных chat IDs.
 - Study scope ограничивается `TG_HARVEST_STUDY_ALLOWED_CHATS`, когда allowlist задан.
 - `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, дефолтные `chat.jsonl`/`media-manual` и generated views приватные и не коммитятся.
