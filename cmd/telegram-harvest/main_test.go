@@ -32,6 +32,8 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"send-saved --text",
 		"send-saved --from-chat",
 		"account add --name work",
+		"account desktop-list",
+		"login-desktop --desktop-user-id",
 		"account-sync  # registered accounts",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
@@ -206,6 +208,29 @@ func TestRunRegisterListAndRequireLoginBeforeAccountSync(t *testing.T) {
 	code, _, stderr = runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, env)
 	if code != 1 || !strings.Contains(stderr, "already exists") {
 		t.Fatalf("duplicate add code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestDesktopLoginRequiresExplicitAccountChoiceAndRejectsWrongBinding(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "TG_HARVEST_STUDY_APP_ID": "42"}
+	if code, _, stderr := runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, env); code != 0 {
+		t.Fatalf("account add code=%d stderr=%s", code, stderr)
+	}
+	code, _, stderr := runCommand(t, []string{"--profile", "work", "login-desktop"}, env)
+	if code != 1 || !strings.Contains(stderr, "--desktop-user-id is required") {
+		t.Fatalf("missing account choice code=%d stderr=%s", code, stderr)
+	}
+	if err := config.BindAccountID("work", 77); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr = runCommand(t, []string{"--profile", "work", "login-desktop", "--desktop-user-id", "88"}, env)
+	if code != 1 || !strings.Contains(stderr, "bound to Telegram ID 77") {
+		t.Fatalf("wrong account code=%d stderr=%s", code, stderr)
+	}
+	code, _, stderr = runCommand(t, []string{"account", "desktop-list", "--tdata", filepath.Join(home, "missing")}, env)
+	if code != 1 || !strings.Contains(stderr, "read Telegram Desktop tdata") {
+		t.Fatalf("missing tdata code=%d stderr=%s", code, stderr)
 	}
 }
 

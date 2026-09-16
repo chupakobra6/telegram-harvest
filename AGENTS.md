@@ -22,6 +22,7 @@
 - Static/security audit: `make audit`
 - Build reusable CLI: `make build`; Make commands rebuild `bin/telegram-harvest` only when Go/module inputs change.
 - Регистрация полного аккаунта: `make account-add ACCOUNT_NAME=<имя> API_PROFILE=<main|study>`; список: `make account-list`.
+- Вход в отдельную сессию через Desktop: `make account-desktop-list IDENTIFY=1` (короткие подключения показывают usernames), затем `make login-desktop PROFILE=<имя> DESKTOP_USER_ID=<числовой-ID>`; 2FA вводится интерактивно при необходимости.
 - Doctor: `make doctor PROFILE=<main|study|account-name>`
 - Login: `make login PROFILE=<main|study|account-name>`
 - Send text to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --text <message>`
@@ -69,7 +70,7 @@
 - Команды чтения Telegram требуют `--profile main|study|<зарегистрированное-имя>`; `account add/list` управляют локальным реестром без профиля. Не добавляй выбор профиля по команде или fallback окружения.
 - `send-saved` must remain recipient-free and self-only. Never resolve a username, phone, chat, or user for delivery; source-chat resolution for the read-only side of `--from-chat` is allowed, but delivery must remain `InputPeerSelf`. Never route through another account. Its `main` session must identify as `@Pheik13` before the first write, and the sent message must be verified by self-peer readback. For files, filename, MIME type, and byte size must all match. For copied Telegram videos, require a downloadable source preview, hash the exact downloaded source, upload without transcoding, preserve caption/entities and video attributes, and verify filename, MIME type, byte size, duration, resolution, audio flag, streaming attribute, and preview after readback.
 - Telegram pacing/history defaults are code-owned; do not add env knobs for RPC spacing, history batch size, history limit, max batches, or dialog limit.
-- Каждый профиль использует явную Telegram API авторизацию и CLI `login`; не читай и не импортируй Telegram Desktop `tdata`.
+- Зарегистрированный аккаунт может войти по коду через `login` либо через `login-desktop`. Для второго пути читай локальный `tdata` без записи, кратко используй его ключ только для подтверждения новой независимой авторизации, затем отключи Desktop-ключ до анализа чатов. Никогда не сохраняй Desktop-ключ в сессии Harvest и не используй тестовый API ID/hash Telegram Desktop вместо общего настроенного `main` или `study`. При 2FA запрашивай пароль без отображения символов в терминале.
 - `account-sync` доступен только зарегистрированным полным аккаунтам: закрепляй числовой ID при `login`, сверяй его с действующей сессией до записи, последовательно обходи обычные и архивные диалоги, сохраняй все доступные входящие и исходящие сообщения по чатам вне репозитория, показывай неполный статус при сбое. Медиа и ASR не включай в массовый проход по умолчанию.
 - Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
