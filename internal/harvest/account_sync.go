@@ -71,7 +71,7 @@ func RunAccountSync(ctx context.Context, source AccountSource, opts AccountSyncO
 		return AccountSyncState{}, err
 	}
 	if previous.AccountID == 0 && opts.ExpectedAccountID <= 0 {
-		return AccountSyncState{}, fmt.Errorf("first account sync requires --account-id from `--profile lumina me`")
+		return AccountSyncState{}, fmt.Errorf("first account sync requires a bound account ID; run login for the registered profile")
 	}
 	profile, err := source.SelfProfile(ctx)
 	if err != nil {
@@ -225,7 +225,7 @@ func publishAccountState(stateDir string, state AccountSyncState) error {
 
 func renderAccountIndex(state AccountSyncState) string {
 	var b strings.Builder
-	b.WriteString("# Telegram Lumina: аккаунт целиком\n\n")
+	b.WriteString("# Telegram: аккаунт целиком\n\n")
 	fmt.Fprintf(&b, "- Аккаунт: `%d`", state.AccountID)
 	if state.Username != "" {
 		fmt.Fprintf(&b, " (@%s)", escapeAccountMarkdown(state.Username))

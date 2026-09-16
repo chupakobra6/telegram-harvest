@@ -31,7 +31,8 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"transcribe-file --input",
 		"send-saved --text",
 		"send-saved --from-chat",
-		"account-sync --account-id",
+		"account add --name work",
+		"account-sync  # registered accounts",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
 		"required account profile",
@@ -154,32 +155,57 @@ func TestRunRequiresExplicitProfile(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "--profile main|study|lumina is required") {
+	if !strings.Contains(stderr, "--profile main|study|<account-name> is required") {
 		t.Fatalf("missing profile error: %s", stderr)
 	}
 }
 
-func TestRunLuminaAccountSyncRejectsRepoStateBeforeTelegramAccess(t *testing.T) {
-	dir := filepath.Join(detectProjectRoot(), ".state", "lumina")
-	sessionPath := filepath.Join(t.TempDir(), "lumina.json")
-	env := map[string]string{
-		"TG_HARVEST_LUMINA_STATE_DIR":    dir,
-		"TG_HARVEST_LUMINA_SESSION_PATH": sessionPath,
-		"TG_HARVEST_LUMINA_APP_HASH":     "test-hash",
+func TestRunAccountSyncRejectsRepoStateBeforeTelegramAccess(t *testing.T) {
+	cfg := config.Config{Mode: config.ModeAccount, AccountName: "work", BoundAccountID: 77,
+		SessionPath: filepath.Join(t.TempDir(), "work.json"), StateDir: filepath.Join(detectProjectRoot(), ".state", "work")}
+	var out strings.Builder
+	err := runAccountSync(cfg, mtproto.New(cfg), nil, &out)
+	if err == nil || !strings.Contains(err.Error(), "must be outside") {
+		t.Fatalf("account-sync error=%v", err)
 	}
-	code, _, stderr := runCommand(t, []string{"--profile", "lumina", "account-sync", "--account-id", "77"}, env)
-	if code != 1 || !strings.Contains(stderr, "must be outside") {
-		t.Fatalf("account-sync code=%d stderr=%s", code, stderr)
-	}
-	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
+	if _, err := os.Stat(cfg.RuntimeLockPath()); !os.IsNotExist(err) {
 		t.Fatalf("account-sync should not acquire runtime lock: %v", err)
 	}
 }
 
-func TestRunLuminaCannotUseMainDailyWorkflow(t *testing.T) {
-	code, _, stderr := runCommand(t, []string{"--profile", "lumina", "daily"}, map[string]string{"TG_HARVEST_LUMINA_APP_HASH": "test-hash"})
+func TestRunRegisteredAccountCannotUseMainDailyWorkflow(t *testing.T) {
+	home := t.TempDir()
+	if code, _, stderr := runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, map[string]string{"HOME": home}); code != 0 {
+		t.Fatalf("account add code=%d stderr=%s", code, stderr)
+	}
+	code, _, stderr := runCommand(t, []string{"--profile", "work", "daily"}, map[string]string{"HOME": home})
 	if code != 1 || !strings.Contains(stderr, "only for profile main") {
 		t.Fatalf("daily code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestRunRegisterListAndRequireLoginBeforeAccountSync(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	code, stdout, stderr := runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, env)
+	if code != 0 || !strings.Contains(stdout, "next: telegram-harvest --profile work login") {
+		t.Fatalf("account add code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	code, stdout, stderr = runCommand(t, []string{"account", "list"}, env)
+	if code != 0 || !strings.Contains(stdout, "work\tAPI=study\tauthorization required") {
+		t.Fatalf("account list code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	code, stdout, stderr = runCommand(t, []string{"--profile", "work", "print-config"}, env)
+	if code != 0 || !strings.Contains(stdout, "profile=work") || !strings.Contains(stdout, "allowed_chats=0") {
+		t.Fatalf("print-config code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	code, _, stderr = runCommand(t, []string{"--profile", "work", "account-sync"}, env)
+	if code != 1 || !strings.Contains(stderr, "run `telegram-harvest --profile work login` first") {
+		t.Fatalf("unbound sync code=%d stderr=%s", code, stderr)
+	}
+	code, _, stderr = runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, env)
+	if code != 1 || !strings.Contains(stderr, "already exists") {
+		t.Fatalf("duplicate add code=%d stderr=%s", code, stderr)
 	}
 }
 

@@ -47,13 +47,25 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 0
 	}
 	command := args[0]
+	if command == "account" {
+		if profile != "" {
+			return printError(stderr, 2, fmt.Errorf("account add/list does not take --profile"))
+		}
+		if err := loadToolDotEnv(detectProjectRoot()); err != nil {
+			return printError(stderr, 1, err)
+		}
+		if err := runAccountRegistry(args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	}
 	if !knownCommand(command) {
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
 		printUsage(stderr)
 		return 2
 	}
 	if strings.TrimSpace(profile) == "" {
-		return printError(stderr, 2, fmt.Errorf("--profile main|study|lumina is required"))
+		return printError(stderr, 2, fmt.Errorf("--profile main|study|<account-name> is required"))
 	}
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
@@ -87,7 +99,23 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 0
 	case "login":
 		if err := withRuntimeLock(cfg, func() error {
-			return client.Login(context.Background(), stdin, stdout)
+			if err := client.Login(context.Background(), stdin, stdout); err != nil {
+				return err
+			}
+			if cfg.Mode != config.ModeAccount {
+				return nil
+			}
+			return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
+				profile, err := session.SelfProfile(ctx)
+				if err != nil {
+					return fmt.Errorf("identify authorized account: %w", err)
+				}
+				if err := config.BindAccountID(cfg.AccountName, profile.ID); err != nil {
+					return err
+				}
+				fmt.Fprintf(stdout, "account=%s telegram_id=%d bound=true\n", cfg.AccountName, profile.ID)
+				return nil
+			})
 		}); err != nil {
 			return printError(stderr, 1, err)
 		}
@@ -180,6 +208,46 @@ func knownCommand(command string) bool {
 	}
 }
 
+func runAccountRegistry(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("account requires add or list")
+	}
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("account add", flag.ContinueOnError)
+		fs.SetOutput(out)
+		name := fs.String("name", "", "short account name")
+		apiProfile := fs.String("api-profile", "", "existing main or study API credentials")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("account add accepts no positional arguments")
+		}
+		account, dir, err := config.CreateAccount(*name, *apiProfile)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "account=%s api_profile=%s state_dir=%s\n", account.Name, account.APIProfile, filepath.Join(dir, "state"))
+		fmt.Fprintf(out, "next: telegram-harvest --profile %s login\n", account.Name)
+		return nil
+	case "list":
+		if len(args) != 1 {
+			return fmt.Errorf("account list accepts no options")
+		}
+		accounts, err := config.ListAccounts()
+		if err != nil {
+			return err
+		}
+		for _, account := range accounts {
+			fmt.Fprintln(out, account.String())
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown account command %q; use add or list", args[0])
+	}
+}
+
 func extractProfileArg(args []string) (string, []string, error) {
 	result := make([]string, 0, len(args))
 	profile := ""
@@ -217,10 +285,12 @@ func loadProfileConfig(profile string) (config.Config, error) {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-harvest --profile main|study|lumina <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest account add --name <name> --api-profile main|study")
+	fmt.Fprintln(out, "       telegram-harvest account list")
+	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Harvesting operations are read-only; send-saved is the only Telegram write operation")
-	fmt.Fprintln(out, "  --profile main|study|lumina  # required account profile")
+	fmt.Fprintln(out, "  --profile main|study|<account-name>  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
@@ -229,10 +299,13 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt  # adaptive local production ASR; profile main only")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Account and discovery:")
+	fmt.Fprintln(out, "  account add --name work --api-profile main  # register a separate private session and full archive")
+	fmt.Fprintln(out, "  account list  # list registered full-account profiles")
+	fmt.Fprintln(out, "  --profile work login  # enter this account's phone, Telegram code and optional 2FA password")
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
-	fmt.Fprintln(out, "  account-sync --account-id <id>  # lumina only; first run requires ID from me; later runs resume/update all dialogs")
+	fmt.Fprintln(out, "  account-sync  # registered accounts only; resume/update all available dialogs")
 	fmt.Fprintln(out, "  send-saved --text <message> [--json]  # @Pheik13 main session -> InputPeerSelf only")
 	fmt.Fprintln(out, "  send-saved --file </absolute/path> [--caption <message>] [--json]")
 	fmt.Fprintln(out, "  send-saved --from-chat <id-or-username> --message-id 123 [--json]  # copy one Telegram video unchanged")
@@ -255,7 +328,7 @@ func printError(stderr io.Writer, code int, err error) int {
 }
 
 func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
-	fmt.Fprintf(out, "profile=%s\n", config.ProfileName(cfg.Mode))
+	fmt.Fprintf(out, "profile=%s\n", cfg.ProfileName())
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -271,7 +344,7 @@ func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
 }
 
 func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client, includeDailyRuntime bool) {
-	fmt.Fprintf(out, "profile=%s\n", config.ProfileName(cfg.Mode))
+	fmt.Fprintf(out, "profile=%s\n", cfg.ProfileName())
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
@@ -332,8 +405,8 @@ func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
 
 func doctorAuthStatus(cfg config.Config, client *mtproto.Client) (string, string) {
 	if cfg.AppID == 0 || strings.TrimSpace(cfg.AppHash) == "" {
-		if cfg.Mode == config.ModeLumina {
-			return "skipped", "set TG_HARVEST_LUMINA_APP_ID and store the app hash in macOS Keychain (service telegram-harvest.lumina.app-hash, account lumina)"
+		if cfg.Mode == config.ModeAccount {
+			return "skipped", "configure the selected main/study API profile credentials"
 		}
 		return "skipped", fmt.Sprintf("set %s and %s to verify live Telegram authorization", cfg.EnvNames("APP_ID"), cfg.EnvNames("APP_HASH"))
 	}
@@ -787,17 +860,19 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 }
 
 func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
-	if cfg.Mode != config.ModeLumina {
-		return fmt.Errorf("account-sync is supported only for profile lumina")
+	if cfg.Mode != config.ModeAccount {
+		return fmt.Errorf("account-sync is supported only for registered full-account profiles")
 	}
 	fs := flag.NewFlagSet("account-sync", flag.ContinueOnError)
 	fs.SetOutput(out)
-	accountID := fs.Int64("account-id", 0, "numeric ID from `--profile lumina me`; required on first sync")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || *accountID < 0 {
-		return fmt.Errorf("account-sync accepts only a positive --account-id")
+	if fs.NArg() != 0 {
+		return fmt.Errorf("account-sync accepts no positional arguments")
+	}
+	if cfg.BoundAccountID <= 0 {
+		return fmt.Errorf("account %q is not authorized; run `%s` first", cfg.AccountName, cfg.LoginCommand())
 	}
 	stateDir, err := filepath.Abs(cfg.StateDir)
 	if err != nil {
@@ -816,7 +891,7 @@ func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, ou
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
 			state, err := harvest.RunAccountSync(ctx, session, harvest.AccountSyncOptions{
 				StateDir:          stateDir,
-				ExpectedAccountID: *accountID,
+				ExpectedAccountID: cfg.BoundAccountID,
 				Progress: func(progress harvest.AccountSyncProgress) {
 					fmt.Fprintf(out, "chat_id=%d status=%s records=%d\n", progress.ChatID, progress.Status, progress.Records)
 				},

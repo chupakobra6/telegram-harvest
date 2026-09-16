@@ -7,22 +7,22 @@
 
 - **daily reports** - личные исходящие сообщения и настроенные chat-scoped источники за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через production Whisper pipeline;
 - **study harvest** - выгрузка, синк и агентские Markdown-представления для учебных чатов из allowlist.
-- **Lumina account sync** — полная история доступных обычных и архивных диалогов отдельного аккаунта: входящие и исходящие сообщения, приватный индекс и возобновление прерванной выгрузки.
+- **полный архив аккаунтов** — полная история доступных обычных и архивных диалогов любого зарегистрированного аккаунта: входящие и исходящие сообщения, приватный индекс и возобновление прерванной выгрузки.
 
-CLI один и тот же для всех сценариев. Аккаунт выбирается явным профилем `main`, `study` или `lumina`.
+CLI один и тот же для всех сценариев. Аккаунт выбирается явным профилем `main`, `study` или именем зарегистрированного аккаунта.
 
 ## Что умеет
 
 | Область | Поведение |
 | --- | --- |
-| Авторизация | MTProto user session через `login` и явные API credentials для каждого профиля. |
-| Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`; `lumina` читает `TG_HARVEST_LUMINA_*`. Алиасов нет. |
+| Авторизация | MTProto user session через `login`; каждый зарегистрированный аккаунт получает отдельную сессию и использует API credentials выбранного `main` или `study`. |
+| Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`; дополнительные аккаунты регистрируются командой `account add`. |
 | Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
 | Daily ASR | Один адаптивный профиль whisper.cpp large-v3-turbo q5_0 на Metal: быстрый short decode для обычных сообщений и защищённый long-form для длинного либо долго молчащего медиа. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
-| Lumina sync | `account-sync` обходит все доступные диалоги аккаунта без allowlist, сохраняет полную историю по чатам вне репозитория и обновляет приватный индекс. |
+| Полный архив | `account-sync` обходит все доступные диалоги выбранного зарегистрированного аккаунта без allowlist, сохраняет полную историю по чатам вне репозитория и обновляет приватный индекс. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
 | Safety | Harvest-команды не мутируют Telegram. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
 
@@ -80,10 +80,10 @@ bin/telegram-harvest --profile study me
 ```bash
 bin/telegram-harvest --profile main  <command>
 bin/telegram-harvest --profile study <command>
-bin/telegram-harvest --profile lumina <command>
+bin/telegram-harvest --profile <account-name> <command>
 ```
 
-Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study|lumina`. Первый Make-запуск собирает `bin/telegram-harvest`; следующие запуски переиспользуют бинарник, пока не изменятся Go sources, `go.mod` или `go.sum`.
+Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study|<account-name>`. Первый Make-запуск собирает `bin/telegram-harvest`; следующие запуски переиспользуют бинарник, пока не изменятся Go sources, `go.mod` или `go.sum`.
 
 ```bash
 make doctor PROFILE=main
@@ -93,28 +93,22 @@ make daily-catchup PROFILE=main
 make sync CHAT=1234567890 NAME=study-main PROFILE=study
 ```
 
-## Полная история аккаунта Lumina 22
+## Полная история отдельных аккаунтов
 
-Профиль `lumina` хранит отдельную MTProto-сессию в `.sessions/lumina.json`. Полная история по умолчанию находится в `~/Library/Application Support/telegram-harvest/lumina` с закрытым доступом к каталогу. Если задан `TG_HARVEST_LUMINA_STATE_DIR`, путь должен быть абсолютным, приватным (`0700`) и вне репозитория Telegram Harvest. `account-sync` не меняет охват `study` или дневного `main` отчёта.
-
-Укажи `TG_HARVEST_LUMINA_APP_ID` в `.env`. Сохрани Telegram API app hash в macOS Keychain как generic password с service `telegram-harvest.lumina.app-hash` и account `lumina`; `-w` в конце команды запросит значение интерактивно, без него в истории shell. CLI читает hash из Keychain. Номер и код входа `login` запрашивает интерактивно, если номер не задан. App hash, код и пароль не должны попадать в Git или отчёты.
+Каждый аккаунт регистрируется один раз коротким именем. `--api-profile` выбирает только существующие Telegram API ID/hash из `.env`; номер, сессия и переписки `main` или `study` не наследуются. При `login` вводятся номер этого аккаунта, код Telegram и, если включён, пароль 2FA. Команда закрепляет числовой Telegram ID за именем; вход под другим аккаунтом с тем же именем отклоняется. Для второго рабочего аккаунта повтори `account add` с другим именем.
 
 ```bash
-security add-generic-password -U -a lumina -s telegram-harvest.lumina.app-hash -w
-make build
-make doctor PROFILE=lumina
-make login PROFILE=lumina
-bin/telegram-harvest --profile lumina me
-make account-sync PROFILE=lumina ACCOUNT_ID=123456789  # подставь ID из me
+make account-add ACCOUNT_NAME=lumina22 API_PROFILE=main
+make account-add ACCOUNT_NAME=work API_PROFILE=main
+make account-list
+make login PROFILE=lumina22
+make doctor PROFILE=lumina22
+make account-sync PROFILE=lumina22
 ```
 
-Числовой `ACCOUNT_ID` обязателен только при первом запуске. Команда сверяет его с действующей сессией и сохраняет привязку архива к аккаунту. Следующие запуски делают дельту по завершённым чатам и продолжают незаконченные полные истории:
+На macOS приватные профили лежат в `~/Library/Application Support/telegram-harvest/accounts/<имя>/`: `profile.json` хранит привязку, `session.json` — авторизацию, `state/` — архив. Каталоги доступны только владельцу (`0700`), файл профиля — `0600`. Сессии Telegram Desktop `tdata` не импортируются. `account-sync` не меняет охват `study` или дневного `main` отчёта.
 
-```bash
-make account-sync PROFILE=lumina
-```
-
-Начинай анализ с `README.md` внутри каталога Lumina: там статус полноты, список чатов и ссылки на `chats/<тип>-<id>/messages.jsonl`. Для вопроса о конкретном человеке или событии найди нужные JSONL через `rg -n`, открой подходящие сообщения и укажи тип чата с `message_id` в ответе. Тип входит в ключ потому, что числовые ID разных типов могут совпадать. Индекс с `complete=false` означает, что часть истории ещё не проверена. Текст и метаданные вложений выгружаются; сами медиа и содержание голосовых/видеосообщений автоматически не скачиваются и не расшифровываются. Нужное вложение можно прочитать адресно командой `download-media --chat <тип>:<id>` в профиле `lumina`. Режим остаётся только для чтения; `send-saved` разрешён исключительно для `main`.
+Первый `account-sync` читает всю доступную историю обычных и архивных диалогов; повторные запуски продолжают незавершённую выгрузку и дочитывают новые сообщения. Начинай анализ с `state/README.md` выбранного аккаунта: там статус полноты, список чатов и ссылки на `chats/<тип>-<id>/messages.jsonl`. Для вопроса о конкретном человеке или событии найди нужные JSONL через `rg -n`, открой подходящие сообщения и укажи тип чата с `message_id` в ответе. Тип входит в ключ потому, что числовые ID разных типов могут совпадать. Индекс с `complete=false` означает, что часть истории ещё не проверена. Текст и метаданные вложений выгружаются; сами медиа и содержание голосовых/видеосообщений автоматически не скачиваются и не расшифровываются. Нужное вложение можно прочитать адресно командой `download-media --chat <тип>:<id>` с профилем этого аккаунта. Режим остаётся только для чтения; `send-saved` разрешён исключительно для `main`.
 
 ## Отправка в «Избранное»
 

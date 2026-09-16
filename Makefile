@@ -4,7 +4,7 @@ GO_SOURCE_SET := $(shell printf '%s\n' '$(GO_FILES)' | cksum | awk '{print $$1 "
 GO_SOURCE_STAMP := bin/.go-sources-$(GO_SOURCE_SET)
 PROFILE ?=
 PROFILE_ARG = --profile "$(PROFILE)"
-REQUIRE_PROFILE = @test -n "$(strip $(PROFILE))" || { printf "PROFILE=main|study|lumina is required\n"; exit 2; }
+REQUIRE_PROFILE = @test -n "$(strip $(PROFILE))" || { printf "PROFILE=main|study|<account-name> is required\n"; exit 2; }
 MEDIA_LIMIT_FLAGS = \
 	$(if $(strip $(MAX_PHOTO_BYTES)),--max-photo-bytes "$(MAX_PHOTO_BYTES)",) \
 	$(if $(strip $(MAX_DOCUMENT_BYTES)),--max-document-bytes "$(MAX_DOCUMENT_BYTES)",) \
@@ -13,7 +13,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup build fmt fmt-check test race check audit verify doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -25,8 +25,10 @@ help:
 	@printf "  make check   # formatting, module, vet, and test validation\\n"
 	@printf "  make audit   # static analysis and reachable vulnerability scan\\n"
 	@printf "  make verify  # full local and CI validation\\n"
-	@printf "  make doctor PROFILE=main|study|lumina # show config/session status\\n"
-	@printf "  make login PROFILE=main|study|lumina  # create MTProto user session\\n"
+	@printf "  make account-add ACCOUNT_NAME=work API_PROFILE=main # register a full-account profile\\n"
+	@printf "  make account-list # list registered full-account profiles\\n"
+	@printf "  make doctor PROFILE=main|study|<account-name> # show config/session status\\n"
+	@printf "  make login PROFILE=main|study|<account-name>  # create MTProto user session\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
 	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
@@ -35,7 +37,7 @@ help:
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
 	@printf "  make sync PROFILE=study # incremental sync for CHAT=... NAME=...\\n"
-	@printf "  make account-sync PROFILE=lumina ACCOUNT_ID=... # full account history; ID required on first run\\n"
+	@printf "  make account-sync PROFILE=<account-name> # full account history after login\\n"
 	@printf "  make download-media PROFILE=study # manual uncapped media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make compact PROFILE=study # low-level: compact an existing JSONL for agents\\n"
 	@printf "  make agent-view PROFILE=study # low-level: build Markdown navigation from JSONL\\n"
@@ -82,6 +84,16 @@ verify: check race audit
 
 doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync download-media compact agent-view: $(CLI)
 
+account-add account-list: $(CLI)
+
+account-add:
+	@test -n "$(strip $(ACCOUNT_NAME))" || { printf "ACCOUNT_NAME is required\\n"; exit 2; }
+	@test -n "$(strip $(API_PROFILE))" || { printf "API_PROFILE=main|study is required\\n"; exit 2; }
+	$(CLI) account add --name "$(ACCOUNT_NAME)" --api-profile "$(API_PROFILE)"
+
+account-list:
+	$(CLI) account list
+
 doctor:
 	$(REQUIRE_PROFILE)
 	$(CLI) $(PROFILE_ARG) doctor
@@ -126,7 +138,7 @@ sync:
 
 account-sync:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) account-sync $(if $(strip $(ACCOUNT_ID)),--account-id "$(ACCOUNT_ID)",)
+	$(CLI) $(PROFILE_ARG) account-sync
 
 download-media:
 	$(REQUIRE_PROFILE)
