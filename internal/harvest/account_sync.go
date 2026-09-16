@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 const accountStateVersion = 1
@@ -59,10 +61,19 @@ func accountChatDirName(chat Chat) string {
 	return chat.Type + "-" + strconv.FormatInt(chat.ID, 10)
 }
 
-func RunAccountSync(ctx context.Context, source AccountSource, opts AccountSyncOptions) (AccountSyncState, error) {
+func RunAccountSync(ctx context.Context, source AccountSource, opts AccountSyncOptions) (state AccountSyncState, err error) {
 	if source == nil || strings.TrimSpace(opts.StateDir) == "" {
-		return AccountSyncState{}, fmt.Errorf("account source and state directory are required")
+		return state, fmt.Errorf("account source and state directory are required")
 	}
+	lock, err := runlock.AcquireResources(opts.StateDir)
+	if err != nil {
+		return state, err
+	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	return runAccountSync(ctx, source, opts)
+}
+
+func runAccountSync(ctx context.Context, source AccountSource, opts AccountSyncOptions) (AccountSyncState, error) {
 	if err := ensurePrivateAccountDir(opts.StateDir); err != nil {
 		return AccountSyncState{}, err
 	}
@@ -108,48 +119,7 @@ func RunAccountSync(ctx context.Context, source AccountSource, opts AccountSyncO
 		}
 		entry := &state.Dialogs[i]
 		chatDir := filepath.Join(opts.StateDir, "chats", accountChatDirName(entry.Chat))
-		chatKey := AccountChatKey(entry.Chat)
-		if err := os.MkdirAll(chatDir, 0o700); err != nil {
-			return state, fmt.Errorf("prepare chat %d state: %w", entry.Chat.ID, err)
-		}
-		streamPath := filepath.Join(chatDir, "messages.jsonl")
-		syncPath := filepath.Join(chatDir, "sync.state.json")
-		syncState, err := LoadSyncState(syncPath)
-		if err == nil && syncState.Backfill == nil && syncState.Records > 0 {
-			err = fmt.Errorf("chat %d has records without a full-history checkpoint; refusing to replace them", entry.Chat.ID)
-		}
-		if err == nil && syncState.Backfill != nil && !syncState.Backfill.Active && !syncState.Backfill.Complete {
-			err = fmt.Errorf("chat %d has an inconsistent full-history checkpoint", entry.Chat.ID)
-		}
-		if err == nil && syncState.Records > 0 {
-			if _, statErr := os.Stat(streamPath); statErr != nil {
-				err = fmt.Errorf("chat %d sync state exists but message stream is missing: %w", entry.Chat.ID, statErr)
-			}
-		}
-		if err == nil {
-			full := syncState.Backfill == nil || syncState.Backfill.Active
-			if full {
-				result, syncErr := RunSync(ctx, source, SyncOptions{
-					Chat:       chatKey,
-					StreamPath: streamPath,
-					StatePath:  syncPath,
-					History: HistoryOptions{
-						All:       true,
-						BatchSize: DefaultAccountBatchSize,
-					},
-					Reset: syncState.Backfill == nil,
-				})
-				if syncErr != nil {
-					err = syncErr
-					// A backfill checkpoint may have advanced before the error.
-					syncState, _ = LoadSyncState(syncPath)
-				} else {
-					syncState = result.State
-				}
-			} else {
-				syncState, err = runAccountIncremental(ctx, source, chatKey, streamPath, syncPath, syncState)
-			}
-		}
+		syncState, err := syncAccountChat(ctx, source, entry.Chat, chatDir)
 		entry.Records = syncState.Records
 		entry.LastID = syncState.LastID
 		if err != nil {
@@ -179,6 +149,55 @@ func RunAccountSync(ctx context.Context, source AccountSource, opts AccountSyncO
 		return state, fmt.Errorf("account sync incomplete: %s", strings.Join(failures, "; "))
 	}
 	return state, nil
+}
+
+func syncAccountChat(ctx context.Context, source HistorySource, chat Chat, chatDir string) (result SyncState, resultErr error) {
+	chatKey := AccountChatKey(chat)
+	if err := os.MkdirAll(chatDir, 0o700); err != nil {
+		return SyncState{}, fmt.Errorf("prepare chat %d state: %w", chat.ID, err)
+	}
+	streamPath := filepath.Join(chatDir, "messages.jsonl")
+	syncPath := filepath.Join(chatDir, "sync.state.json")
+	lock, err := runlock.AcquireResources(streamPath, syncPath)
+	if err != nil {
+		return SyncState{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Release()) }()
+	syncState, err := LoadSyncState(syncPath)
+	if err == nil && syncState.Backfill == nil && syncState.Records > 0 {
+		err = fmt.Errorf("chat %d has records without a full-history checkpoint; refusing to replace them", chat.ID)
+	}
+	if err == nil && syncState.Backfill != nil && !syncState.Backfill.Active && !syncState.Backfill.Complete {
+		err = fmt.Errorf("chat %d has an inconsistent full-history checkpoint", chat.ID)
+	}
+	if err == nil && syncState.Records > 0 {
+		if _, statErr := os.Stat(streamPath); statErr != nil {
+			err = fmt.Errorf("chat %d sync state exists but message stream is missing: %w", chat.ID, statErr)
+		}
+	}
+	if err != nil {
+		return syncState, err
+	}
+	full := syncState.Backfill == nil || syncState.Backfill.Active
+	if !full {
+		pendingPath := filepath.Join(chatDir, accountIncrementalPendingName)
+		if err := recoverAccountIncremental(pendingPath, streamPath, syncState); err != nil {
+			return syncState, err
+		}
+	}
+	synced, err := runSync(ctx, source, SyncOptions{
+		Chat: chatKey, StreamPath: streamPath, StatePath: syncPath,
+		History: HistoryOptions{All: full, BatchSize: DefaultAccountBatchSize},
+		Reset:   syncState.Backfill == nil,
+	})
+	if err != nil {
+		// A durable checkpoint may have advanced before cleanup failed.
+		if saved, loadErr := LoadSyncState(syncPath); loadErr == nil {
+			syncState = saved
+		}
+		return syncState, err
+	}
+	return synced.State, nil
 }
 
 const DefaultAccountBatchSize = 100

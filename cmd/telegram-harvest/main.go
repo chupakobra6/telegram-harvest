@@ -810,50 +810,58 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			return fmt.Errorf("--transcribe requires a configured transcriber")
 		}
 	}
-	var asrLogFile *os.File
+	asrPath := ""
 	if strings.TrimSpace(*asrLogPath) != "" {
-		asrEncoder, file, err := harvest.OpenJSONL(resolveOutputPath(cfg.StateDir, *asrLogPath), false)
+		asrPath = resolveOutputPath(cfg.StateDir, *asrLogPath)
+		canonicalLog, err := runlock.CanonicalPath(asrPath)
 		if err != nil {
 			return err
 		}
-		asrLogFile = file
-		history.ASRLog = func(event harvest.ASRLogEvent) error {
-			return asrEncoder.Encode(event)
+		canonicalOutput, err := runlock.CanonicalPath(outputPath)
+		if err != nil {
+			return err
+		}
+		if canonicalLog == canonicalOutput {
+			return fmt.Errorf("dump output and ASR log must differ")
 		}
 	}
-	runErr := withRuntimeLock(cfg, func() error {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
-			encoder, file, err := harvest.OpenJSONL(outputPath, false)
-			if err != nil {
-				return err
+	return withRuntimeLock(cfg, func() error {
+		return withOutputLocks([]string{outputPath, asrPath}, func() (err error) {
+			if asrPath != "" {
+				asrEncoder, file, openErr := harvest.OpenJSONL(asrPath, false)
+				if openErr != nil {
+					return openErr
+				}
+				defer func() { err = errors.Join(err, file.Close()) }()
+				history.ASRLog = func(event harvest.ASRLogEvent) error { return asrEncoder.Encode(event) }
 			}
-			defer file.Close()
-			_, stats, err := session.DumpHistory(ctx, *chat, history, func(record harvest.MessageRecord) error {
-				return encoder.Encode(record)
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
+				encoder, file, err := harvest.OpenJSONL(outputPath, false)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				_, stats, err := session.DumpHistory(ctx, *chat, history, func(record harvest.MessageRecord) error {
+					return encoder.Encode(record)
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "wrote=%d out=%s first_id=%d last_id=%d batches=%d flood_waits=%d complete=%t\n",
+					stats.Records,
+					outputPath,
+					stats.FirstID,
+					stats.LastID,
+					stats.Batches,
+					stats.FloodWaits,
+					stats.Complete,
+				)
+				return nil
 			})
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(out, "wrote=%d out=%s first_id=%d last_id=%d batches=%d flood_waits=%d complete=%t\n",
-				stats.Records,
-				outputPath,
-				stats.FirstID,
-				stats.LastID,
-				stats.Batches,
-				stats.FloodWaits,
-				stats.Complete,
-			)
-			return nil
 		})
 	})
-	if asrLogFile != nil {
-		if closeErr := asrLogFile.Close(); runErr == nil && closeErr != nil {
-			runErr = closeErr
-		}
-	}
-	return runErr
 }
 
 func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
@@ -1270,7 +1278,23 @@ func dailyDateBounds(dates []string) (string, string) {
 	return dates[0], dates[len(dates)-1]
 }
 
-func publishDailyCatchupMarkdown(reportDir string, dates []string) (string, error) {
+func dailyCatchupResources(reportDir string, dates []string) []string {
+	paths := []string{filepath.Join(reportDir, harvest.DailyLatestCatchupFilename)}
+	for _, date := range dates {
+		paths = append(paths, filepath.Join(reportDir, date+".md"))
+	}
+	return paths
+}
+
+func publishDailyCatchupMarkdown(reportDir string, dates []string) (path string, err error) {
+	err = withOutputLocks(dailyCatchupResources(reportDir, dates), func() error {
+		path, err = writeDailyCatchupMarkdown(reportDir, dates)
+		return err
+	})
+	return path, err
+}
+
+func writeDailyCatchupMarkdown(reportDir string, dates []string) (string, error) {
 	outputPath := filepath.Join(reportDir, harvest.DailyLatestCatchupFilename)
 	tempPath, err := createAtomicTextPath(outputPath)
 	if err != nil {
@@ -1302,16 +1326,23 @@ func publishDailyCatchupCompletion(
 	checkpointPath string,
 	checkpoint *harvest.DailyDialogCheckpoint,
 ) (string, error) {
-	mergedPath, err := publishDailyCatchupMarkdown(reportDir, dates)
-	if err != nil {
-		return "", err
-	}
+	var mergedPath string
+	paths := dailyCatchupResources(reportDir, dates)
 	if checkpoint != nil {
-		if err := harvest.SaveDailyDialogCheckpoint(checkpointPath, *checkpoint); err != nil {
-			return mergedPath, err
-		}
+		paths = append(paths, checkpointPath)
 	}
-	return mergedPath, nil
+	err := withOutputLocks(paths, func() error {
+		var err error
+		mergedPath, err = writeDailyCatchupMarkdown(reportDir, dates)
+		if err != nil {
+			return err
+		}
+		if checkpoint != nil {
+			return harvest.SaveDailyDialogCheckpoint(checkpointPath, *checkpoint)
+		}
+		return nil
+	})
+	return mergedPath, err
 }
 
 func runDailyJobs(cfg config.Config, client *mtproto.Client, jobs []dailyJob, opts dailyOptions, timings *dailyStageTimingCollector, out io.Writer) error {
@@ -1487,10 +1518,27 @@ func runDailyRangeJobs(
 	jobs []dailyJob,
 	additionalSenderIDsByChat map[int64][]int64,
 	out io.Writer,
-) (harvest.OutgoingStats, error) {
+) (result harvest.OutgoingStats, resultErr error) {
 	if len(jobs) == 0 {
 		return harvest.OutgoingStats{}, nil
 	}
+	paths := make([]string, 0, len(jobs)*3)
+	for _, job := range jobs {
+		paths = append(paths, job.OutputPath, job.MarkdownPath, job.ASRLogPath)
+	}
+	lock, err := runlock.AcquireResources(paths...)
+	if err != nil {
+		return harvest.OutgoingStats{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Release()) }()
+	for _, path := range paths {
+		if path != "" {
+			if err := harvest.EnsurePublished(path); err != nil {
+				return harvest.OutgoingStats{}, err
+			}
+		}
+	}
+
 	jobs = sortedDailyJobs(jobs)
 	asrLogs := newDailyASRLogs(jobs)
 	defer func() { _ = asrLogs.Close() }()
@@ -2103,12 +2151,28 @@ func ensureAllowedChat(cfg config.Config, chat string) error {
 	return fmt.Errorf("chat %q is outside %s; refusing to read outside study scope", chat, cfg.EnvNames("ALLOWED_CHATS"))
 }
 
-func withRuntimeLock(cfg config.Config, fn func() error) error {
+func withRuntimeLock(cfg config.Config, fn func() error) (err error) {
 	lock, err := runlock.Acquire(cfg.RuntimeLockPath())
 	if err != nil {
 		return err
 	}
-	defer lock.Release()
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	return fn()
+}
+
+func withOutputLocks(paths []string, fn func() error) (err error) {
+	lock, err := runlock.AcquireResources(paths...)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	for _, path := range paths {
+		if path != "" {
+			if err := harvest.EnsurePublished(path); err != nil {
+				return err
+			}
+		}
+	}
 	return fn()
 }
 

@@ -13,9 +13,93 @@ import (
 	"github.com/chupakobra6/telegram-harvest/internal/config"
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
 	"github.com/chupakobra6/telegram-harvest/internal/mtproto"
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 	"github.com/chupakobra6/telegram-harvest/internal/stages"
 	"github.com/chupakobra6/telegram-harvest/internal/transcribe"
 )
+
+func TestViewsOwnSharedPathsAcrossProfiles(t *testing.T) {
+	dir := t.TempDir()
+	input, output, view := filepath.Join(dir, "messages.jsonl"), filepath.Join(dir, "messages.toon"), filepath.Join(dir, "view")
+	if err := os.WriteFile(input, []byte("{\"chat\":{\"id\":1},\"message_id\":1,\"kind\":\"text\",\"text\":\"kept\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mainCfg := config.Config{Mode: config.ModeMain, StateDir: dir, SessionPath: filepath.Join(dir, "main.session")}
+	studyCfg := config.Config{Mode: config.ModeStudy, StateDir: t.TempDir(), SessionPath: filepath.Join(dir, "study.session")}
+	var out strings.Builder
+	for _, cfg := range []config.Config{mainCfg, studyCfg} {
+		for _, resource := range []string{input, output, view} {
+			if err := withOutputLocks([]string{resource}, func() error {
+				var err error
+				if resource == view {
+					err = runAgentView(cfg, []string{"--in", input, "--out-dir", view}, &out)
+				} else {
+					err = runCompact(cfg, []string{"--in", input, "--out", output}, &out)
+				}
+				if !errors.Is(err, runlock.ErrAlreadyLocked) {
+					t.Fatalf("profile %s bypassed %s: %v", cfg.Mode, resource, err)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := runCompact(studyCfg, []string{"--in", input, "--out", output}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := runAgentView(studyCfg, []string{"--in", input, "--out-dir", view}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := withOutputLocks([]string{output}, func() error { return runAgentView(studyCfg, []string{"--in", input, "--out-dir", view}, &out) }); err != nil {
+		t.Fatalf("independent output blocked: %v", err)
+	}
+}
+
+func TestRejectedDumpDoesNotTruncateASRLog(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{Mode: config.ModeMain, StateDir: dir, SessionPath: filepath.Join(dir, "main.session")}
+	log := filepath.Join(dir, "asr.jsonl")
+	if err := os.WriteFile(log, []byte("existing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := withRuntimeLock(cfg, func() error {
+		var out strings.Builder
+		err := runDump(cfg, nil, []string{"--chat", "self", "--out", "messages.jsonl", "--asr-log", log}, &out)
+		if !errors.Is(err, runlock.ErrAlreadyLocked) {
+			t.Fatalf("dump error=%v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil || string(data) != "existing\n" {
+		t.Fatalf("log changed: %q %v", data, err)
+	}
+}
+
+func TestCatchupPublicationOwnsInputsSummaryAndCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	date := "2026-09-15"
+	day := filepath.Join(dir, date+".md")
+	if err := os.WriteFile(day, []byte("# День\n\nТекст\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkpointPath := filepath.Join(dir, "checkpoint.json")
+	for _, resource := range []string{day, filepath.Join(dir, harvest.DailyLatestCatchupFilename), checkpointPath} {
+		if err := withOutputLocks([]string{resource}, func() error {
+			_, err := publishDailyCatchupCompletion(dir, []string{date}, checkpointPath, &harvest.DailyDialogCheckpoint{})
+			if !errors.Is(err, runlock.ErrAlreadyLocked) {
+				t.Fatalf("catchup bypassed %s: %v", resource, err)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestRunHelpPrintsCommands(t *testing.T) {
 	code, stdout, stderr := runCommand(t, []string{"help"}, nil)

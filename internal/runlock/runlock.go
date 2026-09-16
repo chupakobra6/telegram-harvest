@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 )
 
-var ErrAlreadyLocked = errors.New("another telegram-harvest runtime is active for this session")
+var ErrAlreadyLocked = errors.New("another telegram-harvest operation owns this resource")
 
 type Handle struct {
 	file *os.File
@@ -49,6 +50,86 @@ func (h *Handle) Release() error {
 	if closeErr != nil {
 		return fmt.Errorf("close runtime lock %s: %w", h.path, closeErr)
 	}
-	_ = os.Remove(h.path)
+	// The name must keep pointing to the same inode across owners. Unlinking
+	// after unlock lets a successor and a newly created file both be locked.
 	return nil
+}
+
+// CanonicalPath resolves aliases even when the output does not exist yet.
+func CanonicalPath(path string) (string, error) {
+	return canonicalPath(path, 0)
+}
+
+func canonicalPath(path string, links int) (string, error) {
+	if links > 255 {
+		return "", fmt.Errorf("too many symbolic links in %s", path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	parent, tail := abs, ""
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(parent) == parent {
+			return "", err
+		}
+		// A generated directory may briefly be absent during rebuild. Resolve
+		// its symlink anyway so aliases keep using the already owned lock.
+		if target, linkErr := os.Readlink(parent); linkErr == nil {
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(parent), target)
+			}
+			return canonicalPath(filepath.Join(target, tail), links+1)
+		}
+		tail = filepath.Join(filepath.Base(parent), tail)
+		parent = filepath.Dir(parent)
+	}
+}
+
+type Resources struct{ handles []*Handle }
+
+// AcquireResources owns each actual input/output independently of the profile.
+// Sidecars also survive atomic replacement of the data or generated directory.
+func AcquireResources(paths ...string) (*Resources, error) {
+	unique := make(map[string]struct{})
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		canonical, err := CanonicalPath(path)
+		if err != nil {
+			return nil, err
+		}
+		unique[canonical+".harvest.lock"] = struct{}{}
+	}
+	ordered := make([]string, 0, len(unique))
+	for path := range unique {
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+	resources := &Resources{}
+	for _, path := range ordered {
+		handle, err := Acquire(path)
+		if err != nil {
+			return nil, errors.Join(err, resources.Release())
+		}
+		resources.handles = append(resources.handles, handle)
+	}
+	return resources, nil
+}
+
+func (r *Resources) Release() error {
+	if r == nil {
+		return nil
+	}
+	var err error
+	for i := len(r.handles) - 1; i >= 0; i-- {
+		err = errors.Join(err, r.handles[i].Release())
+	}
+	r.handles = nil
+	return err
 }

@@ -2,9 +2,12 @@ package harvest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 type SyncOptions struct {
@@ -38,7 +41,16 @@ type SyncProgress struct {
 	MergedPath string
 }
 
-func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncResult, error) {
+func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (result SyncResult, err error) {
+	lock, err := runlock.AcquireResources(opts.StreamPath, opts.StatePath, opts.MergedPath)
+	if err != nil {
+		return result, err
+	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	return runSync(ctx, source, opts)
+}
+
+func runSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncResult, error) {
 	if source == nil {
 		return SyncResult{}, fmt.Errorf("history source is required")
 	}
@@ -50,6 +62,25 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 	}
 	if opts.StatePath == "" {
 		return SyncResult{}, fmt.Errorf("state path is required")
+	}
+	seenPaths := make(map[string]bool)
+	for _, path := range []string{opts.StreamPath, opts.StatePath, opts.MergedPath} {
+		if path == "" {
+			continue
+		}
+		canonical, err := runlock.CanonicalPath(path)
+		if err != nil {
+			return SyncResult{}, err
+		}
+		if seenPaths[canonical] {
+			return SyncResult{}, fmt.Errorf("stream, state and merged output must differ")
+		}
+		seenPaths[canonical] = true
+	}
+	for _, path := range []string{opts.StreamPath, opts.MergedPath} {
+		if err := checkPublicationOwner(path, opts.StatePath); err != nil {
+			return SyncResult{}, err
+		}
 	}
 	now := opts.Now
 	if now == nil {
@@ -92,6 +123,9 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 		state = initBackfillState(state, opts.History, opts.Reset, now())
 	}
 
+	if err := beginPublication(opts.StatePath, opts.StreamPath, opts.MergedPath); err != nil {
+		return SyncResult{}, err
+	}
 	streamEncoder, streamFile, err := OpenJSONL(opts.StreamPath, !opts.Reset)
 	if err != nil {
 		return SyncResult{}, err
@@ -204,6 +238,9 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 		}
 	}
 	if err := SaveSyncState(opts.StatePath, state); err != nil {
+		return SyncResult{}, err
+	}
+	if err := finishPublication(opts.StreamPath, opts.MergedPath); err != nil {
 		return SyncResult{}, err
 	}
 	return SyncResult{

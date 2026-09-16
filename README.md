@@ -421,7 +421,7 @@ bin/telegram-harvest --profile main daily-catchup --help
 | `internal/harvest` | JSONL model, sync state, daily Markdown, compact и agent views. |
 | `internal/transcribe` | Production Whisper profile, descriptor/cache contract, speech gate и long-lived whisper.cpp server runner. |
 | `internal/asrbench` | Corpus hashing, cold repetitions, process resources, WER/CER и error/hallucination metrics. |
-| `internal/runlock` | Per-session lock по файлу вида `.sessions/<session>.json.runtime.lock`, чтобы не запускать два MTProto процесса на одну session file и не блокировать другой аккаунт. |
+| `internal/runlock` | Блокировка сессии через `*.runtime.lock` и общих входов/выходов через `*.harvest.lock` по каноническим путям. Файлы блокировок сохраняются между запусками; независимые ресурсы не блокируют друг друга. [Владение и восстановление](docs/collection-integrity.md). |
 | `reports/daily` | Локальные Markdown-отчеты для пользователя, ignored by git. |
 
 ## Границы доступа

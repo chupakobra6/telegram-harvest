@@ -8,6 +8,28 @@ import (
 	"time"
 )
 
+func TestCompactPreservesInputWhenOutputAliasesIt(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "messages.jsonl")
+	body := []byte("{\"chat\":{\"id\":1},\"message_id\":1,\"kind\":\"text\",\"text\":\"protected\"}\n")
+	if err := os.WriteFile(input, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(input, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{input, alias} {
+		if _, err := WriteCompactTOON(CompactOptions{InputPath: input, OutputPath: output}); err == nil {
+			t.Fatal("JSONL source accepted as compact output")
+		}
+	}
+	data, err := os.ReadFile(input)
+	if err != nil || string(data) != string(body) {
+		t.Fatalf("source overwritten: %q %v", data, err)
+	}
+}
+
 func TestWriteCompactTOONSkipsServiceAndSortsNewestFirst(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "messages.jsonl")

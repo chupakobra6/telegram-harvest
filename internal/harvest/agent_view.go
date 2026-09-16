@@ -3,6 +3,7 @@ package harvest
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 const (
@@ -54,13 +57,45 @@ type topicView struct {
 	Days    map[string][]MessageRecord
 }
 
-func WriteAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
-	if strings.TrimSpace(opts.InputPath) == "" {
-		return AgentViewStats{}, fmt.Errorf("input path is required")
+func WriteAgentMarkdownView(opts AgentViewOptions) (stats AgentViewStats, err error) {
+	opts, err = resolveAgentViewOptions(opts)
+	if err != nil {
+		return stats, err
 	}
-	if strings.TrimSpace(opts.OutputDir) == "" {
-		return AgentViewStats{}, fmt.Errorf("output dir is required")
+	lock, err := runlock.AcquireResources(opts.InputPath, opts.OutputDir)
+	if err != nil {
+		return stats, err
 	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	if err := EnsurePublished(opts.InputPath); err != nil {
+		return stats, err
+	}
+	if err := EnsurePublished(opts.OutputDir); err != nil {
+		return stats, err
+	}
+	return writeAgentMarkdownView(opts)
+}
+
+func resolveAgentViewOptions(opts AgentViewOptions) (AgentViewOptions, error) {
+	if strings.TrimSpace(opts.InputPath) == "" || strings.TrimSpace(opts.OutputDir) == "" {
+		return opts, fmt.Errorf("input and output paths are required")
+	}
+	var err error
+	opts.InputPath, err = runlock.CanonicalPath(opts.InputPath)
+	if err != nil {
+		return opts, err
+	}
+	opts.OutputDir, err = runlock.CanonicalPath(opts.OutputDir)
+	if err != nil {
+		return opts, err
+	}
+	if err := validateAgentViewOutput(opts.OutputDir, opts.InputPath); err != nil {
+		return opts, err
+	}
+	return opts, nil
+}
+
+func writeAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 	if opts.RecentLimit <= 0 {
 		opts.RecentLimit = defaultRecentLimit
 	}
@@ -232,14 +267,26 @@ func countTopics(chats []*chatView) int {
 	return total
 }
 
-func prepareAgentViewOutput(outputDir, inputPath string) error {
+func validateAgentViewOutput(outputDir, inputPath string) error {
 	cleanOutput := filepath.Clean(outputDir)
 	if cleanOutput == "." || cleanOutput == string(filepath.Separator) {
 		return fmt.Errorf("refusing to use dangerous output dir: %s", outputDir)
 	}
-	if filepath.Clean(filepath.Dir(inputPath)) == cleanOutput {
+	rel, err := filepath.Rel(cleanOutput, inputPath)
+	if err != nil {
+		return err
+	}
+	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("refusing to replace input directory: %s", outputDir)
 	}
+	return nil
+}
+
+func prepareAgentViewOutput(outputDir, inputPath string) error {
+	if err := validateAgentViewOutput(outputDir, inputPath); err != nil {
+		return err
+	}
+	cleanOutput := filepath.Clean(outputDir)
 	if err := os.RemoveAll(cleanOutput); err != nil {
 		return fmt.Errorf("clean output dir: %w", err)
 	}

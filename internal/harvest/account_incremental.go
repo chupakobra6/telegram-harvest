@@ -1,14 +1,10 @@
 package harvest
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"time"
 )
 
 const accountIncrementalPendingName = ".incremental-pending.json"
@@ -19,109 +15,8 @@ type accountIncrementalPending struct {
 	OldLastID  int   `json:"old_last_id"`
 }
 
-func runAccountIncremental(ctx context.Context, source HistorySource, chatID string, streamPath string, statePath string, state SyncState) (SyncState, error) {
-	chatDir := filepath.Dir(streamPath)
-	pendingPath := filepath.Join(chatDir, accountIncrementalPendingName)
-	if err := recoverAccountIncremental(pendingPath, streamPath, state); err != nil {
-		return state, err
-	}
-	stage, err := os.CreateTemp(chatDir, ".delta-*.jsonl")
-	if err != nil {
-		return state, err
-	}
-	defer os.Remove(stage.Name())
-	defer stage.Close()
-	if err := stage.Chmod(0o600); err != nil {
-		return state, err
-	}
-	encoder := json.NewEncoder(stage)
-	count, maxID := 0, state.LastID
-	seen := make(map[int]struct{})
-	chat, stats, err := source.DumpHistory(ctx, chatID, HistoryOptions{
-		All: true, BatchSize: DefaultAccountBatchSize, MinID: state.LastID,
-	}, func(record MessageRecord) error {
-		if record.MessageID <= state.LastID {
-			return fmt.Errorf("incremental history returned message %d at or below checkpoint %d", record.MessageID, state.LastID)
-		}
-		if _, exists := seen[record.MessageID]; exists {
-			return fmt.Errorf("incremental history returned duplicate message %d", record.MessageID)
-		}
-		seen[record.MessageID] = struct{}{}
-		if err := encoder.Encode(record); err != nil {
-			return err
-		}
-		count++
-		if record.MessageID > maxID {
-			maxID = record.MessageID
-		}
-		return nil
-	})
-	if err != nil {
-		return state, err
-	}
-	if !stats.Complete || stats.Records != count {
-		return state, fmt.Errorf("incremental history was not fully scanned: emitted=%d reported=%d complete=%t", count, stats.Records, stats.Complete)
-	}
-	if err := stage.Sync(); err != nil {
-		return state, err
-	}
-	stageInfo, err := stage.Stat()
-	if err != nil {
-		return state, err
-	}
-	if count == 0 {
-		state.LastSyncAt = time.Now().UTC()
-		if chat.ID != 0 {
-			state.Chat = chat
-		}
-		return state, SaveSyncState(statePath, state)
-	}
-	streamInfo, err := os.Stat(streamPath)
-	if err != nil {
-		return state, err
-	}
-	pending := accountIncrementalPending{StreamSize: streamInfo.Size(), DeltaSize: stageInfo.Size(), OldLastID: state.LastID}
-	pendingData, err := json.Marshal(pending)
-	if err != nil {
-		return state, err
-	}
-	if err := writePrivateAtomic(pendingPath, append(pendingData, '\n')); err != nil {
-		return state, err
-	}
-	stream, err := os.OpenFile(streamPath, os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return state, err
-	}
-	if _, err := stage.Seek(0, io.SeekStart); err != nil {
-		_ = stream.Close()
-		return state, err
-	}
-	_, copyErr := io.Copy(stream, stage)
-	if copyErr == nil {
-		copyErr = stream.Sync()
-	}
-	closeErr := stream.Close()
-	if copyErr != nil {
-		return state, copyErr
-	}
-	if closeErr != nil {
-		return state, closeErr
-	}
-	state.Records += count
-	state.LastID = maxID
-	state.LastSyncAt = time.Now().UTC()
-	if chat.ID != 0 {
-		state.Chat = chat
-	}
-	if err := SaveSyncState(statePath, state); err != nil {
-		return state, err
-	}
-	if err := os.Remove(pendingPath); err != nil {
-		return state, err
-	}
-	return state, nil
-}
-
+// Recover an unfinished publication from the previous on-disk format. New
+// account increments are collected by the same runSync as other profiles.
 func recoverAccountIncremental(pendingPath string, streamPath string, state SyncState) error {
 	data, err := os.ReadFile(pendingPath)
 	if errors.Is(err, os.ErrNotExist) {

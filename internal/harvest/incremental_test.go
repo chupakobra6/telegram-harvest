@@ -9,7 +9,43 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
+
+type inspectingHistorySource struct{ inspect func() }
+
+func (s inspectingHistorySource) DumpHistory(context.Context, string, HistoryOptions, func(MessageRecord) error) (Chat, HistoryStats, error) {
+	s.inspect()
+	return Chat{ID: 1}, HistoryStats{Complete: true}, nil
+}
+
+func TestSyncOwnsPublishedInputsAndSharedMergedOutput(t *testing.T) {
+	opts := incrementalFixture(t)
+	other := incrementalFixture(t)
+	other.MergedPath = opts.MergedPath
+	independent := incrementalFixture(t)
+	source := inspectingHistorySource{inspect: func() {
+		if _, err := WriteCompactTOON(CompactOptions{InputPath: opts.StreamPath, OutputPath: filepath.Join(t.TempDir(), "view.toon")}); !errors.Is(err, runlock.ErrAlreadyLocked) {
+			t.Fatalf("compact read active sync: %v", err)
+		}
+		if _, err := UpdateAgentMarkdownView(AgentViewOptions{InputPath: opts.MergedPath, OutputDir: filepath.Join(t.TempDir(), "view")}); !errors.Is(err, runlock.ErrAlreadyLocked) {
+			t.Fatalf("agent-view read active sync: %v", err)
+		}
+		if _, err := RunSync(context.Background(), &fakeHistorySource{}, other); !errors.Is(err, runlock.ErrAlreadyLocked) {
+			t.Fatalf("another stream bypassed shared output: %v", err)
+		}
+		if _, err := RunSync(context.Background(), &fakeHistorySource{}, independent); err != nil {
+			t.Fatalf("independent sync blocked: %v", err)
+		}
+	}}
+	if _, err := RunSync(context.Background(), source, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunSync(context.Background(), &fakeHistorySource{}, other); err != nil {
+		t.Fatalf("shared output retained after completion: %v", err)
+	}
+}
 
 // Unlike the older sync fake, this models newest-first pages and the old cap.
 type pagedIncrementalSource struct {
@@ -80,6 +116,111 @@ func TestIncrementalRecoversPartialPublicationAndRefusesForeignSuffix(t *testing
 				}
 			}
 		})
+	}
+}
+
+func TestViewsRefuseUncommittedPublicationUntilSyncRecovers(t *testing.T) {
+	opts := incrementalFixture(t)
+	base, err := LoadSyncState(opts.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(record(11, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	next := base
+	next.LastID, next.Records = 11, 1
+	journal := incrementalStage{Chat: opts.Chat, MinID: 10, Base: base, Bytes: int64(len(body)), Added: 1, Ready: true, Stats: HistoryStats{Records: 1, LastID: 11, Complete: true}, Outputs: map[string]int64{opts.StreamPath: 0, opts.MergedPath: 0}, Next: &next}
+	mustWriteFile(t, opts.StatePath+".incremental.jsonl", body)
+	if err := saveIncrementalStage(opts.StatePath+".incremental.json", journal); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, opts.StreamPath, body)
+	mustWriteFile(t, opts.MergedPath, body[:len(body)/2])
+	if err := beginPublication(opts.StatePath, opts.StreamPath, opts.MergedPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{opts.StreamPath, opts.MergedPath} {
+		compact := filepath.Join(t.TempDir(), "view.toon")
+		if _, err := WriteCompactTOON(CompactOptions{InputPath: input, OutputPath: compact}); err == nil {
+			t.Fatal("compact read uncommitted suffix")
+		}
+		view := filepath.Join(t.TempDir(), "view")
+		if _, err := UpdateAgentMarkdownView(AgentViewOptions{InputPath: input, OutputDir: view}); err == nil {
+			t.Fatal("agent-view read uncommitted suffix")
+		}
+		if _, err := os.Stat(compact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("compact published: %v", err)
+		}
+		if _, err := os.Stat(view); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("agent-view published: %v", err)
+		}
+	}
+	if _, err := RunSync(context.Background(), &fakeHistorySource{}, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteCompactTOON(CompactOptions{InputPath: opts.MergedPath, OutputPath: filepath.Join(t.TempDir(), "view.toon")}); err != nil {
+		t.Fatalf("committed output unavailable: %v", err)
+	}
+}
+
+func TestCommittedJournalRejectsDifferentOutputsBeforeCleanup(t *testing.T) {
+	opts := incrementalFixture(t)
+	state, err := LoadSyncState(opts.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := incrementalStage{Chat: opts.Chat, MinID: 10, Base: state, Ready: true, Outputs: map[string]int64{opts.StreamPath: 0, opts.MergedPath: 0}, Next: &state}
+	mustWriteFile(t, opts.StreamPath, nil)
+	mustWriteFile(t, opts.MergedPath, nil)
+	if err := saveIncrementalStage(opts.StatePath+".incremental.json", journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := beginPublication(opts.StatePath, opts.MergedPath); err != nil {
+		t.Fatal(err)
+	}
+	oldMerged := opts.MergedPath
+	opts.MergedPath = filepath.Join(t.TempDir(), "different.jsonl")
+	if _, err := RunSync(context.Background(), &fakeHistorySource{}, opts); err == nil {
+		t.Fatal("changed outputs accepted")
+	}
+	if err := EnsurePublished(oldMerged); err == nil {
+		t.Fatal("unowned publication marker removed")
+	}
+	if _, err := os.Stat(opts.StatePath + ".incremental.json"); err != nil {
+		t.Fatalf("journal removed: %v", err)
+	}
+}
+
+func TestIncrementalRejectsDuplicateMessagesWithoutAdvancingState(t *testing.T) {
+	opts := incrementalFixture(t)
+	source := &fakeHistorySource{chat: Chat{ID: 1}, records: []MessageRecord{record(11, nil), record(11, nil)}}
+	if _, err := RunSync(context.Background(), source, opts); err == nil {
+		t.Fatal("duplicate message accepted")
+	}
+	state, err := LoadSyncState(opts.StatePath)
+	if err != nil || state.LastID != 10 || state.Records != 0 {
+		t.Fatalf("checkpoint changed: %+v %v", state, err)
+	}
+	if _, err := os.Stat(opts.StreamPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("duplicate input published: %v", err)
+	}
+}
+
+func TestSyncRejectsAliasedOutputsBeforeWriting(t *testing.T) {
+	opts := incrementalFixture(t)
+	mustWriteFile(t, opts.StreamPath, []byte("original\n"))
+	if err := os.Symlink(opts.StreamPath, opts.MergedPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunSync(context.Background(), &fakeHistorySource{}, opts); err == nil {
+		t.Fatal("same output accepted twice")
+	}
+	data, err := os.ReadFile(opts.StreamPath)
+	if err != nil || string(data) != "original\n" {
+		t.Fatalf("aliased output changed: %q %v", data, err)
 	}
 }
 

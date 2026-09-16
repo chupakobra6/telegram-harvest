@@ -8,6 +8,54 @@ import (
 	"testing"
 )
 
+func TestAgentViewRebuildPreservesOutputAlias(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "messages.jsonl")
+	writeFile(t, input, "{\"chat\":{\"id\":1},\"message_id\":1,\"kind\":\"text\",\"text\":\"kept\"}\n")
+	target, alias := filepath.Join(dir, "generated"), filepath.Join(dir, "alias")
+	if err := os.Symlink("generated", alias); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := WriteAgentMarkdownView(AgentViewOptions{InputPath: input, OutputDir: alias}); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(alias)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("rebuild replaced alias: %v %v", info, err)
+		}
+		if _, err := os.Stat(filepath.Join(target, "README.md")); err != nil {
+			t.Fatalf("target not rebuilt: %v", err)
+		}
+	}
+}
+
+func TestAgentViewPreservesSourceNestedAnywhereInsideOutput(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "notes", "nested", "messages.jsonl")
+	if err := os.MkdirAll(filepath.Dir(input), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "{\"chat\":{\"id\":1},\"message_id\":1,\"kind\":\"text\",\"text\":\"protected\"}\n"
+	writeFile(t, input, body)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{dir, alias} {
+		if _, err := WriteAgentMarkdownView(AgentViewOptions{InputPath: input, OutputDir: output}); err == nil {
+			t.Fatal("source ancestor accepted as generated output")
+		}
+		if _, err := UpdateAgentMarkdownView(AgentViewOptions{InputPath: input, OutputDir: output}); err == nil {
+			t.Fatal("source ancestor accepted for update")
+		}
+	}
+	data, err := os.ReadFile(input)
+	if err != nil || string(data) != body {
+		t.Fatalf("source lost: %q %v", data, err)
+	}
+}
+
 func TestWriteAgentMarkdownViewSplitsChatsTopicsAndDays(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "messages.jsonl")

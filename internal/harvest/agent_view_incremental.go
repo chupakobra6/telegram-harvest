@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 const (
@@ -58,13 +60,26 @@ type agentViewDaySummary struct {
 	LastDate  time.Time `json:"last_date"`
 }
 
-func UpdateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
-	if strings.TrimSpace(opts.InputPath) == "" {
-		return AgentViewStats{}, fmt.Errorf("input path is required")
+func UpdateAgentMarkdownView(opts AgentViewOptions) (stats AgentViewStats, err error) {
+	opts, err = resolveAgentViewOptions(opts)
+	if err != nil {
+		return stats, err
 	}
-	if strings.TrimSpace(opts.OutputDir) == "" {
-		return AgentViewStats{}, fmt.Errorf("output dir is required")
+	lock, err := runlock.AcquireResources(opts.InputPath, opts.OutputDir)
+	if err != nil {
+		return stats, err
 	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	if err := EnsurePublished(opts.InputPath); err != nil {
+		return stats, err
+	}
+	if err := EnsurePublished(opts.OutputDir); err != nil {
+		return stats, err
+	}
+	return updateAgentMarkdownView(opts)
+}
+
+func updateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 	if opts.RecentLimit <= 0 {
 		opts.RecentLimit = defaultRecentLimit
 	}
@@ -75,12 +90,12 @@ func UpdateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 	manifest, err := readAgentViewManifest(opts.OutputDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return WriteAgentMarkdownView(opts)
+			return writeAgentMarkdownView(opts)
 		}
 		return AgentViewStats{}, err
 	}
 	if !agentViewManifestCompatible(opts, manifest) || sourceInfo.Size() < manifest.SourceSize {
-		return WriteAgentMarkdownView(opts)
+		return writeAgentMarkdownView(opts)
 	}
 	if sourceInfo.Size() == manifest.SourceSize {
 		stats := agentViewStatsFromManifest(manifest)
@@ -90,7 +105,7 @@ func UpdateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 	if ok, err := sourceOffsetAtLineBoundary(opts.InputPath, manifest.SourceSize); err != nil {
 		return AgentViewStats{}, err
 	} else if !ok {
-		return WriteAgentMarkdownView(opts)
+		return writeAgentMarkdownView(opts)
 	}
 
 	newRecords, delta, err := readAgentViewRecordsFromOffset(opts, manifest.SourceSize)
@@ -99,7 +114,7 @@ func UpdateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 	}
 	for _, record := range newRecords {
 		if record.Revision {
-			return WriteAgentMarkdownView(opts)
+			return writeAgentMarkdownView(opts)
 		}
 	}
 	if len(newRecords) > 0 {

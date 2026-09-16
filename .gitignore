@@ -15,3 +15,5 @@ media/
 media-refresh/
 media-manual/
 *.log
+*.harvest.lock
+*.harvest-pending

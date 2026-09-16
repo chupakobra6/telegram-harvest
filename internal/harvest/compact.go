@@ -3,6 +3,7 @@ package harvest
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 type CompactOptions struct {
@@ -27,13 +30,36 @@ type CompactStats struct {
 	Skipped int
 }
 
-func WriteCompactTOON(opts CompactOptions) (CompactStats, error) {
-	if strings.TrimSpace(opts.InputPath) == "" {
-		return CompactStats{}, fmt.Errorf("input path is required")
+func WriteCompactTOON(opts CompactOptions) (stats CompactStats, err error) {
+	if strings.TrimSpace(opts.InputPath) == "" || strings.TrimSpace(opts.OutputPath) == "" {
+		return stats, fmt.Errorf("input and output paths are required")
 	}
-	if strings.TrimSpace(opts.OutputPath) == "" {
-		return CompactStats{}, fmt.Errorf("output path is required")
+	input, err := runlock.CanonicalPath(opts.InputPath)
+	if err != nil {
+		return stats, err
 	}
+	output, err := runlock.CanonicalPath(opts.OutputPath)
+	if err != nil {
+		return stats, err
+	}
+	if input == output {
+		return stats, fmt.Errorf("compact output must differ from JSONL input")
+	}
+	lock, err := runlock.AcquireResources(opts.InputPath, opts.OutputPath)
+	if err != nil {
+		return stats, err
+	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	if err := EnsurePublished(opts.InputPath); err != nil {
+		return stats, err
+	}
+	if err := EnsurePublished(opts.OutputPath); err != nil {
+		return stats, err
+	}
+	return writeCompactTOON(opts)
+}
+
+func writeCompactTOON(opts CompactOptions) (CompactStats, error) {
 	records, stats, err := readCompactRecords(opts)
 	if err != nil {
 		return CompactStats{}, err

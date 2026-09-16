@@ -10,7 +10,111 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
+
+type pagedAccountSource struct {
+	*fakeAccountSource
+	pages pagedIncrementalSource
+}
+
+func (s *pagedAccountSource) DumpHistory(ctx context.Context, chat string, opts HistoryOptions, emit func(MessageRecord) error) (Chat, HistoryStats, error) {
+	if opts.MinID == 0 {
+		return s.fakeAccountSource.DumpHistory(ctx, chat, opts, emit)
+	}
+	_, stats, err := s.pages.DumpHistory(ctx, chat, opts, func(record MessageRecord) error { record.Chat = s.chats[0]; return emit(record) })
+	return s.chats[0], stats, err
+}
+
+func TestAccountIncrementalResumesDurablePageWithoutPublishingPartialRange(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	chat := Chat{ID: 42, Type: "user"}
+	source := &pagedAccountSource{fakeAccountSource: &fakeAccountSource{
+		profile: SelfProfile{ID: 77}, chats: []Chat{chat}, records: map[string][]MessageRecord{"user:42": {{Chat: chat, MessageID: 1, Kind: "text", Text: "original"}}}, options: make(map[string][]HistoryOptions),
+	}, pages: pagedIncrementalSource{newest: 261, stopAfter: 1}}
+	opts := AccountSyncOptions{StateDir: dir, ExpectedAccountID: 77}
+	if _, err := RunAccountSync(context.Background(), source, opts); err != nil {
+		t.Fatal(err)
+	}
+	state, err := RunAccountSync(context.Background(), source, opts)
+	if err == nil || state.Complete {
+		t.Fatalf("interrupted account=%+v %v", state, err)
+	}
+	stream := filepath.Join(dir, "chats", "user-42", "messages.jsonl")
+	if rows := readAccountRecords(t, stream); len(rows) != 1 || rows[0].Text != "original" {
+		t.Fatalf("partial range leaked: %+v", rows)
+	}
+	if _, err := WriteCompactTOON(CompactOptions{InputPath: stream, OutputPath: filepath.Join(t.TempDir(), "view.toon")}); err != nil {
+		t.Fatalf("previous published snapshot unavailable: %v", err)
+	}
+	source.pages.stopAfter = 0
+	source.pages.newest = 271
+	state, err = RunAccountSync(context.Background(), source, opts)
+	if err != nil || !state.Complete || state.Dialogs[0].Records != 261 || state.Dialogs[0].LastID != 261 {
+		t.Fatalf("resumed account=%+v %v", state, err)
+	}
+	if got := source.pages.options[1].StartOffsetID; got != 162 {
+		t.Fatalf("reread a completed page: offset=%d", got)
+	}
+	rows := readAccountRecords(t, stream)
+	seen := make(map[int]bool)
+	for _, row := range rows {
+		if seen[row.MessageID] || row.Chat.ID != 42 {
+			t.Fatalf("bad record: %+v", row)
+		}
+		seen[row.MessageID] = true
+	}
+	if len(seen) != 261 {
+		t.Fatalf("missing messages: %d", len(seen))
+	}
+	state, err = RunAccountSync(context.Background(), source, opts)
+	if err != nil || state.Dialogs[0].Records != 271 {
+		t.Fatalf("new head not collected: %+v %v", state, err)
+	}
+}
+
+func TestAccountArchiveLockPrecedesAnyStateReadOrRewrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	lock, err := runlock.AcquireResources(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	_, err = RunAccountSync(context.Background(), &fakeAccountSource{}, AccountSyncOptions{StateDir: dir, ExpectedAccountID: 77})
+	if !errors.Is(err, runlock.ErrAlreadyLocked) {
+		t.Fatalf("shared archive bypassed ownership: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("occupied archive changed: %v", err)
+	}
+}
+
+func TestAccountChatLockPrecedesCheckpointRead(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	chatDir := filepath.Join(dir, "chats", "user-42")
+	if err := os.MkdirAll(chatDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(chatDir, "sync.state.json")
+	if err := os.WriteFile(statePath, []byte("unfinished writer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := runlock.AcquireResources(filepath.Join(chatDir, "messages.jsonl"), statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	source := &fakeAccountSource{profile: SelfProfile{ID: 77}, chats: []Chat{{ID: 42, Type: "user"}}, options: make(map[string][]HistoryOptions)}
+	state, err := RunAccountSync(context.Background(), source, AccountSyncOptions{StateDir: dir, ExpectedAccountID: 77})
+	if err == nil || len(state.Dialogs) != 1 || !strings.Contains(state.Dialogs[0].Error, runlock.ErrAlreadyLocked.Error()) {
+		t.Fatalf("checkpoint read before owning chat: %+v %v", state, err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil || string(data) != "unfinished writer" {
+		t.Fatalf("owned checkpoint changed: %q %v", data, err)
+	}
+}
 
 type fakeAccountSource struct {
 	profile  SelfProfile

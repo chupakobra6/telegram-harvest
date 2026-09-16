@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 // The public LastID is a verified lower boundary, not the newest fetched ID.
@@ -31,6 +33,10 @@ type incrementalStage struct {
 }
 
 func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOptions, state SyncState, stale bool, now func() time.Time) (SyncResult, error) {
+	paths := []string{opts.StreamPath}
+	if opts.MergedPath != "" {
+		paths = append(paths, opts.MergedPath)
+	}
 	journalPath, stagePath := opts.StatePath+".incremental.json", opts.StatePath+".incremental.jsonl"
 	if err := os.MkdirAll(filepath.Dir(opts.StatePath), 0o700); err != nil {
 		return SyncResult{}, err
@@ -41,6 +47,13 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 	if exists {
 		if err := json.Unmarshal(data, &journal); err != nil {
 			return SyncResult{}, fmt.Errorf("invalid incremental journal: %w", err)
+		}
+		if journal.Outputs != nil {
+			// Check before committed-journal cleanup too: only the outputs locked
+			// by this call may be read or have publication markers removed.
+			if err := matchIncrementalOutputs(&journal, paths); err != nil {
+				return SyncResult{}, err
+			}
 		}
 		// A routine sync first resumes an interrupted reconciliation before any
 		// fresh scan. An explicit different range must not repurpose its stage.
@@ -54,6 +67,14 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 			// A crash after checkpoint publication needs cleanup, not replay.
 			if err := verifyIncrementalOutputs(journal, true); err != nil {
 				return SyncResult{}, err
+			}
+			for path := range journal.Outputs {
+				if err := checkPublicationOwner(path, opts.StatePath); err != nil {
+					return SyncResult{}, err
+				}
+				if err := finishPublication(path); err != nil {
+					return SyncResult{}, err
+				}
 			}
 			if err := removeIncrementalStage(journalPath, stagePath); err != nil {
 				return SyncResult{}, err
@@ -108,6 +129,7 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 		count := 0
 		added := 0
 		lastID := base.LastID
+		seen := make(map[int]struct{})
 		previousProgress := history.Progress
 		history.Progress = func(progress HistoryProgress) error {
 			if progress.Records != count {
@@ -126,15 +148,20 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 			if err := saveIncrementalStage(journalPath, journal); err != nil {
 				return err
 			}
+			clear(seen)
 			if previousProgress != nil {
 				return previousProgress(progress)
 			}
 			return nil
 		}
 		chat, stats, err := source.DumpHistory(ctx, opts.Chat, history, func(record MessageRecord) error {
-			if record.MessageID <= journal.MinID || (history.StartOffsetID > 0 && record.MessageID >= history.StartOffsetID) {
+			if record.MessageID <= journal.MinID || (journal.OffsetID > 0 && record.MessageID >= journal.OffsetID) {
 				return fmt.Errorf("message %d outside incremental interval", record.MessageID)
 			}
+			if _, duplicate := seen[record.MessageID]; duplicate {
+				return fmt.Errorf("incremental history returned duplicate message %d", record.MessageID)
+			}
+			seen[record.MessageID] = struct{}{}
 			count++
 			if record.MessageID > lastID {
 				lastID = record.MessageID
@@ -172,10 +199,6 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 		if err := saveIncrementalStage(journalPath, journal); err != nil {
 			return SyncResult{}, err
 		}
-	}
-	paths := []string{opts.StreamPath}
-	if opts.MergedPath != "" {
-		paths = append(paths, opts.MergedPath)
 	}
 	if journal.Outputs == nil {
 		journal.Outputs = make(map[string]int64)
@@ -227,6 +250,9 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 		}
 	}
 	if err := verifyIncrementalOutputs(journal, false); err != nil {
+		return SyncResult{}, err
+	}
+	if err := beginPublication(opts.StatePath, paths...); err != nil {
 		return SyncResult{}, err
 	}
 	for path, size := range journal.Outputs {
@@ -293,10 +319,42 @@ func runIncrementalSync(ctx context.Context, source HistorySource, opts SyncOpti
 	if err := SaveSyncState(opts.StatePath, *journal.Next); err != nil {
 		return SyncResult{}, err
 	}
+	if err := finishPublication(paths...); err != nil {
+		return SyncResult{}, err
+	}
 	if err := removeIncrementalStage(journalPath, stagePath); err != nil {
 		return SyncResult{}, err
 	}
 	return incrementalResult(opts, *journal.Next, journal), nil
+}
+
+func matchIncrementalOutputs(journal *incrementalStage, paths []string) error {
+	if len(journal.Outputs) != len(paths) {
+		return fmt.Errorf("incremental output paths changed")
+	}
+	canonical := make(map[string]int64, len(paths))
+	for path, size := range journal.Outputs {
+		key, err := runlock.CanonicalPath(path)
+		if err != nil {
+			return err
+		}
+		canonical[key] = size
+	}
+	matched := make(map[string]int64, len(paths))
+	for _, path := range paths {
+		key, err := runlock.CanonicalPath(path)
+		if err != nil {
+			return err
+		}
+		size, ok := canonical[key]
+		if !ok {
+			return fmt.Errorf("incremental output path changed: %s", path)
+		}
+		matched[path] = size
+		delete(canonical, key)
+	}
+	journal.Outputs = matched
+	return nil
 }
 
 func incrementalResult(opts SyncOptions, state SyncState, journal incrementalStage) SyncResult {
