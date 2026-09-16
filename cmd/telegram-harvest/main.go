@@ -322,10 +322,18 @@ func runDesktopLogin(cfg config.Config, client *mtproto.Client, args []string, i
 	return withRuntimeLock(cfg, func() error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		fmt.Fprintln(out, "Creating a separate Harvest session; Telegram Desktop will approve it once.")
+		passwordAttempts := 0
 		if err := client.LoginFromDesktop(ctx, *tdata, *userID, func() (string, error) {
 			if !term.IsTerminal(int(in.Fd())) {
 				return "", fmt.Errorf("telegram 2FA password requires an interactive terminal")
 			}
+			if passwordAttempts == 0 {
+				fmt.Fprintln(out, "Desktop approved the login; Telegram also requires the account's 2FA password.")
+			} else {
+				fmt.Fprintln(out, "Telegram rejected that password. Check the keyboard layout and try again.")
+			}
+			passwordAttempts++
 			fmt.Fprint(out, "Telegram 2FA password: ")
 			password, err := term.ReadPassword(int(in.Fd()))
 			fmt.Fprintln(out)
@@ -334,6 +342,7 @@ func runDesktopLogin(cfg config.Config, client *mtproto.Client, args []string, i
 			return err
 		}
 		fmt.Fprintf(out, "account=%s telegram_id=%d independent_session=true\n", cfg.AccountName, *userID)
+		fmt.Fprintln(out, "Future reads use the Harvest session; Telegram Desktop is no longer needed.")
 		return nil
 	})
 }
