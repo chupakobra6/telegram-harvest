@@ -53,7 +53,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 2
 	}
 	if strings.TrimSpace(profile) == "" {
-		return printError(stderr, 2, fmt.Errorf("--profile main|study is required"))
+		return printError(stderr, 2, fmt.Errorf("--profile main|study|lumina is required"))
 	}
 	projectRoot := detectProjectRoot()
 	if err := loadToolDotEnv(projectRoot); err != nil {
@@ -98,11 +98,17 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		}
 		return 0
 	case "daily":
+		if cfg.Mode != config.ModeMain {
+			return printError(stderr, 1, fmt.Errorf("daily is supported only for profile main"))
+		}
 		if err := runDaily(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
 		return 0
 	case "daily-catchup":
+		if cfg.Mode != config.ModeMain {
+			return printError(stderr, 1, fmt.Errorf("daily-catchup is supported only for profile main"))
+		}
 		if err := runDailyCatchup(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
@@ -142,6 +148,11 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 			return printError(stderr, 1, err)
 		}
 		return 0
+	case "account-sync":
+		if err := runAccountSync(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
 	case "compact":
 		if err := runCompact(cfg, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
@@ -162,7 +173,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 func knownCommand(command string) bool {
 	switch command {
 	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
-		"me", "chats", "topics", "dump", "download-media", "sync", "compact", "agent-view", "transcribe-file", "send-saved":
+		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "compact", "agent-view", "transcribe-file", "send-saved":
 		return true
 	default:
 		return false
@@ -206,10 +217,10 @@ func loadProfileConfig(profile string) (config.Config, error) {
 }
 
 func printUsage(out io.Writer) {
-	fmt.Fprintln(out, "usage: telegram-harvest --profile main|study <doctor|print-config|login|me|chats|topics|dump|sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
+	fmt.Fprintln(out, "usage: telegram-harvest --profile main|study|lumina <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Harvesting operations are read-only; send-saved is the only Telegram write operation")
-	fmt.Fprintln(out, "  --profile main|study  # required account profile")
+	fmt.Fprintln(out, "  --profile main|study|lumina  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
@@ -221,6 +232,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  me [--json]")
 	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
+	fmt.Fprintln(out, "  account-sync --account-id <id>  # lumina only; first run requires ID from me; later runs resume/update all dialogs")
 	fmt.Fprintln(out, "  send-saved --text <message> [--json]  # @Pheik13 main session -> InputPeerSelf only")
 	fmt.Fprintln(out, "  send-saved --file </absolute/path> [--caption <message>] [--json]")
 	fmt.Fprintln(out, "  send-saved --from-chat <id-or-username> --message-id 123 [--json]  # copy one Telegram video unchanged")
@@ -320,6 +332,9 @@ func printDailyRuntimeConfig(out io.Writer, includeChecks bool) {
 
 func doctorAuthStatus(cfg config.Config, client *mtproto.Client) (string, string) {
 	if cfg.AppID == 0 || strings.TrimSpace(cfg.AppHash) == "" {
+		if cfg.Mode == config.ModeLumina {
+			return "skipped", "set TG_HARVEST_LUMINA_APP_ID and store the app hash in macOS Keychain (service telegram-harvest.lumina.app-hash, account lumina)"
+		}
 		return "skipped", fmt.Sprintf("set %s and %s to verify live Telegram authorization", cfg.EnvNames("APP_ID"), cfg.EnvNames("APP_HASH"))
 	}
 	if !fileExists(cfg.SessionPath) {
@@ -769,6 +784,62 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			return nil
 		})
 	})
+}
+
+func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
+	if cfg.Mode != config.ModeLumina {
+		return fmt.Errorf("account-sync is supported only for profile lumina")
+	}
+	fs := flag.NewFlagSet("account-sync", flag.ContinueOnError)
+	fs.SetOutput(out)
+	accountID := fs.Int64("account-id", 0, "numeric ID from `--profile lumina me`; required on first sync")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *accountID < 0 {
+		return fmt.Errorf("account-sync accepts only a positive --account-id")
+	}
+	stateDir, err := filepath.Abs(cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	projectRoot, err := filepath.Abs(detectProjectRoot())
+	if err != nil {
+		return err
+	}
+	if err := ensureAccountStateOutsideRepo(projectRoot, stateDir); err != nil {
+		return err
+	}
+	return withRuntimeLock(cfg, func() error {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
+			state, err := harvest.RunAccountSync(ctx, session, harvest.AccountSyncOptions{
+				StateDir:          stateDir,
+				ExpectedAccountID: *accountID,
+				Progress: func(progress harvest.AccountSyncProgress) {
+					fmt.Fprintf(out, "chat_id=%d status=%s records=%d\n", progress.ChatID, progress.Status, progress.Records)
+				},
+			})
+			fmt.Fprintf(out, "account_id=%d dialogs=%d complete=%t index=%s\n", state.AccountID, len(state.Dialogs), state.Complete, harvest.AccountIndexPath(stateDir))
+			return err
+		})
+	})
+}
+
+func ensureAccountStateOutsideRepo(projectRoot string, stateDir string) error {
+	paths := []string{stateDir}
+	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
+		paths = append(paths, resolved)
+	} else if resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(stateDir)); err == nil {
+		paths = append(paths, filepath.Join(resolvedParent, filepath.Base(stateDir)))
+	}
+	for _, path := range paths {
+		if rel, err := filepath.Rel(projectRoot, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("account-wide state must be outside the telegram-harvest repository: %s", path)
+		}
+	}
+	return nil
 }
 
 func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {

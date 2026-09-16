@@ -2,7 +2,7 @@
 
 ## Project Overview
 - Local Go CLI for read-only Telegram harvesting plus one tightly scoped Saved Messages send primitive through MTProto user authorization.
-- The tool exports selected study chat data and daily personal context for downstream automation and agent reads.
+- Инструмент передаёт агентам выбранные учебные чаты, личный дневной контекст и отдельный полный архив аккаунта Lumina.
 - Keep runtime credentials, sessions, state, dumps, and generated agent views out of git.
 - Study runtime scope is the configured study-chat allowlist; main-profile daily harvest scope is outgoing/self messages plus configured chat-scoped additional senders for one day.
 
@@ -21,8 +21,8 @@
 - Fast validation: `make check`
 - Static/security audit: `make audit`
 - Build reusable CLI: `make build`; Make commands rebuild `bin/telegram-harvest` only when Go/module inputs change.
-- Doctor: `make doctor PROFILE=<main|study>`
-- Login: `make login PROFILE=<main|study>`
+- Doctor: `make doctor PROFILE=<main|study|lumina>`
+- Login: `make login PROFILE=<main|study|lumina>`
 - Send text to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --text <message>`
 - Send a file to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --file </absolute/path> [--caption <message>]`
 - Copy one existing Telegram video unchanged to the main account's own Saved Messages: `bin/telegram-harvest --profile main send-saved --from-chat <id-or-username> --message-id <id>`
@@ -34,6 +34,7 @@
 - Start full sync: `bin/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
 - Incremental sync after full sync completion: `bin/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
+- Полный архив Lumina: после `--profile lumina me` запусти `make account-sync PROFILE=lumina ACCOUNT_ID=<numeric-id>`; затем `make account-sync PROFILE=lumina` для продолжения и обновления. Индекс: приватный `README.md` в каталоге состояния Lumina.
 - Compact agent view: `bin/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
 - Markdown navigation for agents: `bin/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it writes under the profile state dir, updates incrementally when possible, and accepts `--rebuild` for a full rewrite.
 
@@ -62,12 +63,13 @@
 - When generated `agent-view` templates or manifest semantics change, bump `agentViewManifestVersion` and keep rebuild/noop/incremental tests aligned.
 - Keep generated `agent-view/AGENTS.md` and `agent-view/README.md` aligned whenever changing the agent read path; they are the agent-facing navigation source of truth.
 - For forum chats, preserve `topic` and `thread_top_message_id`; do not merge topic streams only by chat title.
-- Main profile uses `TG_HARVEST_DAILY_*`. Study profile uses `TG_HARVEST_STUDY_*`. Do not add alternate env aliases.
+- Профили `main`, `study`, `lumina` используют соответственно `TG_HARVEST_DAILY_*`, `TG_HARVEST_STUDY_*`, `TG_HARVEST_LUMINA_*`. App hash Lumina по умолчанию читается из macOS Keychain (service `telegram-harvest.lumina.app-hash`, account `lumina`). Не добавляй алиасы переменных.
 - `TG_HARVEST_DAILY_ADDITIONAL_SENDERS` contains comma-separated `chat_id:sender_id` pairs. Additional senders must remain scoped to their configured chats; never include all incoming messages from those chats.
-- CLI commands must receive `--profile main|study`; do not add command-based profile defaults or profile env fallbacks.
+- CLI-команды требуют `--profile main|study|lumina`; не добавляй выбор профиля по команде или fallback окружения.
 - `send-saved` must remain recipient-free and self-only. Never resolve a username, phone, chat, or user for delivery; source-chat resolution for the read-only side of `--from-chat` is allowed, but delivery must remain `InputPeerSelf`. Never route through another account. Its `main` session must identify as `@Pheik13` before the first write, and the sent message must be verified by self-peer readback. For files, filename, MIME type, and byte size must all match. For copied Telegram videos, require a downloadable source preview, hash the exact downloaded source, upload without transcoding, preserve caption/entities and video attributes, and verify filename, MIME type, byte size, duration, resolution, audio flag, streaming attribute, and preview after readback.
 - Telegram pacing/history defaults are code-owned; do not add env knobs for RPC spacing, history batch size, history limit, max batches, or dialog limit.
-- Both profiles use explicit Telegram API credentials and CLI `login`; do not read or import Telegram Desktop `tdata`.
+- Все три профиля используют явную Telegram API авторизацию и CLI `login`; не читай и не импортируй Telegram Desktop `tdata`.
+- `account-sync` доступен только Lumina: сверяй числовой ID действующей сессии с сохранённым ID до записи, последовательно обходи обычные и архивные диалоги, сохраняй все доступные входящие и исходящие сообщения по чатам вне репозитория, показывай неполный статус при сбое. Медиа и ASR не включай в массовый проход по умолчанию.
 - Study `dump` and `sync` do not transcribe audio/video. They save inspectable study materials such as photos, image documents, and generic documents; audio/video transcription is a daily-harvest feature only.
 - Daily audio/video media is transcript-only: cache by Telegram media id when possible, delete temporary source media after transcription, and keep saved `local_path` only for images/documents agents need to inspect.
 - For pinned whisper.cpp behavior, verify the installed source execution path and a real current-head A/B; request-field unit tests alone do not prove that an upstream option is effective.

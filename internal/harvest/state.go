@@ -32,8 +32,30 @@ func SaveSyncState(path string, state SyncState) error {
 		return fmt.Errorf("encode sync state: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writePrivateAtomic(path, data); err != nil {
 		return fmt.Errorf("write sync state: %w", err)
 	}
 	return nil
+}
+
+func writePrivateAtomic(path string, data []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".state-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer func() { _ = file.Close() }()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }

@@ -130,12 +130,14 @@ func TestLoadMainIgnoresUnscopedHarvestEnv(t *testing.T) {
 	}
 }
 
-func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
+func TestLoadProfileSelectsIsolatedAccountEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
 	t.Setenv("TG_HARVEST_DAILY_APP_ID", "77")
 	t.Setenv("TG_HARVEST_DAILY_APP_HASH", "main-hash")
+	t.Setenv("TG_HARVEST_LUMINA_APP_ID", "88")
+	t.Setenv("TG_HARVEST_LUMINA_APP_HASH", "lumina-hash")
 
 	study, err := LoadProfile("study")
 	if err != nil {
@@ -151,6 +153,16 @@ func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
 	if main.Mode != ModeMain || main.AppID != 77 || main.AppHash != "main-hash" {
 		t.Fatalf("main profile = %+v", main)
 	}
+	lumina, err := LoadProfile("lumina")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lumina.Mode != ModeLumina || lumina.AppID != 88 || lumina.AppHash != "lumina-hash" || !filepath.IsAbs(lumina.StateDir) || strings.HasPrefix(lumina.StateDir, ".state") {
+		t.Fatalf("lumina profile is not isolated: %+v", lumina)
+	}
+	if lumina.SessionPath != DefaultLuminaSessionPath || lumina.AllowedChatCount() != 0 {
+		t.Fatalf("lumina paths/scope = %+v", lumina)
+	}
 	if _, err := LoadProfile("daily"); err == nil {
 		t.Fatalf("expected daily profile to be rejected")
 	}
@@ -159,6 +171,15 @@ func TestLoadProfileSelectsMainOrStudyEnv(t *testing.T) {
 	}
 	if _, err := LoadProfile("unknown"); err == nil {
 		t.Fatalf("expected unknown profile error")
+	}
+}
+
+func TestLoadLuminaRejectsAllowlist(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	t.Setenv("TG_HARVEST_LUMINA_APP_HASH", "test-hash")
+	t.Setenv("TG_HARVEST_LUMINA_ALLOWED_CHATS", "123")
+	if _, err := LoadLumina(); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("lumina allowlist error = %v", err)
 	}
 }
 
@@ -176,6 +197,10 @@ func TestLoginCommandAlwaysIncludesProfile(t *testing.T) {
 	study := Config{Mode: ModeStudy}
 	if got := study.LoginCommand(); got != "telegram-harvest --profile study login" {
 		t.Fatalf("study login command = %q", got)
+	}
+	lumina := Config{Mode: ModeLumina}
+	if got := lumina.LoginCommand(); got != "telegram-harvest --profile lumina login" {
+		t.Fatalf("lumina login command = %q", got)
 	}
 }
 
@@ -322,6 +347,7 @@ func clearTelegramConfigEnv(t *testing.T) {
 	prefixes := []string{
 		"TG_HARVEST_DAILY_",
 		"TG_HARVEST_STUDY_",
+		"TG_HARVEST_LUMINA_",
 	}
 	suffixes := []string{
 		"APP_ID",

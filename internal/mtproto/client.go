@@ -279,6 +279,102 @@ func (s *Session) ListDialogs(ctx context.Context, limit int, query string) ([]h
 	return filtered, nil
 }
 
+// ListAllDialogs reads the main and archived folders without a dialog limit.
+// Unlike discovery for an individual chat, an unpageable response is an error:
+// an account export must never silently claim to cover only the first page.
+func (s *Session) ListAllDialogs(ctx context.Context) ([]harvest.Chat, error) {
+	byPeer := make(map[string]harvest.Chat)
+	for _, folderID := range []int{0, 1} {
+		folder, err := s.loadAllDialogsFolder(ctx, folderID)
+		if err != nil {
+			return nil, err
+		}
+		for _, chat := range folder {
+			byPeer[harvest.AccountChatKey(chat)] = chat
+		}
+	}
+	result := make([]harvest.Chat, 0, len(byPeer))
+	for _, chat := range byPeer {
+		result = append(result, chat)
+	}
+	sort.Slice(result, func(i, j int) bool { return harvest.AccountChatKey(result[i]) < harvest.AccountChatKey(result[j]) })
+	return result, nil
+}
+
+func (s *Session) loadAllDialogsFolder(ctx context.Context, folderID int) ([]harvest.Chat, error) {
+	const pageSize = defaultDialogBatchSize
+	all := make([]harvest.Chat, 0, pageSize)
+	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
+	offsetID, offsetDate := 0, 0
+	seenOffsets := make(map[string]struct{})
+	for {
+		var result tg.MessagesDialogsClass
+		err := s.performRPC(ctx, "get_dialogs", func(callCtx context.Context) error {
+			req := &tg.MessagesGetDialogsRequest{
+				OffsetDate: offsetDate,
+				OffsetID:   offsetID,
+				OffsetPeer: offsetPeer,
+				Limit:      pageSize,
+				Hash:       0,
+			}
+			req.SetFolderID(folderID)
+			var callErr error
+			result, callErr = s.raw.MessagesGetDialogs(callCtx, req)
+			return callErr
+		})
+		if err != nil {
+			return nil, fmt.Errorf("load folder %d dialogs: %w", folderID, err)
+		}
+		modified, ok := result.AsModified()
+		if !ok {
+			return nil, fmt.Errorf("folder %d dialog response was not modified", folderID)
+		}
+		dialogs := modified.GetDialogs()
+		if len(dialogs) == 0 {
+			return all, nil
+		}
+		entities := dialogEntities(result)
+		for _, dialog := range dialogs {
+			if _, isFolder := dialog.(*tg.DialogFolder); isFolder {
+				continue
+			}
+			chat, inputPeer, ok := chatFromPeer(dialog.GetPeer(), entities)
+			if !ok {
+				return nil, fmt.Errorf("folder %d contains an unresolved dialog", folderID)
+			}
+			chat.Pinned = dialog.GetPinned()
+			chat.UnreadCount = dialogUnreadCount(dialog)
+			chat.TopMessageID = dialog.GetTopMessage()
+			if top := topMessageByID(modified.GetMessages(), chat.TopMessageID); top != nil {
+				chat.LastMessageAt = time.Unix(int64(messageDate(top)), 0).UTC()
+			}
+			all = append(all, chat)
+			s.cacheTarget(chat, inputPeer)
+		}
+		messages := modified.GetMessages()
+		if len(messages) == 0 {
+			if len(dialogs) < pageSize {
+				return all, nil
+			}
+			return nil, fmt.Errorf("folder %d dialog page has no pagination message", folderID)
+		}
+		lastID, lastDate, lastPeer, ok := messageOffset(messages[len(messages)-1])
+		if !ok {
+			return nil, fmt.Errorf("folder %d dialog page has invalid pagination message", folderID)
+		}
+		nextPeer := inputPeerFromMessagePeer(lastPeer, entities)
+		if nextPeer == nil {
+			return nil, fmt.Errorf("folder %d dialog page has unresolved pagination peer", folderID)
+		}
+		nextOffset := fmt.Sprintf("%T/%d/%d/%d", lastPeer, peerClassID(lastPeer), lastID, lastDate)
+		if _, exists := seenOffsets[nextOffset]; exists {
+			return nil, fmt.Errorf("folder %d dialog pagination did not advance", folderID)
+		}
+		seenOffsets[nextOffset] = struct{}{}
+		offsetID, offsetDate, offsetPeer = lastID, lastDate, nextPeer
+	}
+}
+
 func (s *Session) ListTopics(ctx context.Context, chat string, limit int, query string) ([]harvest.Topic, error) {
 	target, err := s.resolveTarget(ctx, chat)
 	if err != nil {
@@ -1058,7 +1154,7 @@ func (s *Session) dumpHistoryStreaming(
 				stats.LastID = record.MessageID
 			}
 		}
-		done := reachedStart || minMessageID == 0 || len(messages) < batchLimit
+		done := reachedStart || minMessageID == 0
 		if done {
 			stats.Complete = true
 		}
@@ -1070,6 +1166,9 @@ func (s *Session) dumpHistoryStreaming(
 		}
 		if done {
 			break
+		}
+		if offsetID > 0 && minMessageID >= offsetID {
+			return harvest.Chat{}, stats, fmt.Errorf("history pagination did not advance: offset_id=%d next_offset_id=%d", offsetID, minMessageID)
 		}
 		offsetID = minMessageID
 	}
@@ -1575,6 +1674,16 @@ func (s *Session) resolveTarget(ctx context.Context, raw string) (resolvedTarget
 	if cached, ok := s.dialogCache[raw]; ok {
 		return cached, nil
 	}
+	if peerType, _, hasType := strings.Cut(raw, ":"); hasType &&
+		(peerType == "user" || peerType == "basic_group" || peerType == "supergroup" || peerType == "channel") {
+		if _, err := s.ListAllDialogs(ctx); err != nil {
+			return resolvedTarget{}, err
+		}
+		if cached, ok := s.dialogCache[raw]; ok {
+			return cached, nil
+		}
+		return resolvedTarget{}, fmt.Errorf("peer %q was not found in account dialogs", raw)
+	}
 	if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
 		if _, err := s.loadDialogs(ctx, 1000); err != nil {
 			return resolvedTarget{}, err
@@ -1619,6 +1728,7 @@ func (s *Session) cacheTarget(chat harvest.Chat, inputPeer tg.InputPeerClass) {
 		return
 	}
 	target := resolvedTarget{Raw: strconv.FormatInt(chat.ID, 10), Chat: chat, InputPeer: inputPeer}
+	s.dialogCache[harvest.AccountChatKey(chat)] = target
 	s.dialogCache[strconv.FormatInt(chat.ID, 10)] = target
 	if chat.Username != "" {
 		s.dialogCache["@"+chat.Username] = target

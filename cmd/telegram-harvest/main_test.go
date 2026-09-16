@@ -31,6 +31,7 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"transcribe-file --input",
 		"send-saved --text",
 		"send-saved --from-chat",
+		"account-sync --account-id",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
 		"required account profile",
@@ -153,8 +154,32 @@ func TestRunRequiresExplicitProfile(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "--profile main|study is required") {
+	if !strings.Contains(stderr, "--profile main|study|lumina is required") {
 		t.Fatalf("missing profile error: %s", stderr)
+	}
+}
+
+func TestRunLuminaAccountSyncRejectsRepoStateBeforeTelegramAccess(t *testing.T) {
+	dir := filepath.Join(detectProjectRoot(), ".state", "lumina")
+	sessionPath := filepath.Join(t.TempDir(), "lumina.json")
+	env := map[string]string{
+		"TG_HARVEST_LUMINA_STATE_DIR":    dir,
+		"TG_HARVEST_LUMINA_SESSION_PATH": sessionPath,
+		"TG_HARVEST_LUMINA_APP_HASH":     "test-hash",
+	}
+	code, _, stderr := runCommand(t, []string{"--profile", "lumina", "account-sync", "--account-id", "77"}, env)
+	if code != 1 || !strings.Contains(stderr, "must be outside") {
+		t.Fatalf("account-sync code=%d stderr=%s", code, stderr)
+	}
+	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
+		t.Fatalf("account-sync should not acquire runtime lock: %v", err)
+	}
+}
+
+func TestRunLuminaCannotUseMainDailyWorkflow(t *testing.T) {
+	code, _, stderr := runCommand(t, []string{"--profile", "lumina", "daily"}, map[string]string{"TG_HARVEST_LUMINA_APP_HASH": "test-hash"})
+	if code != 1 || !strings.Contains(stderr, "only for profile main") {
+		t.Fatalf("daily code=%d stderr=%s", code, stderr)
 	}
 }
 

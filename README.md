@@ -3,24 +3,26 @@
 [![CI](https://github.com/chupakobra6/telegram-harvest/actions/workflows/ci.yml/badge.svg)](https://github.com/chupakobra6/telegram-harvest/actions/workflows/ci.yml)
 
 Локальный CLI для сбора Telegram-данных через MTProto user authorization. Все harvest-команды read-only; единственная операция записи — узкая отправка самому себе в «Избранное» основного аккаунта.
-Проект рассчитан на два практических сценария:
+Проект рассчитан на три практических сценария:
 
 - **daily reports** - личные исходящие сообщения и настроенные chat-scoped источники за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через production Whisper pipeline;
 - **study harvest** - выгрузка, синк и агентские Markdown-представления для учебных чатов из allowlist.
+- **Lumina account sync** — полная история доступных обычных и архивных диалогов отдельного аккаунта: входящие и исходящие сообщения, приватный индекс и возобновление прерванной выгрузки.
 
-CLI один и тот же для всех сценариев. Аккаунт выбирается профилем `main` или `study`, а не отдельными account-specific командами.
+CLI один и тот же для всех сценариев. Аккаунт выбирается явным профилем `main`, `study` или `lumina`.
 
 ## Что умеет
 
 | Область | Поведение |
 | --- | --- |
 | Авторизация | MTProto user session через `login` и явные API credentials для каждого профиля. |
-| Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`. Других алиасов профилей/env нет. |
+| Профили | `main` читает `TG_HARVEST_DAILY_*`; `study` читает `TG_HARVEST_STUDY_*`; `lumina` читает `TG_HARVEST_LUMINA_*`. Алиасов нет. |
 | Daily | Сканирует диалоги за один московский день и пишет outgoing/self сообщения плюс настроенных отправителей в конкретных чатах. |
 | Отчеты | Пользовательские daily-отчеты лежат в `reports/daily/YYYY-MM-DD.md`; JSONL и кэши остаются в `.state/`. |
 | Медиа | Картинки сохраняются локально, audio/video временно скачиваются для ASR и удаляются после транскрибации; generic video проходит phone-like preflight. |
 | Daily ASR | Один адаптивный профиль whisper.cpp large-v3-turbo q5_0 на Metal: быстрый short decode для обычных сообщений и защищённый long-form для длинного либо долго молчащего медиа. |
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
+| Lumina sync | `account-sync` обходит все доступные диалоги аккаунта без allowlist, сохраняет полную историю по чатам вне репозитория и обновляет приватный индекс. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
 | Safety | Harvest-команды не мутируют Telegram. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
 
@@ -78,9 +80,10 @@ bin/telegram-harvest --profile study me
 ```bash
 bin/telegram-harvest --profile main  <command>
 bin/telegram-harvest --profile study <command>
+bin/telegram-harvest --profile lumina <command>
 ```
 
-Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study`. Первый Make-запуск собирает `bin/telegram-harvest`; следующие запуски переиспользуют бинарник, пока не изменятся Go sources, `go.mod` или `go.sum`.
+Makefile повторяет эту модель: команды, которые читают профиль, требуют `PROFILE=main|study|lumina`. Первый Make-запуск собирает `bin/telegram-harvest`; следующие запуски переиспользуют бинарник, пока не изменятся Go sources, `go.mod` или `go.sum`.
 
 ```bash
 make doctor PROFILE=main
@@ -89,6 +92,29 @@ make daily PROFILE=main DATE=2026-06-04
 make daily-catchup PROFILE=main
 make sync CHAT=1234567890 NAME=study-main PROFILE=study
 ```
+
+## Полная история аккаунта Lumina 22
+
+Профиль `lumina` хранит отдельную MTProto-сессию в `.sessions/lumina.json`. Полная история по умолчанию находится в `~/Library/Application Support/telegram-harvest/lumina` с закрытым доступом к каталогу. Если задан `TG_HARVEST_LUMINA_STATE_DIR`, путь должен быть абсолютным, приватным (`0700`) и вне репозитория Telegram Harvest. `account-sync` не меняет охват `study` или дневного `main` отчёта.
+
+Укажи `TG_HARVEST_LUMINA_APP_ID` в `.env`. Сохрани Telegram API app hash в macOS Keychain как generic password с service `telegram-harvest.lumina.app-hash` и account `lumina`; `-w` в конце команды запросит значение интерактивно, без него в истории shell. CLI читает hash из Keychain. Номер и код входа `login` запрашивает интерактивно, если номер не задан. App hash, код и пароль не должны попадать в Git или отчёты.
+
+```bash
+security add-generic-password -U -a lumina -s telegram-harvest.lumina.app-hash -w
+make build
+make doctor PROFILE=lumina
+make login PROFILE=lumina
+bin/telegram-harvest --profile lumina me
+make account-sync PROFILE=lumina ACCOUNT_ID=123456789  # подставь ID из me
+```
+
+Числовой `ACCOUNT_ID` обязателен только при первом запуске. Команда сверяет его с действующей сессией и сохраняет привязку архива к аккаунту. Следующие запуски делают дельту по завершённым чатам и продолжают незаконченные полные истории:
+
+```bash
+make account-sync PROFILE=lumina
+```
+
+Начинай анализ с `README.md` внутри каталога Lumina: там статус полноты, список чатов и ссылки на `chats/<тип>-<id>/messages.jsonl`. Для вопроса о конкретном человеке или событии найди нужные JSONL через `rg -n`, открой подходящие сообщения и укажи тип чата с `message_id` в ответе. Тип входит в ключ потому, что числовые ID разных типов могут совпадать. Индекс с `complete=false` означает, что часть истории ещё не проверена. Текст и метаданные вложений выгружаются; сами медиа и содержание голосовых/видеосообщений автоматически не скачиваются и не расшифровываются. Нужное вложение можно прочитать адресно командой `download-media --chat <тип>:<id>` в профиле `lumina`. Режим остаётся только для чтения; `send-saved` разрешён исключительно для `main`.
 
 ## Отправка в «Избранное»
 

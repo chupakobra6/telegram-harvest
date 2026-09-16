@@ -1,19 +1,23 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	DefaultSessionPath     = ".sessions/study.json"
-	DefaultStateDir        = ".state"
-	DefaultMainSessionPath = ".sessions/main.json"
-	DefaultMainStateDir    = ".state/daily"
+	DefaultSessionPath       = ".sessions/study.json"
+	DefaultStateDir          = ".state"
+	DefaultMainSessionPath   = ".sessions/main.json"
+	DefaultMainStateDir      = ".state/daily"
+	DefaultLuminaSessionPath = ".sessions/lumina.json"
 	// Static floor selected by live sequential calibration. Lower
 	// 400-450 ms candidates produced FloodWait under a sustained 103-RPC burst.
 	DefaultRPCSpacingMS = 500
@@ -44,12 +48,13 @@ type DailyAdditionalSender struct {
 type Mode string
 
 const (
-	ModeStudy Mode = "study"
-	ModeMain  Mode = "main"
+	ModeStudy  Mode = "study"
+	ModeMain   Mode = "main"
+	ModeLumina Mode = "lumina"
 )
 
 func Load() (Config, error) {
-	return Config{}, fmt.Errorf("profile is required; use main or study")
+	return Config{}, fmt.Errorf("profile is required; use main, study, or lumina")
 }
 
 func LoadStudy() (Config, error) {
@@ -60,6 +65,34 @@ func LoadMain() (Config, error) {
 	return loadMode(ModeMain, DefaultMainSessionPath, DefaultMainStateDir)
 }
 
+func LoadLumina() (Config, error) {
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		return Config{}, fmt.Errorf("locate private account state directory: %w", err)
+	}
+	cfg, err := loadMode(ModeLumina, DefaultLuminaSessionPath, filepath.Join(userConfigDir, "telegram-harvest", "lumina"))
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.AppHash == "" {
+		cfg.AppHash = luminaAppHashFromKeychain()
+	}
+	return cfg, nil
+}
+
+func luminaAppHashFromKeychain() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-w", "-s", "telegram-harvest.lumina.app-hash", "-a", "lumina").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
 func LoadProfile(profile string) (Config, error) {
 	mode, err := ProfileMode(profile)
 	if err != nil {
@@ -68,6 +101,8 @@ func LoadProfile(profile string) (Config, error) {
 	switch mode {
 	case ModeMain:
 		return LoadMain()
+	case ModeLumina:
+		return LoadLumina()
 	default:
 		return LoadStudy()
 	}
@@ -79,10 +114,12 @@ func ProfileMode(profile string) (Mode, error) {
 		return ModeStudy, nil
 	case "main":
 		return ModeMain, nil
+	case "lumina":
+		return ModeLumina, nil
 	case "":
-		return "", fmt.Errorf("profile is required; use main or study")
+		return "", fmt.Errorf("profile is required; use main, study, or lumina")
 	default:
-		return "", fmt.Errorf("unknown profile %q; use main or study", profile)
+		return "", fmt.Errorf("unknown profile %q; use main, study, or lumina", profile)
 	}
 }
 
@@ -90,6 +127,8 @@ func ProfileName(mode Mode) string {
 	switch mode {
 	case ModeMain:
 		return "main"
+	case ModeLumina:
+		return "lumina"
 	default:
 		return "study"
 	}
@@ -99,6 +138,10 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 	appID, err := intFromEnvAny(envKeys(mode, "APP_ID"), 0)
 	if err != nil {
 		return Config{}, err
+	}
+	allowedChats := splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...))
+	if mode == ModeLumina && len(allowedChats) > 0 {
+		return Config{}, fmt.Errorf("%s is not supported for the full-account lumina profile", envKeys(mode, "ALLOWED_CHATS")[0])
 	}
 	additionalSenders := []DailyAdditionalSender(nil)
 	if mode == ModeMain {
@@ -115,7 +158,7 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 		Password:               firstEnv(envKeys(mode, "PASSWORD")...),
 		SessionPath:            defaultString(firstEnv(envKeys(mode, "SESSION_PATH")...), defaultSessionPath),
 		StateDir:               defaultString(firstEnv(envKeys(mode, "STATE_DIR")...), defaultStateDir),
-		AllowedChats:           splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...)),
+		AllowedChats:           allowedChats,
 		DailyAdditionalSenders: additionalSenders,
 		RPCSpacing:             time.Duration(DefaultRPCSpacingMS) * time.Millisecond,
 	}, nil
@@ -127,6 +170,8 @@ func envKeys(mode Mode, suffix string) []string {
 		return []string{
 			"TG_HARVEST_DAILY_" + suffix,
 		}
+	case ModeLumina:
+		return []string{"TG_HARVEST_LUMINA_" + suffix}
 	default:
 		return []string{
 			"TG_HARVEST_STUDY_" + suffix,
@@ -178,6 +223,9 @@ func (c Config) ValidateRuntime() error {
 		return fmt.Errorf("%s is required", c.EnvName("APP_ID"))
 	}
 	if strings.TrimSpace(c.AppHash) == "" {
+		if c.Mode == ModeLumina {
+			return fmt.Errorf("macOS Keychain item telegram-harvest.lumina.app-hash (account lumina) or %s is required", c.EnvName("APP_HASH"))
+		}
 		return fmt.Errorf("%s is required", c.EnvName("APP_HASH"))
 	}
 	if strings.TrimSpace(c.SessionPath) == "" {
@@ -219,6 +267,8 @@ func (c Config) RuntimeLockPath() string {
 	if sessionPath == "" {
 		if c.Mode == ModeMain {
 			sessionPath = DefaultMainSessionPath
+		} else if c.Mode == ModeLumina {
+			sessionPath = DefaultLuminaSessionPath
 		} else {
 			sessionPath = DefaultSessionPath
 		}
