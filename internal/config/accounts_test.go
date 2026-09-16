@@ -9,7 +9,9 @@ import (
 
 func TestRegisteredAccountsHavePrivateSeparateSessionsAndBindings(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("TG_HARVEST_DAILY_APP_ID", "77")
 	t.Setenv("TG_HARVEST_DAILY_APP_HASH", "main-api-hash")
 	for _, name := range []string{"lumina22", "work"} {

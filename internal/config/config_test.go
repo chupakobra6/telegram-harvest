@@ -132,7 +132,9 @@ func TestLoadMainIgnoresUnscopedHarvestEnv(t *testing.T) {
 
 func TestLoadProfileSelectsIsolatedAccountEnv(t *testing.T) {
 	clearTelegramConfigEnv(t)
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "42")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "study-hash")
 	t.Setenv("TG_HARVEST_DAILY_APP_ID", "77")

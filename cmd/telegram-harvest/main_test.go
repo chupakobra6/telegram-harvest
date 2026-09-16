@@ -1066,6 +1066,9 @@ func runCommand(t *testing.T, args []string, env map[string]string) (int, string
 	t.Helper()
 	baseDir := t.TempDir()
 	clearCommandEnv(t)
+	if home, ok := env["HOME"]; ok {
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	}
 	t.Setenv("TG_HARVEST_STUDY_APP_ID", "0")
 	t.Setenv("TG_HARVEST_STUDY_APP_HASH", "test-hash")
 	t.Setenv("TG_HARVEST_STUDY_STATE_DIR", filepath.Join(baseDir, "state"))
