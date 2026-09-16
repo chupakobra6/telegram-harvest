@@ -599,7 +599,7 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 		context.Background(),
 		dumper,
 		harvest.HistoryOptions{Limit: 99, StageTiming: timings.Observe},
-		dailyOptions{Limit: 1},
+		dailyOptions{},
 		jobs,
 		map[int64][]int64{10: {20}},
 		&output,
@@ -614,7 +614,7 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 		t.Fatalf("range = %s..%s", dumper.opts.Start, dumper.opts.End)
 	}
 	if dumper.opts.History.Limit != 0 {
-		t.Fatalf("range history limit = %d, want 0 before per-day limiting", dumper.opts.History.Limit)
+		t.Fatalf("range history limit = %d, want 0 for complete archival", dumper.opts.History.Limit)
 	}
 	if dumper.opts.History.StageTiming == nil {
 		t.Fatal("range scan lost stage timing observer")
@@ -624,7 +624,7 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 	}
 
 	dayOneRecords := readMessageRecords(t, jobs[1].OutputPath)
-	if len(dayOneRecords) != 1 || dayOneRecords[0].MessageID != 2 {
+	if len(dayOneRecords) != 2 || dayOneRecords[0].MessageID != 1 || dayOneRecords[1].MessageID != 2 {
 		t.Fatalf("day one records = %+v", dayOneRecords)
 	}
 	dayThreeRecords := readMessageRecords(t, jobs[0].OutputPath)
@@ -643,8 +643,8 @@ func TestRunDailyRangeJobsUsesOneScanAndPartitionsReports(t *testing.T) {
 	if !strings.Contains(output.String(), "range start=2026-06-03 end=2026-06-05") {
 		t.Fatalf("missing range summary:\n%s", output.String())
 	}
-	if !strings.Contains(output.String(), "collected=3 published=2") {
-		t.Fatalf("range summary does not distinguish collected and limited records:\n%s", output.String())
+	if !strings.Contains(output.String(), "collected=3 published=3") {
+		t.Fatalf("archival range did not publish every collected record:\n%s", output.String())
 	}
 	if got := timings.durations[stages.Render]; got <= 0 {
 		t.Fatalf("render timing = %s", got)

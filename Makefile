@@ -36,7 +36,7 @@ help:
 	@printf "  make chats PROFILE=study # list dialogs; pass QUERY='вшэ' to filter\\n"
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
-	@printf "  make sync PROFILE=study # incremental sync for CHAT=... NAME=...\\n"
+	@printf "  make sync PROFILE=study # exhaustive incremental; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
 	@printf "  make account-sync PROFILE=<account-name> # full account history after login\\n"
 	@printf "  make download-media PROFILE=study # manual uncapped media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make compact PROFILE=study # low-level: compact an existing JSONL for agents\\n"
@@ -134,7 +134,7 @@ dump:
 
 sync:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) sync --chat "$(CHAT)" --name "$(NAME)" $(if $(strip $(ALL)),--all,) $(if $(strip $(RESET)),--reset,) $(if $(strip $(RESET_MERGED)),--reset-merged,) $(if $(strip $(MERGED_OUT)),--merged-out "$(MERGED_OUT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
+	$(CLI) $(PROFILE_ARG) sync --chat "$(CHAT)" --name "$(NAME)" $(if $(strip $(ALL)),--all,) $(if $(strip $(RESET)),--reset,) $(if $(strip $(RESET_MERGED)),--reset-merged,) $(if $(strip $(REFRESH_FROM)),--refresh-from "$(REFRESH_FROM)",) $(if $(strip $(MERGED_OUT)),--merged-out "$(MERGED_OUT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
 
 account-sync:
 	$(REQUIRE_PROFILE)

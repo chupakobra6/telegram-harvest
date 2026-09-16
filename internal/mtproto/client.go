@@ -41,7 +41,7 @@ const (
 	defaultTranscribeTimeout = 10 * time.Minute
 	maxFloodWaitRetries      = 3
 	defaultDialogBatchSize   = 100
-	defaultDailyDialogLimit  = 500
+	defaultDailyDialogLimit  = 0 // exhaustive; positive limits are explicit diagnostics
 	defaultMaxPhotoBytes     = harvest.DefaultMaxPhotoBytes
 	defaultMaxDocumentBytes  = harvest.DefaultMaxDocumentBytes
 	defaultMaxAudioBytes     = harvest.DefaultMaxAudioBytes
@@ -353,7 +353,7 @@ func (s *Session) loadAllDialogsFolder(ctx context.Context, folderID int) ([]har
 		}
 		messages := modified.GetMessages()
 		if len(messages) == 0 {
-			if len(dialogs) < pageSize {
+			if _, terminal := result.(*tg.MessagesDialogs); terminal {
 				return all, nil
 			}
 			return nil, fmt.Errorf("folder %d dialog page has no pagination message", folderID)
@@ -380,16 +380,20 @@ func (s *Session) ListTopics(ctx context.Context, chat string, limit int, query 
 	if err != nil {
 		return nil, err
 	}
-	if limit <= 0 {
-		limit = 100
+	if limit < 0 {
+		return nil, fmt.Errorf("topic limit must be non-negative")
 	}
 	query = strings.TrimSpace(query)
 	topics := make([]harvest.Topic, 0, limit)
 	offsetTopic := 0
 	offsetID := 0
 	offsetDate := 0
-	for len(topics) < limit {
-		batchLimit := min(100, limit-len(topics))
+	seenOffsets := make(map[string]bool)
+	for limit == 0 || len(topics) < limit {
+		batchLimit := 100
+		if limit > 0 {
+			batchLimit = min(100, limit-len(topics))
+		}
 		var result *tg.MessagesForumTopics
 		err := s.performRPC(ctx, "get_forum_topics", func(callCtx context.Context) error {
 			var callErr error
@@ -424,9 +428,14 @@ func (s *Session) ListTopics(ctx context.Context, chat string, limit int, query 
 			topics = append(topics, topic)
 		}
 		last, ok := lastTopic(result.Topics, topMessages)
-		if !ok || len(result.Topics) < batchLimit {
-			break
+		if !ok {
+			return nil, fmt.Errorf("forum topic page has no pagination cursor")
 		}
+		key := fmt.Sprintf("%d/%d/%d", last.ID, last.TopMessageID, last.LastMessageAt.Unix())
+		if seenOffsets[key] {
+			return nil, fmt.Errorf("forum topic pagination did not advance")
+		}
+		seenOffsets[key] = true
 		offsetTopic = last.ID
 		offsetID = last.TopMessageID
 		if !last.LastMessageAt.IsZero() {
@@ -479,13 +488,15 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 	if opts.TopicID > 0 {
 		topicByID[opts.TopicID] = harvest.Topic{ID: opts.TopicID, Title: opts.TopicTitle, TopMessageID: opts.TopicID}
 	} else if target.Chat.Forum {
-		if topics, err := s.ListTopics(ctx, chat, 500, ""); err == nil {
+		if topics, err := s.ListTopics(ctx, chat, 0, ""); err == nil {
 			for _, topic := range topics {
 				storeTopic(topicByID, topic.ID, topic)
 				if topic.TopMessageID > 0 {
 					storeTopic(topicByID, topic.TopMessageID, topic)
 				}
 			}
+		} else {
+			return harvest.Chat{}, harvest.HistoryStats{}, fmt.Errorf("forum topic coverage: %w", err)
 		}
 	}
 	pipeline, err := newMediaPipeline(ctx, opts)
@@ -502,128 +513,36 @@ func (s *Session) DumpHistory(ctx context.Context, chat string, opts harvest.His
 		return s.reserveDownloadWave(ctx, opts.DownloadQueueTiming)
 	})
 	defer downloader.finish()
-	if opts.All {
-		chatResult, stats, dumpErr := s.dumpHistoryStreaming(ctx, target, opts, emit, topicByID, pipeline, downloader)
-		if dumpErr != nil {
-			return chatResult, stats, dumpErr
-		}
-		if pipeline != nil {
-			pipelineErr := pipeline.finishAndApply(nil)
-			pipelineFinished = true
-			if pipelineErr != nil {
-				return chatResult, stats, pipelineErr
-			}
-		}
-		return chatResult, stats, nil
+	// One pagination implementation for previews, incremental and full history.
+	// Bounded dumps preserve chronological output; exhaustive scans stream pages.
+	var records []harvest.MessageRecord
+	sink := emit
+	if !opts.All {
+		records = make([]harvest.MessageRecord, 0, initialHistoryCapacity(opts))
+		sink = func(record harvest.MessageRecord) error { records = append(records, record); return nil }
 	}
-
-	records := make([]harvest.MessageRecord, 0, initialHistoryCapacity(opts))
-	offsetID := 0
-	batches := 0
-	for shouldContinueHistory(opts, len(records), batches) {
-		batches++
-		batchLimit := nextBatchLimit(opts, len(records))
-		var result tg.MessagesMessagesClass
-		err = downloader.runHistory(func() error {
-			if opts.TopicID > 0 {
-				return s.performRPC(ctx, "get_replies", func(callCtx context.Context) error {
-					var callErr error
-					result, callErr = s.raw.MessagesGetReplies(callCtx, &tg.MessagesGetRepliesRequest{
-						Peer:     target.InputPeer,
-						MsgID:    opts.TopicID,
-						OffsetID: offsetID,
-						Limit:    batchLimit,
-						MinID:    opts.MinID,
-						Hash:     0,
-					})
-					return callErr
-				})
-			}
-			return s.performRPC(ctx, "get_history", func(callCtx context.Context) error {
-				var callErr error
-				result, callErr = s.raw.MessagesGetHistory(callCtx, &tg.MessagesGetHistoryRequest{
-					Peer:     target.InputPeer,
-					OffsetID: offsetID,
-					Limit:    batchLimit,
-					MinID:    opts.MinID,
-					Hash:     0,
-				})
-				return callErr
-			})
-		})
-		if err != nil {
-			return harvest.Chat{}, harvest.HistoryStats{}, err
-		}
-		entities := historyEntities(result)
-		messages := historyMessages(result)
-		if len(messages) == 0 {
-			break
-		}
-		mergeTopicMap(topicByID, historyTopics(result), messages)
-
-		minSeenID := 0
-		reachedStart := false
-		pageRecords := make([]harvest.MessageRecord, 0, len(messages))
-		pageMessages := make([]tg.MessageClass, 0, len(messages))
-		for _, msgClass := range messages {
-			if id := messageID(msgClass); id > 0 && (minSeenID == 0 || id < minSeenID) {
-				minSeenID = id
-			}
-			if historyMessageBeforeStart(msgClass, opts) {
-				reachedStart = true
-			}
-			record, ok := normalizeRecord(msgClass, target.Chat, entities)
-			if !ok {
-				continue
-			}
-			annotateRecordTopic(&record, opts, topicByID)
-			if opts.MinID > 0 && record.MessageID <= opts.MinID {
-				continue
-			}
-			if !historyRecordInTimeRange(record, opts) {
-				continue
-			}
-			pageRecords = append(pageRecords, record)
-			pageMessages = append(pageMessages, msgClass)
-		}
-		plan := newMediaDownloadPlan()
-		for index := range pageRecords {
-			s.planRecordMediaDownloads(pageMessages[index], &pageRecords[index], opts, pipeline, plan)
-		}
-		if err := downloader.runBatch(ctx, plan.tasks, opts.StageTiming); err != nil {
-			return harvest.Chat{}, harvest.HistoryStats{}, err
-		}
-		records = append(records, pageRecords...)
-		if reachedStart || minSeenID == 0 || len(messages) < batchLimit {
-			break
-		}
-		offsetID = minSeenID
+	chatResult, stats, dumpErr := s.dumpHistoryStreaming(ctx, target, opts, sink, topicByID, pipeline, downloader)
+	if dumpErr != nil {
+		return chatResult, stats, dumpErr
 	}
 	if pipeline != nil {
-		pipelineErr := pipeline.finishAndApply(records)
+		pipelineErr := pipeline.finishAndApply(nil)
 		pipelineFinished = true
 		if pipelineErr != nil {
-			return harvest.Chat{}, harvest.HistoryStats{}, pipelineErr
+			return chatResult, stats, pipelineErr
 		}
 	}
-
-	sort.Slice(records, func(i, j int) bool { return records[i].MessageID < records[j].MessageID })
-	stats := harvest.HistoryStats{Records: len(records), Batches: batches, FloodWaits: s.FloodWaits()}
-	for _, record := range records {
-		if stats.FirstID == 0 || record.MessageID < stats.FirstID {
-			stats.FirstID = record.MessageID
-		}
-		if record.MessageID > stats.LastID {
-			stats.LastID = record.MessageID
-		}
-		if emit != nil {
-			if err := emit(record); err != nil {
-				return harvest.Chat{}, harvest.HistoryStats{}, err
+	if !opts.All {
+		sort.Slice(records, func(i, j int) bool { return records[i].MessageID < records[j].MessageID })
+		for _, record := range records {
+			if emit != nil {
+				if err := emit(record); err != nil {
+					return chatResult, stats, err
+				}
 			}
 		}
 	}
-	stats.Complete = true
-	return target.Chat, stats, nil
+	return chatResult, stats, nil
 }
 
 func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, messageID int, opts DownloadMediaOptions) (DownloadMediaResult, error) {
@@ -785,13 +704,18 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 	})
 	defer downloader.finish()
 	scanStart := time.Now()
-	dialogs, err := s.loadDialogs(ctx, opts.DialogLimit)
+	dialogs, err := s.ListAllDialogs(ctx)
 	stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
 	if err != nil {
 		return harvest.OutgoingStats{}, err
 	}
 
-	stats = harvest.OutgoingStats{DialogsScanned: len(dialogs)}
+	stats = harvest.OutgoingStats{}
+	if opts.DialogLimit > 0 && len(dialogs) > opts.DialogLimit {
+		stats.DialogErrors = append(stats.DialogErrors, fmt.Sprintf("explicit dialog limit %d omitted %d dialogs", opts.DialogLimit, len(dialogs)-opts.DialogLimit))
+		dialogs = dialogs[:opts.DialogLimit]
+	}
+	stats.DialogsScanned = len(dialogs)
 	records := make([]harvest.MessageRecord, 0)
 	for _, chat := range dialogs {
 		stats.DialogHeads = append(stats.DialogHeads, dailyDialogHead(chat, opts.End))
@@ -1054,7 +978,7 @@ func (s *Session) dumpHistoryStreaming(
 	stats := harvest.HistoryStats{}
 	for shouldContinueHistory(opts, stats.Records, stats.Batches) {
 		stats.Batches++
-		batchLimit := opts.BatchSize
+		batchLimit := nextBatchLimit(opts, stats.Records)
 		var result tg.MessagesMessagesClass
 		err := downloader.runHistory(func() error {
 			if opts.TopicID > 0 {
@@ -1154,7 +1078,10 @@ func (s *Session) dumpHistoryStreaming(
 				stats.LastID = record.MessageID
 			}
 		}
-		done := reachedStart || minMessageID == 0
+		if minMessageID == 0 || (offsetID > 0 && minMessageID >= offsetID) {
+			return harvest.Chat{}, stats, fmt.Errorf("history pagination did not advance: offset_id=%d next_offset_id=%d", offsetID, minMessageID)
+		}
+		done := reachedStart || (opts.MinID > 0 && minMessageID <= opts.MinID)
 		if done {
 			stats.Complete = true
 		}
@@ -1609,6 +1536,7 @@ func (s *Session) loadDialogs(ctx context.Context, limit int) ([]harvest.Chat, e
 	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
 	offsetID := 0
 	offsetDate := 0
+	seenOffsets := make(map[string]bool)
 
 	for len(all) < limit {
 		batchLimit := min(defaultDialogBatchSize, limit-len(all))
@@ -1630,6 +1558,9 @@ func (s *Session) loadDialogs(ctx context.Context, limit int) ([]harvest.Chat, e
 		}
 		modified, ok := result.AsModified()
 		if !ok {
+			return nil, fmt.Errorf("dialog response was not modified")
+		}
+		if len(modified.GetDialogs()) == 0 {
 			break
 		}
 		entities := dialogEntities(result)
@@ -1648,19 +1579,27 @@ func (s *Session) loadDialogs(ctx context.Context, limit int) ([]harvest.Chat, e
 			s.cacheTarget(chat, inputPeer)
 		}
 		messages := modified.GetMessages()
-		if len(messages) == 0 || len(messages) < batchLimit {
-			break
+		if len(messages) == 0 {
+			if _, terminal := result.(*tg.MessagesDialogs); terminal {
+				break
+			}
+			return nil, fmt.Errorf("dialog page has no pagination message")
 		}
 		last := messages[len(messages)-1]
 		lastID, lastDate, lastPeer, ok := messageOffset(last)
 		if !ok {
-			break
+			return nil, fmt.Errorf("dialog page has invalid pagination message")
 		}
+		key := fmt.Sprintf("%T/%d/%d/%d", lastPeer, peerClassID(lastPeer), lastID, lastDate)
+		if seenOffsets[key] {
+			return nil, fmt.Errorf("dialog pagination did not advance")
+		}
+		seenOffsets[key] = true
 		offsetID = lastID
 		offsetDate = lastDate
 		offsetPeer = inputPeerFromMessagePeer(lastPeer, entities)
 		if offsetPeer == nil {
-			break
+			return nil, fmt.Errorf("dialog page has unresolved pagination peer")
 		}
 	}
 	return all, nil
@@ -1685,7 +1624,7 @@ func (s *Session) resolveTarget(ctx context.Context, raw string) (resolvedTarget
 		return resolvedTarget{}, fmt.Errorf("peer %q was not found in account dialogs", raw)
 	}
 	if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
-		if _, err := s.loadDialogs(ctx, 1000); err != nil {
+		if _, err := s.ListAllDialogs(ctx); err != nil {
 			return resolvedTarget{}, err
 		}
 		for _, candidate := range numericPeerCandidates(id) {
@@ -2225,7 +2164,12 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			Attachments: extractAttachments(msg.Media),
 		}
 		if fwd, ok := msg.GetFwdFrom(); ok {
+			// Forward metadata is independent from the date of a later edit.
 			record.Forward = forwardInfoFromHeader(fwd, entities)
+		}
+		if msg.EditDate > 0 {
+			edited := time.Unix(int64(msg.EditDate), 0).UTC()
+			record.EditedAt = &edited
 		}
 		if replyID, topID := replyInfo(msg.ReplyTo); replyID > 0 || topID > 0 {
 			record.ReplyToMessageID = replyID

@@ -57,5 +57,13 @@ func writePrivateAtomic(path string, data []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(file.Name(), path)
+	if err := os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }

@@ -92,6 +92,8 @@ type MessageRecord struct {
 	Chat               Chat         `json:"chat"`
 	MessageID          int          `json:"message_id"`
 	Date               time.Time    `json:"date"`
+	EditedAt           *time.Time   `json:"edited_at,omitempty"`
+	Revision           bool         `json:"revision,omitempty"`
 	Sender             Sender       `json:"sender,omitempty"`
 	Outgoing           bool         `json:"outgoing,omitempty"`
 	Forward            *ForwardInfo `json:"forward,omitempty"`

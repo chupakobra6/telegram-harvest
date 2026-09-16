@@ -734,13 +734,14 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "wrote=%d out=%s first_id=%d last_id=%d batches=%d flood_waits=%d\n",
+			fmt.Fprintf(out, "wrote=%d out=%s first_id=%d last_id=%d batches=%d flood_waits=%d complete=%t\n",
 				stats.Records,
 				outputPath,
 				stats.FirstID,
 				stats.LastID,
 				stats.Batches,
 				stats.FloodWaits,
+				stats.Complete,
 			)
 			return nil
 		})
@@ -758,7 +759,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	fs.SetOutput(out)
 	chat := fs.String("chat", "", "chat id or @username")
 	name := fs.String("name", "", "local stream name")
-	limit := fs.Int("limit", config.DefaultHistoryLimit, "maximum new records")
+	refreshFrom := fs.String("refresh-from", "", "reconcile new, missing and edited messages from YYYY-MM-DD (without resetting history)")
 	mergedOut := fs.String("merged-out", "", "optional append-only merged JSONL output, relative to state dir unless absolute")
 	all := fs.Bool("all", false, "sync all available history")
 	reset := fs.Bool("reset", false, "truncate this stream and reset its state before syncing")
@@ -780,6 +781,17 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if strings.TrimSpace(*name) == "" {
 		return fmt.Errorf("--name is required")
 	}
+	var refreshStart time.Time
+	if *refreshFrom != "" {
+		if *all || *reset || *resetMerged {
+			return fmt.Errorf("--refresh-from cannot be combined with --all or reset flags")
+		}
+		var err error
+		refreshStart, err = time.ParseInLocation("2006-01-02", *refreshFrom, time.FixedZone("Europe/Moscow", 3*60*60))
+		if err != nil {
+			return fmt.Errorf("--refresh-from: %w", err)
+		}
+	}
 	streamPath := filepath.Join(cfg.StateDir, *name+".jsonl")
 	statePath := filepath.Join(cfg.StateDir, *name+".state.json")
 	mergedPath := ""
@@ -787,11 +799,11 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		mergedPath = resolveOutputPath(cfg.StateDir, *mergedOut)
 	}
 	history := harvest.HistoryOptions{
-		Limit:      *limit,
 		BatchSize:  config.DefaultBatchSize,
 		All:        *all,
 		TopicID:    *topicID,
 		TopicTitle: *topicTitle,
+		Start:      refreshStart,
 	}
 	if *downloadMedia {
 		history.DownloadMedia = true
@@ -822,7 +834,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					printInterruptedSync(out, statePath)
-					return nil
+					return err
 				}
 				return err
 			}
@@ -845,7 +857,7 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 				)
 				return nil
 			}
-			fmt.Fprintf(out, "mode=%s synced=%d stream=%s state=%s last_id=%d batches=%d flood_waits=%d\n",
+			fmt.Fprintf(out, "mode=%s complete=true synced=%d stream=%s state=%s last_id=%d batches=%d flood_waits=%d\n",
 				mode,
 				result.Stats.Records,
 				result.StreamPath,
@@ -1048,7 +1060,6 @@ func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, o
 
 type dailyOptionFlags struct {
 	dialogLimit         *int
-	limit               *int
 	includeService      *bool
 	downloadMedia       *bool
 	mediaDir            *string
@@ -1065,8 +1076,7 @@ type dailyOptionFlags struct {
 
 func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOptionFlags {
 	flags := dailyOptionFlags{
-		dialogLimit:         fs.Int("dialog-limit", dailyDialogLimitDefault(), "maximum dialogs to scan"),
-		limit:               fs.Int("limit", 0, "maximum newest records to write after filtering; 0 means all"),
+		dialogLimit:         fs.Int("dialog-limit", dailyDialogLimitDefault(), "diagnostic dialog cap (0 = all; capped runs are incomplete)"),
 		includeService:      fs.Bool("include-service", false, "include Telegram service messages"),
 		downloadMedia:       fs.Bool("download-media", true, "download photos and image documents; audio/video is downloaded temporarily for transcription"),
 		mediaDir:            fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute"),
@@ -1086,7 +1096,6 @@ func addDailyOptionFlags(fs *flag.FlagSet, defaults dailyRuntimeConfig) dailyOpt
 func (f dailyOptionFlags) values() dailyOptions {
 	return dailyOptions{
 		DialogLimit:          *f.dialogLimit,
-		Limit:                *f.limit,
 		IncludeService:       *f.includeService,
 		DownloadMedia:        *f.downloadMedia,
 		MediaDir:             *f.mediaDir,
@@ -1108,7 +1117,6 @@ func (f dailyOptionFlags) values() dailyOptions {
 
 type dailyOptions struct {
 	DialogLimit          int
-	Limit                int
 	IncludeService       bool
 	DownloadMedia        bool
 	MediaDir             string
@@ -1333,7 +1341,6 @@ func validateDailyOptions(opts dailyOptions) error {
 
 func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOptions {
 	history := harvest.HistoryOptions{
-		Limit:                opts.Limit,
 		BatchSize:            config.DefaultBatchSize,
 		MaxBatches:           0,
 		DownloadMedia:        opts.DownloadMedia,
@@ -1446,7 +1453,7 @@ func runDailyRangeJobs(
 		return rangeStats, fmt.Errorf("daily range %s..%s incomplete; final reports were not published", jobs[0].Date, jobs[len(jobs)-1].Date)
 	}
 
-	recordsByDate := partitionDailyRecords(jobs, records, opts.Limit)
+	recordsByDate := partitionDailyRecords(jobs, records)
 	publishedRecords := 0
 	for _, job := range jobs {
 		dayRecords := recordsByDate[job.Date]
@@ -1601,7 +1608,7 @@ func dailyJobAt(jobs []dailyJob, date time.Time) (dailyJob, bool) {
 	return dailyJob{}, false
 }
 
-func partitionDailyRecords(jobs []dailyJob, records []harvest.MessageRecord, limit int) map[string][]harvest.MessageRecord {
+func partitionDailyRecords(jobs []dailyJob, records []harvest.MessageRecord) map[string][]harvest.MessageRecord {
 	recordsByDate := make(map[string][]harvest.MessageRecord, len(jobs))
 	for _, record := range records {
 		job, ok := dailyJobAt(jobs, record.Date)
@@ -1609,13 +1616,6 @@ func partitionDailyRecords(jobs []dailyJob, records []harvest.MessageRecord, lim
 			continue
 		}
 		recordsByDate[job.Date] = append(recordsByDate[job.Date], record)
-	}
-	if limit > 0 {
-		for date, dayRecords := range recordsByDate {
-			if len(dayRecords) > limit {
-				recordsByDate[date] = dayRecords[len(dayRecords)-limit:]
-			}
-		}
 	}
 	return recordsByDate
 }

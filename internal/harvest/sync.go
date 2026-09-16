@@ -79,8 +79,14 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 			opts.History.MinID = incrementalMinID(state, staleIncrementalCheckpoint)
 		}
 	}
-	if opts.History.All && opts.ResetMerged && !opts.Reset {
-		return SyncResult{}, fmt.Errorf("--reset-merged is only valid when starting a full sync with --reset")
+	if opts.ResetMerged && !opts.Reset {
+		return SyncResult{}, fmt.Errorf("--reset-merged requires --reset")
+	}
+	if !opts.History.All && !opts.Reset {
+		if !opts.History.Start.IsZero() {
+			opts.History.MinID = 0
+		}
+		return runIncrementalSync(ctx, source, opts, state, staleIncrementalCheckpoint, now)
 	}
 	if opts.History.All {
 		state = initBackfillState(state, opts.History, opts.Reset, now())
@@ -140,7 +146,10 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 		}
 	}
 
-	chat, stats, err := source.DumpHistory(ctx, opts.Chat, opts.History, func(record MessageRecord) error {
+	history := opts.History
+	// Sync is exhaustive; record budgets belong to preview dumps, never cursors.
+	history.All, history.Limit, history.MaxBatches = true, 0, 0
+	chat, stats, err := source.DumpHistory(ctx, opts.Chat, history, func(record MessageRecord) error {
 		if err := streamEncoder.Encode(record); err != nil {
 			return err
 		}
@@ -152,6 +161,12 @@ func RunSync(ctx context.Context, source HistorySource, opts SyncOptions) (SyncR
 		return nil
 	})
 	if err != nil {
+		return SyncResult{}, err
+	}
+	if !stats.Complete {
+		return SyncResult{}, fmt.Errorf("history scan incomplete; checkpoint not advanced")
+	}
+	if err := syncFiles(streamFile, mergedFile); err != nil {
 		return SyncResult{}, err
 	}
 

@@ -35,6 +35,7 @@
 - Start full sync: `bin/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main --all --reset`
 - Resume interrupted full sync: rerun the same `sync --all` command without `--reset`; state keeps `backfill.next_offset_id`.
 - Incremental sync after full sync completion: `bin/telegram-harvest --profile study sync --chat <id-or-username> --name hse-main`
+- `sync` дочитывает весь новый диапазон без общего лимита сообщений; прерывание оставляет возобновляемый staging, а не продвигает подтверждённый `last_id`. Для сверки пропусков и правок в заданном периоде используй `sync --refresh-from YYYY-MM-DD` с теми же stream/merged путями. JSONL сохраняет версии; Markdown/TOON показывают последнюю. Контракт и проверки: `docs/collection-integrity.md`.
 - Полный архив: после регистрации и `make login PROFILE=<имя>` запусти `make account-sync PROFILE=<имя>`; повторный запуск продолжает и обновляет историю. Индекс: приватный `state/README.md` в каталоге аккаунта.
 - Compact agent view: `bin/telegram-harvest --profile study compact --in messages.jsonl --out messages.toon`
 - Markdown navigation for agents: `bin/telegram-harvest --profile study agent-view --in messages.jsonl --out-dir agent-view`; it writes under the profile state dir, updates incrementally when possible, and accepts `--rebuild` for a full rewrite.

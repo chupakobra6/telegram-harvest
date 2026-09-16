@@ -97,6 +97,11 @@ func UpdateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 	if err != nil {
 		return AgentViewStats{}, err
 	}
+	for _, record := range newRecords {
+		if record.Revision {
+			return WriteAgentMarkdownView(opts)
+		}
+	}
 	if len(newRecords) > 0 {
 		sortRecordsNewestFirst(newRecords)
 		if err := appendAgentViewDayFiles(opts.OutputDir, newRecords); err != nil {

@@ -131,7 +131,23 @@ func readAgentViewRecords(opts AgentViewOptions) ([]MessageRecord, AgentViewStat
 	if err := scanner.Err(); err != nil {
 		return nil, stats, fmt.Errorf("read input: %w", err)
 	}
-	return records, stats, nil
+	return latestMessageRecords(records), stats, nil
+}
+
+// JSONL retains history; derived views expose the most recent content per ID.
+func latestMessageRecords(records []MessageRecord) []MessageRecord {
+	positions := make(map[string]int, len(records))
+	result := make([]MessageRecord, 0, len(records))
+	for _, record := range records {
+		key := fmt.Sprintf("%s/%d/%d", record.Chat.Type, record.Chat.ID, record.MessageID)
+		if index, exists := positions[key]; exists {
+			result[index] = record
+		} else {
+			positions[key] = len(result)
+			result = append(result, record)
+		}
+	}
+	return result
 }
 
 func sortRecordsNewestFirst(records []MessageRecord) {

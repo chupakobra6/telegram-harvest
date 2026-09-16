@@ -92,7 +92,7 @@ func readCompactRecords(opts CompactOptions) ([]MessageRecord, CompactStats, err
 	if err := scanner.Err(); err != nil {
 		return nil, stats, fmt.Errorf("read input: %w", err)
 	}
-	return records, stats, nil
+	return latestMessageRecords(records), stats, nil
 }
 
 func writeCompactRecords(outputPath, inputPath string, records []MessageRecord) error {

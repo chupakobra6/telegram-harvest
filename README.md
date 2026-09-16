@@ -202,7 +202,7 @@ bin/telegram-harvest --profile main daily-catchup --from 2026-06-03
 | --- | ---: | --- |
 | RPC spacing (`main` и `study`) | 500 ms | Единый статический code-owned floor: три 103-RPC прогона прошли без FloodWait, тогда как 400 ms и повторный 450 ms упёрлись в накопительный лимит. |
 | History batch size | 100 | Кодовый cap для одного Telegram history request. |
-| Default history limit | 100 | Обычный `dump`/incremental `sync` читает один batch; полный backfill делается через `--all`. |
+| Preview history limit | 100 | Только обычный `dump`; `complete=false` означает ограниченную выборку. `dump --all` и `sync` читают весь заданный диапазон. |
 
 `FLOOD_WAIT` обрабатывается внутри MTProto слоя: инструмент записывает flood event, ждёт Telegram delay, сдвигает следующий RPC слот и ретраит ограниченное число раз.
 
