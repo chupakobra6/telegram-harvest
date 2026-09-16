@@ -2,7 +2,6 @@ package mtproto
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/session/tdesktop"
 	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -200,7 +198,7 @@ func (c *Client) LoginFromDesktop(ctx context.Context, tdataPath string, userID 
 			if !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
 				return fmt.Errorf("complete independent login: %w", err)
 			}
-			if err := completeDesktop2FA(freshCtx, promptPassword, func(ctx context.Context, password string) error {
+			if err := completeTwoFactor(freshCtx, promptPassword, func(ctx context.Context, password string) error {
 				_, err := fresh.Auth().Password(ctx, password)
 				return err
 			}); err != nil {
@@ -224,30 +222,6 @@ func (c *Client) LoginFromDesktop(ctx context.Context, tdataPath string, userID 
 	}
 	if err := os.Rename(newSessionPath, c.cfg.SessionPath); err != nil {
 		return fmt.Errorf("publish independent Harvest session: %w", err)
-	}
-	return nil
-}
-
-func completeDesktop2FA(ctx context.Context, promptPassword func() (string, error), checkPassword func(context.Context, string) error) error {
-	if promptPassword == nil {
-		return fmt.Errorf("telegram 2FA password is required to complete independent login")
-	}
-	const maxAttempts = 3
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		password, err := promptPassword()
-		if err != nil {
-			return fmt.Errorf("read Telegram 2FA password: %w", err)
-		}
-		if err := checkPassword(ctx, password); err != nil {
-			if !errors.Is(err, auth.ErrPasswordInvalid) {
-				return fmt.Errorf("complete independent login with 2FA: %w", err)
-			}
-			if attempt == maxAttempts {
-				return fmt.Errorf("telegram rejected the 2FA password after %d attempts: %w", maxAttempts, err)
-			}
-			continue
-		}
-		return nil
 	}
 	return nil
 }

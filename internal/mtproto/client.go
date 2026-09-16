@@ -186,12 +186,21 @@ func (c *Client) Login(ctx context.Context, in *os.File, out *os.File) error {
 			password := strings.TrimSpace(c.cfg.Password)
 			if password == "" {
 				_, _ = fmt.Fprintln(out, "two-factor authentication is enabled")
-				password, err = promptLine(out, reader, "password: ")
+				attempts := 0
+				err = completeTwoFactor(runCtx, func() (string, error) {
+					if attempts > 0 {
+						_, _ = fmt.Fprintln(out, "Telegram rejected that password. Check the keyboard layout and try again.")
+					}
+					attempts++
+					return promptSecret(out, in, "password: ")
+				}, func(ctx context.Context, password string) error {
+					_, err := client.Auth().Password(ctx, password)
+					return err
+				})
 				if err != nil {
-					return fmt.Errorf("read password: %w", err)
+					return fmt.Errorf("sign in with password: %w", err)
 				}
-			}
-			if _, err := client.Auth().Password(runCtx, password); err != nil {
+			} else if _, err := client.Auth().Password(runCtx, password); err != nil {
 				return fmt.Errorf("sign in with password: %w", err)
 			}
 		}
