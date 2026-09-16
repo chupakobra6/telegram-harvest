@@ -116,8 +116,6 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"send-saved --text",
 		"send-saved --from-chat",
 		"account add --name work",
-		"account desktop-list",
-		"login-desktop --desktop-user-id",
 		"account-sync  # registered accounts",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
@@ -127,6 +125,9 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("help missing %q:\n%s", want, stdout)
 		}
+	}
+	if strings.Contains(stdout, "desktop-list") || strings.Contains(stdout, "login-desktop") || strings.Contains(stdout, "tdata") {
+		t.Fatalf("help exposes removed Desktop login path:\n%s", stdout)
 	}
 	if strings.Contains(stdout, "import-tdesktop") {
 		t.Fatalf("help must not expose Telegram Desktop import:\n%s", stdout)
@@ -226,13 +227,20 @@ func TestRunCommandHelpExitsSuccessfully(t *testing.T) {
 	}
 }
 
-func TestRunRejectsTelegramDesktopImportCommand(t *testing.T) {
-	code, _, stderr := runCommand(t, []string{"import-tdesktop"}, nil)
-	if code != 2 {
-		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	if !strings.Contains(stderr, "unknown command: import-tdesktop") {
-		t.Fatalf("missing unknown command error: %s", stderr)
+func TestRunRejectsDesktopSessionCommands(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"import-tdesktop"}, 2, "unknown command: import-tdesktop"},
+		{[]string{"--profile", "work", "login-desktop"}, 2, "unknown command: login-desktop"},
+		{[]string{"account", "desktop-list"}, 1, "unknown account command \"desktop-list\""},
+	} {
+		code, _, stderr := runCommand(t, tc.args, nil)
+		if code != tc.code || !strings.Contains(stderr, tc.want) {
+			t.Fatalf("args=%v code=%d stderr=%s", tc.args, code, stderr)
+		}
 	}
 }
 
@@ -292,29 +300,6 @@ func TestRunRegisterListAndRequireLoginBeforeAccountSync(t *testing.T) {
 	code, _, stderr = runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, env)
 	if code != 1 || !strings.Contains(stderr, "already exists") {
 		t.Fatalf("duplicate add code=%d stderr=%s", code, stderr)
-	}
-}
-
-func TestDesktopLoginRequiresExplicitAccountChoiceAndRejectsWrongBinding(t *testing.T) {
-	home := t.TempDir()
-	env := map[string]string{"HOME": home, "TG_HARVEST_STUDY_APP_ID": "42"}
-	if code, _, stderr := runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, env); code != 0 {
-		t.Fatalf("account add code=%d stderr=%s", code, stderr)
-	}
-	code, _, stderr := runCommand(t, []string{"--profile", "work", "login-desktop"}, env)
-	if code != 1 || !strings.Contains(stderr, "--desktop-user-id is required") {
-		t.Fatalf("missing account choice code=%d stderr=%s", code, stderr)
-	}
-	if err := config.BindAccountID("work", 77); err != nil {
-		t.Fatal(err)
-	}
-	code, _, stderr = runCommand(t, []string{"--profile", "work", "login-desktop", "--desktop-user-id", "88"}, env)
-	if code != 1 || !strings.Contains(stderr, "bound to Telegram ID 77") {
-		t.Fatalf("wrong account code=%d stderr=%s", code, stderr)
-	}
-	code, _, stderr = runCommand(t, []string{"account", "desktop-list", "--tdata", filepath.Join(home, "missing")}, env)
-	if code != 1 || !strings.Contains(stderr, "read Telegram Desktop tdata") {
-		t.Fatalf("missing tdata code=%d stderr=%s", code, stderr)
 	}
 }
 
