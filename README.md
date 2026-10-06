@@ -367,6 +367,48 @@ make dump PROFILE=main CHAT=1234567890 \
 
 `FROM` включается, `TO` не включается. Транскрибация у `dump` требует явного `TRANSCRIBE=1` и доступна только профилю `main`; обычное поведение `study` не меняется.
 
+## Карьерные чаты: обновление по запросу
+
+По поручению Игоря от 06.10.2026 агент подкачивает эти источники по запросу «обнови/подкачай чаты» и перед поиском свежей карьерной информации. Отдельное разрешение на чтение и локальную синхронизацию не требуется. Выбирай нужный источник; при общем запросе обновляй обе Mafia и все зарегистрированные ОМ. Вступления и публикации Игорь выполняет вручную.
+
+| Источник | Профиль и охват | Состояние и вход в поиск |
+| --- | --- | --- |
+| GO MAFIA 2.0, `2651305316` | `main`, вся доступная история | `.state/daily/go-mafia.state.json`; `.state/daily/go-mafia-agent-view/README.md` |
+| ВУ МАФИЯ, `3713172942` | `main`, вся доступная история | `.state/daily/vu-mafia.state.json`; `.state/daily/vu-mafia-agent-view/README.md` |
+| ОМ, 27 зарегистрированных чатов | `study`, с 01.01.2026 по Москве | `.state/career-study/collection-plan.json`; `.state/career-study/agent-view/README.md` |
+
+Реестр ОМ — существующий приватный `collection-plan.json`: поля `sources[].id`, `name`, `title`. Перед проходом сверяй ID с соответствующим `<name>.state.json`; расхождение исправляй до записи. `boosty-bot` остаётся в объединённом поиске, но в обновление 27 ОМ не входит.
+
+Один источник Mafia обновляется без сброса. Подставь ID, имя потока и каталог из таблицы; `REFRESH_DATE` — московская дата семь дней назад:
+
+```bash
+cd '/Users/igor/projects/telegram-harvest'
+bin/telegram-harvest --profile main sync --chat CHAT_ID --name STREAM \
+  --refresh-from REFRESH_DATE
+bin/telegram-harvest --profile main agent-view \
+  --in /Users/igor/projects/telegram-harvest/.state/daily/STREAM.jsonl \
+  --out-dir /Users/igor/projects/telegram-harvest/.state/daily/STREAM-agent-view
+```
+
+Для ОМ читай реестр и последовательно вызывай этот `sync` для каждого выбранного источника. При общей подкачке проходят все 27; после успешного прохода представление пересобирается один раз:
+
+```bash
+TG_HARVEST_STUDY_STATE_DIR=/Users/igor/projects/telegram-harvest/.state/career-study \
+bin/telegram-harvest --profile study sync --chat CHAT_ID --name STREAM \
+  --refresh-from REFRESH_DATE \
+  --merged-out /Users/igor/projects/telegram-harvest/.state/career-study/messages.jsonl
+bin/telegram-harvest --profile study agent-view \
+  --in /Users/igor/projects/telegram-harvest/.state/career-study/messages.jsonl \
+  --out-dir /Users/igor/projects/telegram-harvest/.state/career-study/agent-view \
+  --since 2026-01-01
+```
+
+`sync` дочитывает все новые ID от сохранённой позиции, даже если прошлый запуск был раньше `REFRESH_DATE`; семь дней задают дополнительную сверку правок. Более старую нужную правку проверяй адресно, расширив дату. Историю и state при обычной подкачке не сбрасывай. Полный первый backfill нового потока требует `--all --reset`; незавершённый backfill продолжай с `--all`, без `--reset`.
+
+На ошибке прерви текущий проход, сохрани возобновляемые файлы и покажи неполный охват. Соблюдай FloodWait и блокировку сессии; не запускай конкурирующую историю одним профилем. Готовность подтверждают завершённый `sync` с `complete=true`, обновлённый `last_sync_at` и успешный `agent-view`. Проверь дату сборки, диапазон и поиск известного сообщения по теме. Медиа автоматически не скачиваются: архив содержит текст, темы, ссылки и метаданные вложений.
+
+Когда Игорь сообщает о новом чате ОМ, перечисли все доступные диалоги `study` с `--limit 10000`, сопоставь префикс `ОМ:` с реестром и добавь отсутствующие источники в приватный allowlist и план. Собери их с 01.01.2026 без сброса прежних потоков. Для нового Mafia-чата сперва подтверди доступ и числовой ID. Канонический карьерный маршрут — `obsidian/money/03_Работа/00_Поиск работы/Стратегия поиска работы.md`.
+
 ## Низкоуровневые кирпичи для агентов
 
 `dump` и `sync` получают lossless JSONL одного чата. `compact` и `agent-view` не являются пользовательскими catch-up командами: они преобразуют уже собранный JSONL, когда агенту нужно работать с большим учебным корпусом. Daily их не запускает, потому что `reports/daily/*.md` уже является его готовым компактным представлением.
