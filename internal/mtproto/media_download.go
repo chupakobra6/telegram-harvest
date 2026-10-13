@@ -100,7 +100,7 @@ func (s *Session) planRecordMediaDownloads(
 		record.Attachments[0].Size = doc.Size
 		record.Attachments[0].FileName = fileName
 		applyDocumentMetadata(&record.Attachments[0], doc)
-		s.planAttachmentDownload(record, 0, doc.AsInputDocumentFileLocation(), fileName, opts, pipeline, plan)
+		s.planAttachmentDownload(record, 0, doc.AsInputDocumentFileLocation(""), fileName, opts, pipeline, plan)
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
 			copyMsg := *msg

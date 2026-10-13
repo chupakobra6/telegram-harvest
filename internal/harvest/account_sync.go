@@ -25,6 +25,7 @@ type AccountSource interface {
 type AccountSyncOptions struct {
 	StateDir          string
 	ExpectedAccountID int64
+	RefreshFrom       time.Time
 	Progress          func(AccountSyncProgress)
 }
 
@@ -119,7 +120,7 @@ func runAccountSync(ctx context.Context, source AccountSource, opts AccountSyncO
 		}
 		entry := &state.Dialogs[i]
 		chatDir := filepath.Join(opts.StateDir, "chats", accountChatDirName(entry.Chat))
-		syncState, err := syncAccountChat(ctx, source, entry.Chat, chatDir)
+		syncState, err := syncAccountChat(ctx, source, entry.Chat, chatDir, opts.RefreshFrom)
 		entry.Records = syncState.Records
 		entry.LastID = syncState.LastID
 		if err != nil {
@@ -151,7 +152,7 @@ func runAccountSync(ctx context.Context, source AccountSource, opts AccountSyncO
 	return state, nil
 }
 
-func syncAccountChat(ctx context.Context, source HistorySource, chat Chat, chatDir string) (result SyncState, resultErr error) {
+func syncAccountChat(ctx context.Context, source HistorySource, chat Chat, chatDir string, refreshFrom time.Time) (result SyncState, resultErr error) {
 	chatKey := AccountChatKey(chat)
 	if err := os.MkdirAll(chatDir, 0o700); err != nil {
 		return SyncState{}, fmt.Errorf("prepare chat %d state: %w", chat.ID, err)
@@ -185,9 +186,13 @@ func syncAccountChat(ctx context.Context, source HistorySource, chat Chat, chatD
 			return syncState, err
 		}
 	}
+	history := HistoryOptions{All: full, BatchSize: DefaultAccountBatchSize}
+	if !full {
+		history.Start = refreshFrom
+	}
 	synced, err := runSync(ctx, source, SyncOptions{
 		Chat: chatKey, StreamPath: streamPath, StatePath: syncPath,
-		History: HistoryOptions{All: full, BatchSize: DefaultAccountBatchSize},
+		History: history,
 		Reset:   syncState.Backfill == nil,
 	})
 	if err != nil {

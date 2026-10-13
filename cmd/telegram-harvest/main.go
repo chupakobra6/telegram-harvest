@@ -885,11 +885,20 @@ func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, ou
 	}
 	fs := flag.NewFlagSet("account-sync", flag.ContinueOnError)
 	fs.SetOutput(out)
+	refreshFrom := fs.String("refresh-from", "", "reconcile edited or newly decoded messages from YYYY-MM-DD without resetting archives")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("account-sync accepts no positional arguments")
+	}
+	var refreshStart time.Time
+	if *refreshFrom != "" {
+		var err error
+		refreshStart, err = time.ParseInLocation("2006-01-02", *refreshFrom, time.FixedZone("Europe/Moscow", 3*60*60))
+		if err != nil {
+			return fmt.Errorf("--refresh-from: %w", err)
+		}
 	}
 	if cfg.BoundAccountID <= 0 {
 		return fmt.Errorf("account %q is not authorized; run `%s` first", cfg.AccountName, cfg.LoginCommand())
@@ -912,6 +921,7 @@ func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, ou
 			state, err := harvest.RunAccountSync(ctx, session, harvest.AccountSyncOptions{
 				StateDir:          stateDir,
 				ExpectedAccountID: cfg.BoundAccountID,
+				RefreshFrom:       refreshStart,
 				Progress: func(progress harvest.AccountSyncProgress) {
 					fmt.Fprintf(out, "chat_id=%d status=%s records=%d\n", progress.ChatID, progress.Status, progress.Records)
 				},

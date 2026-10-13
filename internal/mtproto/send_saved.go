@@ -425,7 +425,7 @@ func (s *Session) downloadSavedVideoSource(ctx context.Context, document *tg.Doc
 	}
 	videoPath := filepath.Join(tempDir, fileName)
 	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
-	err := s.downloadFile(downloadCtx, document.AsInputDocumentFileLocation(), videoPath, document.Size, nil)
+	err := s.downloadFile(downloadCtx, document.AsInputDocumentFileLocation(""), videoPath, document.Size, nil)
 	cancel()
 	if err != nil {
 		return "", "", "", fmt.Errorf("video: %w", err)

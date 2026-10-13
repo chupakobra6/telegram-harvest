@@ -347,13 +347,17 @@ func (s *Session) loadAllDialogsFolder(ctx context.Context, folderID int) ([]har
 			if _, isFolder := dialog.(*tg.DialogFolder); isFolder {
 				continue
 			}
-			chat, inputPeer, ok := chatFromPeer(dialog.GetPeer(), entities)
+			peerDialog, ok := dialog.(*tg.Dialog)
+			if !ok {
+				return nil, fmt.Errorf("folder %d contains an unsupported dialog %T", folderID, dialog)
+			}
+			chat, inputPeer, ok := chatFromPeer(peerDialog.GetPeer(), entities)
 			if !ok {
 				return nil, fmt.Errorf("folder %d contains an unresolved dialog", folderID)
 			}
 			chat.Pinned = dialog.GetPinned()
 			chat.UnreadCount = dialogUnreadCount(dialog)
-			chat.TopMessageID = dialog.GetTopMessage()
+			chat.TopMessageID = peerDialog.GetTopMessage()
 			if top := topMessageByID(modified.GetMessages(), chat.TopMessageID); top != nil {
 				chat.LastMessageAt = time.Unix(int64(messageDate(top)), 0).UTC()
 			}
@@ -569,6 +573,9 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 	msg, ok := msgClass.(*tg.Message)
 	if !ok {
 		return DownloadMediaResult{}, fmt.Errorf("message %d is not downloadable", messageID)
+	}
+	if err := s.prepareRichMessage(ctx, target, msg); err != nil {
+		return DownloadMediaResult{}, err
 	}
 	record, ok := normalizeRecord(msg, target.Chat, entities)
 	if !ok {
@@ -1045,17 +1052,20 @@ func (s *Session) dumpHistoryStreaming(
 			if historyMessageBeforeStart(msgClass, opts) {
 				reachedStart = true
 			}
+			if opts.MinID > 0 && messageID(msgClass) <= opts.MinID {
+				continue
+			}
+			if !historyRecordInTimeRange(harvest.MessageRecord{Date: time.Unix(int64(messageDate(msgClass)), 0).UTC()}, opts) {
+				continue
+			}
+			if err := s.prepareRichMessage(ctx, target, msgClass); err != nil {
+				return harvest.Chat{}, stats, err
+			}
 			record, ok := normalizeRecord(msgClass, target.Chat, entities)
 			if !ok {
 				continue
 			}
 			annotateRecordTopic(&record, opts, topicByID)
-			if opts.MinID > 0 && record.MessageID <= opts.MinID {
-				continue
-			}
-			if !historyRecordInTimeRange(record, opts) {
-				continue
-			}
 			batchRecords = append(batchRecords, record)
 			batchMessages = append(batchMessages, msgClass)
 		}
@@ -1269,6 +1279,19 @@ func (s *Session) collectDailyHistory(
 			}
 			if messageAtOrBefore(msgClass, opts.Start) {
 				reachedStart = true
+			}
+			if msg, ok := msgClass.(*tg.Message); ok {
+				sender := senderFromPeer(msg.FromID, msg.Out, entities)
+				if !msg.Out && !sender.Self && !dailyAdditionalSenderAllowed(opts, target.Chat.ID, sender.ID) {
+					continue
+				}
+			}
+			at := time.Unix(int64(messageDate(msgClass)), 0).UTC()
+			if at.Before(opts.Start) || !at.Before(opts.End) {
+				continue
+			}
+			if err := s.prepareRichMessage(ctx, target, msgClass); err != nil {
+				return nil, stats, err
 			}
 			record, ok := s.normalizeOutgoingDayRecord(msgClass, target, entities, topicByID, opts)
 			if !ok {
@@ -1574,13 +1597,20 @@ func (s *Session) loadDialogs(ctx context.Context, limit int) ([]harvest.Chat, e
 		}
 		entities := dialogEntities(result)
 		for _, dialog := range modified.GetDialogs() {
-			chat, inputPeer, ok := chatFromPeer(dialog.GetPeer(), entities)
+			if _, isFolder := dialog.(*tg.DialogFolder); isFolder {
+				continue
+			}
+			peerDialog, ok := dialog.(*tg.Dialog)
+			if !ok {
+				return nil, fmt.Errorf("unsupported dialog %T", dialog)
+			}
+			chat, inputPeer, ok := chatFromPeer(peerDialog.GetPeer(), entities)
 			if !ok {
 				continue
 			}
 			chat.Pinned = dialog.GetPinned()
 			chat.UnreadCount = dialogUnreadCount(dialog)
-			chat.TopMessageID = dialog.GetTopMessage()
+			chat.TopMessageID = peerDialog.GetTopMessage()
 			if top := topMessageByID(modified.GetMessages(), chat.TopMessageID); top != nil {
 				chat.LastMessageAt = time.Unix(int64(messageDate(top)), 0).UTC()
 			}
@@ -2157,6 +2187,19 @@ func annotateRecordTopic(record *harvest.MessageRecord, opts harvest.HistoryOpti
 func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.Entities) (harvest.MessageRecord, bool) {
 	switch msg := msgClass.(type) {
 	case *tg.Message:
+		body := strings.TrimSpace(msg.Message)
+		links := mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media))
+		if rich, present := msg.GetRichMessage(); present {
+			text, richLinks, err := richMessageContent(rich)
+			if err != nil {
+				return harvest.MessageRecord{}, false
+			}
+			if body != "" && !strings.Contains(text, body) {
+				text = body + "\n\n" + text
+			}
+			body = strings.TrimSpace(text)
+			links = mergeLinks(links, richLinks)
+		}
 		record := harvest.MessageRecord{
 			Source:      "telegram",
 			SourceURL:   messageURL(chat, msg.ID),
@@ -2166,10 +2209,10 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			Sender:      senderFromPeer(msg.FromID, msg.Out, entities),
 			Outgoing:    msg.Out,
 			Kind:        messageKind(msg.Media),
-			Text:        strings.TrimSpace(msg.Message),
+			Text:        body,
 			Pinned:      msg.Pinned,
 			Views:       msg.Views,
-			Links:       mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media)),
+			Links:       links,
 			Attachments: extractAttachments(msg.Media),
 		}
 		if fwd, ok := msg.GetFwdFrom(); ok {
@@ -2452,7 +2495,7 @@ func downloadableMedia(media tg.MessageMediaClass, messageID int) (harvest.Attac
 			FileName: fileName,
 		}
 		applyDocumentMetadata(&attachment, doc)
-		return attachment, doc.AsInputDocumentFileLocation(), fileName, true
+		return attachment, doc.AsInputDocumentFileLocation(""), fileName, true
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
 			return downloadableMedia(attached, messageID)

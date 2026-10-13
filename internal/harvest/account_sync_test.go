@@ -19,6 +19,36 @@ type pagedAccountSource struct {
 	pages pagedIncrementalSource
 }
 
+func TestAccountRefreshRepairsDecodedTextWithoutLosingHistoryOrDuplicatingRevision(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "archive")
+	chat := Chat{ID: 42, Type: "user"}
+	source := &fakeAccountSource{profile: SelfProfile{ID: 77}, chats: []Chat{chat}, options: make(map[string][]HistoryOptions), records: map[string][]MessageRecord{
+		"user:42": {{Chat: chat, MessageID: 1, Date: time.Unix(10, 0), Kind: "unsupported_media"}, {Chat: chat, MessageID: 2, Date: time.Unix(20, 0), Kind: "text", Text: "unchanged"}},
+	}}
+	opts := AccountSyncOptions{StateDir: dir, ExpectedAccountID: 77}
+	if _, err := RunAccountSync(context.Background(), source, opts); err != nil {
+		t.Fatal(err)
+	}
+	source.records["user:42"][0].Kind = "text"
+	source.records["user:42"][0].Text = "Recovered recruiter message"
+	opts.RefreshFrom = time.Unix(1, 0)
+	state, err := RunAccountSync(context.Background(), source, opts)
+	if err != nil || !state.Complete || state.Dialogs[0].LastID != 2 {
+		t.Fatal(state, err)
+	}
+	stream := filepath.Join(dir, "chats", "user-42", "messages.jsonl")
+	rows := readAccountRecords(t, stream)
+	if len(rows) != 3 || rows[0].Kind != "unsupported_media" || !rows[2].Revision || rows[2].Text != "Recovered recruiter message" {
+		t.Fatalf("repair lost source history: %+v", rows)
+	}
+	if _, err := RunAccountSync(context.Background(), source, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(readAccountRecords(t, stream)) != 3 {
+		t.Fatal("same revision duplicated")
+	}
+}
+
 func (s *pagedAccountSource) DumpHistory(ctx context.Context, chat string, opts HistoryOptions, emit func(MessageRecord) error) (Chat, HistoryStats, error) {
 	if opts.MinID == 0 {
 		return s.fakeAccountSource.DumpHistory(ctx, chat, opts, emit)

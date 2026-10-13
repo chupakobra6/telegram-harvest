@@ -37,7 +37,7 @@ help:
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
 	@printf "  make sync PROFILE=study # exhaustive incremental; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
-	@printf "  make account-sync PROFILE=<account-name> # full account history after login\\n"
+	@printf "  make account-sync PROFILE=<account-name> # full account history after login; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
 	@printf "  make download-media PROFILE=study # manual uncapped media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make compact PROFILE=study # low-level: compact an existing JSONL for agents\\n"
 	@printf "  make agent-view PROFILE=study # low-level: build Markdown navigation from JSONL\\n"
@@ -138,7 +138,7 @@ sync:
 
 account-sync:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) account-sync
+	$(CLI) $(PROFILE_ARG) account-sync $(if $(strip $(REFRESH_FROM)),--refresh-from "$(REFRESH_FROM)",)
 
 download-media:
 	$(REQUIRE_PROFILE)
