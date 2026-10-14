@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 )
@@ -27,11 +28,45 @@ func TestNormalizeRichRecruiterMessagePreservesParagraphsListsAndLinks(t *testin
 	}
 }
 
+func TestRichMessageMediaPreservesCaptionsMetadataAndDownloadIndexes(t *testing.T) {
+	document := func(id int64) *tg.Document {
+		return &tg.Document{ID: id, MimeType: "application/pdf", Size: 7, Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "notes.pdf"}}}
+	}
+	ordinary := &tg.MessageMediaDocument{}
+	ordinary.SetDocument(document(100))
+	msg := &tg.Message{ID: 17, Date: 1700000000, Media: ordinary, Message: "Обычный текст"}
+	msg.SetRichMessage(tg.RichMessage{Photos: []tg.PhotoClass{&tg.Photo{ID: 200, Date: 1700000000, Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{Type: "y", W: 640, H: 480, Size: 9}}}}, Documents: []tg.DocumentClass{document(300)}, Blocks: []tg.PageBlockClass{
+		&tg.PageBlockCover{Cover: &tg.PageBlockPhoto{PhotoID: 200, Caption: tg.PageCaption{Text: &tg.TextPlain{Text: "Схема"}, Credit: &tg.TextPlain{Text: "Автор"}}}},
+		&tg.PageBlockDocument{DocumentID: 300, Caption: tg.PageCaption{Text: &tg.TextURL{Text: &tg.TextPlain{Text: "Материалы"}, URL: "https://example.org/materials"}}},
+	}})
+	record, ok := normalizeRecord(msg, harvest.Chat{ID: 42, Type: "group"}, peer.Entities{})
+	if !ok || record.Text != "Обычный текст\n\nСхема\nАвтор\n\nМатериалы" || len(record.Attachments) != 3 || len(record.Links) != 1 {
+		t.Fatalf("rich content lost: %+v", record)
+	}
+	if record.Attachments[0].MediaID != "document:100" || record.Attachments[1].MediaID != "photo:200:y" || record.Attachments[1].Size != 9 || record.Attachments[2].MediaID != "document:300" || record.Attachments[2].FileName != "notes.pdf" {
+		t.Fatalf("rich metadata lost: %+v", record.Attachments)
+	}
+	session := &Session{client: &telegram.Client{}}
+	plan := newMediaDownloadPlan()
+	session.planRecordMediaDownloads(msg, &record, harvest.HistoryOptions{DownloadMedia: true, MediaDir: t.TempDir()}, nil, plan)
+	if len(plan.tasks) != 3 {
+		t.Fatalf("download plan has %d tasks, want 3", len(plan.tasks))
+	}
+	paths := map[string]bool{}
+	for _, attachment := range record.Attachments {
+		if attachment.DownloadError != "" || attachment.LocalPath == "" || paths[attachment.LocalPath] {
+			t.Fatalf("attachment index collision or missing download: %+v", record.Attachments)
+		}
+		paths[attachment.LocalPath] = true
+	}
+}
+
 func TestRichMessageCannotSilentlyDropPartialOrUnsupportedContent(t *testing.T) {
 	for _, rich := range []tg.RichMessage{
 		{Part: true},
 		{Blocks: []tg.PageBlockClass{&tg.PageBlockUnsupported{}}},
-		{Documents: []tg.DocumentClass{&tg.Document{ID: 123}}},
+		{Documents: []tg.DocumentClass{&tg.DocumentEmpty{ID: 123}}},
+		{Blocks: []tg.PageBlockClass{&tg.PageBlockDocument{DocumentID: 123}}},
 	} {
 		msg := &tg.Message{ID: 1}
 		msg.SetRichMessage(rich)
@@ -41,5 +76,12 @@ func TestRichMessageCannotSilentlyDropPartialOrUnsupportedContent(t *testing.T) 
 		if _, ok := normalizeRecord(msg, harvest.Chat{}, peer.Entities{}); ok {
 			t.Fatal("empty record would conceal incomplete content")
 		}
+	}
+}
+
+func TestRichMediaIDsRemainOpaqueSignedValues(t *testing.T) {
+	media, err := richMessageMedia(tg.RichMessage{Documents: []tg.DocumentClass{&tg.Document{ID: -123}}})
+	if err != nil || len(media) != 1 {
+		t.Fatalf("signed media ID was rejected: %v, %v", media, err)
 	}
 }

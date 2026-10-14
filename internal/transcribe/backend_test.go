@@ -146,6 +146,9 @@ func TestProductionWhisperProfileUsesOneAdaptivePolicy(t *testing.T) {
 		descriptor.Adaptive.RussianInitialPrompt != longFormRussianInitialPrompt ||
 		descriptor.Adaptive.CarryInitialPrompt ||
 		descriptor.Adaptive.TrailingCoverageToleranceSeconds != longFormCoverageToleranceSeconds ||
+		descriptor.Adaptive.TrailingRecoveryPolicy != "replace-terminal-segments-once-v1" ||
+		descriptor.Adaptive.TrailingRecoveryMaxSeconds != longFormTailRecoveryMaxSeconds ||
+		descriptor.Adaptive.TrailingRecoveryContextSeconds != longFormTailRecoveryContextSeconds ||
 		descriptor.Adaptive.ShortDecodeStrategy != whisperShortFormStrategy ||
 		descriptor.Adaptive.LongDecodeStrategy != whisperLongFormStrategy ||
 		descriptor.Adaptive.RepetitionPolicy != whisperRepetitionPolicy ||

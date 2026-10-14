@@ -15,27 +15,29 @@ import (
 )
 
 const (
-	BackendWhisperCPP                = "whispercpp"
-	AcceleratorMetal                 = "metal"
-	ProductionLanguage               = "auto"
-	ProductionThreads                = 4
-	ProductionModelFile              = "ggml-large-v3-turbo-q5_0.bin"
-	ProductionSpeechGateFile         = "ggml-silero-v6.2.0.bin"
-	whisperShortFormStrategy         = "auto-language-no-timestamps-v2"
-	whisperLongFormStrategy          = "native-timestamped-v3"
-	whisperAdaptiveRoutingPolicy     = "duration-or-leading-silence-v1"
-	whisperAdaptiveLanguagePolicy    = "auto-short-detect-russian-punctuation-long-v2"
-	whisperRepetitionPolicy          = "collapse-exact-token-cycle-v2"
-	adaptiveLongMediaSeconds         = 180
-	adaptiveLeadingSilenceSeconds    = 10
-	adaptiveRepetitionMinRepeats     = 5
-	adaptiveRepetitionMinSpanTokens  = 20
-	adaptiveRepetitionMaxBlockTokens = 32
-	longFormLanguageProbeSeconds     = 15
-	longFormRussianInitialPrompt     = "Да. Нет? Хорошо! Пожалуйста, продолжайте."
-	longFormCoverageToleranceSeconds = 2.0
-	StrategyShortMessage             = whisperShortFormStrategy
-	StrategyLongForm                 = whisperLongFormStrategy
+	BackendWhisperCPP                  = "whispercpp"
+	AcceleratorMetal                   = "metal"
+	ProductionLanguage                 = "auto"
+	ProductionThreads                  = 4
+	ProductionModelFile                = "ggml-large-v3-turbo-q5_0.bin"
+	ProductionSpeechGateFile           = "ggml-silero-v6.2.0.bin"
+	whisperShortFormStrategy           = "auto-language-no-timestamps-v2"
+	whisperLongFormStrategy            = "native-timestamped-tail-recovery-v4"
+	whisperAdaptiveRoutingPolicy       = "duration-or-leading-silence-v1"
+	whisperAdaptiveLanguagePolicy      = "auto-short-detect-russian-punctuation-long-v2"
+	whisperRepetitionPolicy            = "collapse-exact-token-cycle-v2"
+	adaptiveLongMediaSeconds           = 180
+	adaptiveLeadingSilenceSeconds      = 10
+	adaptiveRepetitionMinRepeats       = 5
+	adaptiveRepetitionMinSpanTokens    = 20
+	adaptiveRepetitionMaxBlockTokens   = 32
+	longFormLanguageProbeSeconds       = 15
+	longFormRussianInitialPrompt       = "Да. Нет? Хорошо! Пожалуйста, продолжайте."
+	longFormCoverageToleranceSeconds   = 2.0
+	longFormTailRecoveryMaxSeconds     = 45.0
+	longFormTailRecoveryContextSeconds = 20.0
+	StrategyShortMessage               = whisperShortFormStrategy
+	StrategyLongForm                   = whisperLongFormStrategy
 )
 
 // Descriptor is the stable identity of the production ASR implementation.
@@ -132,6 +134,9 @@ type WhisperAdaptiveDescriptor struct {
 	RussianInitialPrompt             string  `json:"russian_initial_prompt"`
 	CarryInitialPrompt               bool    `json:"carry_initial_prompt"`
 	TrailingCoverageToleranceSeconds float64 `json:"trailing_coverage_tolerance_seconds"`
+	TrailingRecoveryPolicy           string  `json:"trailing_recovery_policy"`
+	TrailingRecoveryMaxSeconds       float64 `json:"trailing_recovery_max_seconds"`
+	TrailingRecoveryContextSeconds   float64 `json:"trailing_recovery_context_seconds"`
 	ShortDecodeStrategy              string  `json:"short_decode_strategy"`
 	LongDecodeStrategy               string  `json:"long_decode_strategy"`
 	RepetitionPolicy                 string  `json:"repetition_policy"`
@@ -144,33 +149,36 @@ type WhisperAdaptiveDescriptor struct {
 // long-form invariants (timestamps, tail coverage, extreme exact loops) reject
 // a result; probability fields remain benchmark signals.
 type Diagnostics struct {
-	Segments                         int      `json:"segments"`
-	MeanAverageLogProb               float64  `json:"mean_average_log_probability,omitempty"`
-	MinimumAverageLogProb            float64  `json:"minimum_average_log_probability,omitempty"`
-	MeanNoSpeechProb                 float64  `json:"mean_no_speech_probability,omitempty"`
-	MaximumNoSpeechProb              float64  `json:"maximum_no_speech_probability,omitempty"`
-	SpeechGatePassed                 *bool    `json:"speech_gate_passed,omitempty"`
-	LeadingSpeechOffsetSeconds       float64  `json:"leading_speech_offset_seconds,omitempty"`
-	TimestampedSegments              bool     `json:"timestamped_segments,omitempty"`
-	DecodedAudioDurationSeconds      float64  `json:"decoded_audio_duration_seconds,omitempty"`
-	FirstSegmentStartSeconds         float64  `json:"first_segment_start_seconds,omitempty"`
-	LastSegmentEndSeconds            float64  `json:"last_segment_end_seconds,omitempty"`
-	LastDetectedSpeechEndSeconds     float64  `json:"last_detected_speech_end_seconds,omitempty"`
-	TrailingSpeechCoverageGapSeconds float64  `json:"trailing_speech_coverage_gap_seconds"`
-	TrailingCoverageToleranceSeconds float64  `json:"trailing_coverage_tolerance_seconds,omitempty"`
-	CoverageValidated                bool     `json:"coverage_validated,omitempty"`
-	DetectedLanguage                 string   `json:"detected_language,omitempty"`
-	LanguageDetectionSeconds         float64  `json:"language_detection_seconds,omitempty"`
-	InitialPromptApplied             bool     `json:"initial_prompt_applied"`
-	Strategy                         string   `json:"strategy,omitempty"`
-	RouteReason                      string   `json:"route_reason,omitempty"`
-	SourceAudioDurationSeconds       float64  `json:"source_audio_duration_seconds,omitempty"`
-	RepetitionValidated              bool     `json:"repetition_validated,omitempty"`
-	ExtremeRepetitionDetected        bool     `json:"extreme_repetition_detected,omitempty"`
-	MaximumRepeatedTokenBlock        int      `json:"maximum_repeated_token_block,omitempty"`
-	MaximumTokenBlockRepetitions     int      `json:"maximum_token_block_repetitions,omitempty"`
-	MaximumRepeatedTokenSpan         int      `json:"maximum_repeated_token_span,omitempty"`
-	RemovedTerminalHallucinations    []string `json:"removed_terminal_hallucinations,omitempty"`
+	Segments                          int      `json:"segments"`
+	MeanAverageLogProb                float64  `json:"mean_average_log_probability,omitempty"`
+	MinimumAverageLogProb             float64  `json:"minimum_average_log_probability,omitempty"`
+	MeanNoSpeechProb                  float64  `json:"mean_no_speech_probability,omitempty"`
+	MaximumNoSpeechProb               float64  `json:"maximum_no_speech_probability,omitempty"`
+	SpeechGatePassed                  *bool    `json:"speech_gate_passed,omitempty"`
+	LeadingSpeechOffsetSeconds        float64  `json:"leading_speech_offset_seconds,omitempty"`
+	TimestampedSegments               bool     `json:"timestamped_segments,omitempty"`
+	DecodedAudioDurationSeconds       float64  `json:"decoded_audio_duration_seconds,omitempty"`
+	FirstSegmentStartSeconds          float64  `json:"first_segment_start_seconds,omitempty"`
+	LastSegmentEndSeconds             float64  `json:"last_segment_end_seconds,omitempty"`
+	LastDetectedSpeechEndSeconds      float64  `json:"last_detected_speech_end_seconds,omitempty"`
+	TrailingSpeechCoverageGapSeconds  float64  `json:"trailing_speech_coverage_gap_seconds"`
+	TrailingCoverageToleranceSeconds  float64  `json:"trailing_coverage_tolerance_seconds,omitempty"`
+	CoverageValidated                 bool     `json:"coverage_validated,omitempty"`
+	TailRecoveryApplied               bool     `json:"tail_recovery_applied,omitempty"`
+	TailRecoveryOffsetSeconds         float64  `json:"tail_recovery_offset_seconds,omitempty"`
+	InitialTrailingCoverageGapSeconds float64  `json:"initial_trailing_coverage_gap_seconds,omitempty"`
+	DetectedLanguage                  string   `json:"detected_language,omitempty"`
+	LanguageDetectionSeconds          float64  `json:"language_detection_seconds,omitempty"`
+	InitialPromptApplied              bool     `json:"initial_prompt_applied"`
+	Strategy                          string   `json:"strategy,omitempty"`
+	RouteReason                       string   `json:"route_reason,omitempty"`
+	SourceAudioDurationSeconds        float64  `json:"source_audio_duration_seconds,omitempty"`
+	RepetitionValidated               bool     `json:"repetition_validated,omitempty"`
+	ExtremeRepetitionDetected         bool     `json:"extreme_repetition_detected,omitempty"`
+	MaximumRepeatedTokenBlock         int      `json:"maximum_repeated_token_block,omitempty"`
+	MaximumTokenBlockRepetitions      int      `json:"maximum_token_block_repetitions,omitempty"`
+	MaximumRepeatedTokenSpan          int      `json:"maximum_repeated_token_span,omitempty"`
+	RemovedTerminalHallucinations     []string `json:"removed_terminal_hallucinations,omitempty"`
 }
 
 // ProductionOptions is the only ASR profile used by product commands. Paths
@@ -424,6 +432,9 @@ func (o WhisperAdaptiveOptions) normalized() WhisperAdaptiveDescriptor {
 		RussianInitialPrompt:             strings.TrimSpace(o.RussianInitialPrompt),
 		CarryInitialPrompt:               o.CarryInitialPrompt,
 		TrailingCoverageToleranceSeconds: positiveFloatOr(o.TrailingCoverageToleranceSeconds, longFormCoverageToleranceSeconds),
+		TrailingRecoveryPolicy:           "replace-terminal-segments-once-v1",
+		TrailingRecoveryMaxSeconds:       longFormTailRecoveryMaxSeconds,
+		TrailingRecoveryContextSeconds:   longFormTailRecoveryContextSeconds,
 		ShortDecodeStrategy:              whisperShortFormStrategy,
 		LongDecodeStrategy:               whisperLongFormStrategy,
 		RepetitionPolicy:                 whisperRepetitionPolicy,

@@ -62,6 +62,7 @@ type whisperResponse struct {
 }
 
 type whisperSegment struct {
+	Text                  string   `json:"text,omitempty"`
 	Start                 *float64 `json:"start,omitempty"`
 	End                   *float64 `json:"end,omitempty"`
 	AverageLogProbability float64  `json:"avg_logprob"`
@@ -269,6 +270,16 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 		return "", nil, err
 	}
 	coverageGap, err := validateTimestampedLongFormResponse(decoded, duration, lastDetectedSpeechEnd, settings.TrailingCoverageToleranceSeconds)
+	initialCoverageGap := coverageGap
+	var recoveryOffset float64
+	recovered := false
+	if err != nil && coverageGap > settings.TrailingCoverageToleranceSeconds {
+		decoded, recoveryOffset, err = r.recoverLongFormTailLocked(ctx, wavPath, decoded, lastDetectedSpeechEnd, decodeRequest, settings)
+		if err == nil {
+			coverageGap, err = validateTimestampedLongFormResponse(decoded, duration, lastDetectedSpeechEnd, settings.TrailingCoverageToleranceSeconds)
+			recovered = err == nil
+		}
+	}
 	if err != nil {
 		return "", nil, err
 	}
@@ -281,6 +292,11 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	diagnostics.TrailingSpeechCoverageGapSeconds = coverageGap
 	diagnostics.TrailingCoverageToleranceSeconds = settings.TrailingCoverageToleranceSeconds
 	diagnostics.CoverageValidated = true
+	diagnostics.TailRecoveryApplied = recovered
+	if recovered {
+		diagnostics.TailRecoveryOffsetSeconds = recoveryOffset
+		diagnostics.InitialTrailingCoverageGapSeconds = initialCoverageGap
+	}
 	diagnostics.DetectedLanguage = strings.ToLower(strings.TrimSpace(detected.Language))
 	diagnostics.LanguageDetectionSeconds = languageDetectionDuration.Seconds()
 	diagnostics.InitialPromptApplied = decodeRequest.InitialPrompt != ""
@@ -296,6 +312,69 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 		return "", nil, fmt.Errorf("whisper.cpp long-form returned an extreme repetition loop: block=%d tokens repetitions=%d span=%d tokens", repetition.BlockTokens, repetition.Repetitions, repetition.SpanTokens)
 	}
 	return text, diagnostics, nil
+}
+
+// Retry only a bounded terminal interval on the already loaded model. Replace
+// complete terminal segments instead of appending overlapping text. Structural
+// failures never reach this path, and the retry must pass the same coverage gate.
+func (r *WhisperServerRunner) recoverLongFormTailLocked(ctx context.Context, wavPath string, decoded whisperResponse, lastSpeech float64, request whisperRequestOptions, settings WhisperAdaptiveDescriptor) (whisperResponse, float64, error) {
+	fail := func(err error) (whisperResponse, float64, error) {
+		return whisperResponse{}, 0, fmt.Errorf("whisper.cpp long-form tail recovery: %w", err)
+	}
+	replaceAt := len(decoded.Segments) - 1
+	lastEnd := boundedTerminalSegmentEnd(decoded)
+	for replaceAt > 0 && *decoded.Segments[replaceAt-1].Start >= lastEnd-settings.TrailingRecoveryContextSeconds {
+		replaceAt--
+	}
+	offset := *decoded.Segments[replaceAt].Start
+	end := math.Min(decoded.Duration, lastSpeech+1)
+	if end <= offset || end-offset > settings.TrailingRecoveryMaxSeconds {
+		return fail(fmt.Errorf("uncovered tail requires %.3fs, limit %.3fs", end-offset, settings.TrailingRecoveryMaxSeconds))
+	}
+	var originalText strings.Builder
+	var prefix strings.Builder
+	for i, segment := range decoded.Segments {
+		if strings.TrimSpace(segment.Text) == "" {
+			return fail(fmt.Errorf("segment %d has no text for safe replacement", i))
+		}
+		originalText.WriteString(segment.Text)
+		originalText.WriteByte('\n')
+		if i < replaceAt {
+			prefix.WriteString(segment.Text)
+			prefix.WriteByte('\n')
+		}
+	}
+	if strings.Join(strings.Fields(originalText.String()), " ") != strings.Join(strings.Fields(decoded.Text), " ") {
+		return fail(fmt.Errorf("segment text does not match the full transcript"))
+	}
+	tailPath, cleanup, err := temporaryWAV(filepath.Dir(wavPath), ".asr-tail-recovery-*.wav")
+	if err != nil {
+		return fail(err)
+	}
+	defer cleanup()
+	if err := extractASRWAVRange(ctx, r.opts, wavPath, tailPath, offset, end-offset); err != nil {
+		return fail(err)
+	}
+	request.InitialPrompt = ""
+	request.CarryInitialPrompt = false
+	tail, err := r.inferRequestLocked(ctx, tailPath, request)
+	if err != nil {
+		return fail(err)
+	}
+	tailDuration := wavPCM16MonoDuration(fileSize(tailPath))
+	if _, err := validateTimestampedLongFormResponse(tail, tailDuration, lastSpeech-offset, settings.TrailingCoverageToleranceSeconds); err != nil {
+		return fail(err)
+	}
+	for i := range tail.Segments {
+		segment := &tail.Segments[i]
+		start := offset + *segment.Start
+		end := offset + math.Min(*segment.End, tail.Duration)
+		segment.Start = &start
+		segment.End = &end
+	}
+	decoded.Text = prefix.String() + strings.TrimSpace(tail.Text)
+	decoded.Segments = append(decoded.Segments[:replaceAt:replaceAt], tail.Segments...)
+	return decoded, offset, nil
 }
 
 func prepareLanguageProbeWAV(ctx context.Context, opts Options, wavPath string, maxSeconds int) (string, func(), error) {

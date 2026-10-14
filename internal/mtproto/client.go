@@ -2188,6 +2188,7 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 	switch msg := msgClass.(type) {
 	case *tg.Message:
 		body := strings.TrimSpace(msg.Message)
+		attachments := extractAttachments(msg.Media)
 		links := mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media))
 		if rich, present := msg.GetRichMessage(); present {
 			text, richLinks, err := richMessageContent(rich)
@@ -2199,6 +2200,13 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			}
 			body = strings.TrimSpace(text)
 			links = mergeLinks(links, richLinks)
+			media, err := richMessageMedia(rich)
+			if err != nil {
+				return harvest.MessageRecord{}, false
+			}
+			for _, item := range media {
+				attachments = append(attachments, extractAttachments(item)...)
+			}
 		}
 		record := harvest.MessageRecord{
 			Source:      "telegram",
@@ -2213,7 +2221,7 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			Pinned:      msg.Pinned,
 			Views:       msg.Views,
 			Links:       links,
-			Attachments: extractAttachments(msg.Media),
+			Attachments: attachments,
 		}
 		if fwd, ok := msg.GetFwdFrom(); ok {
 			// Forward metadata is independent from the date of a later edit.
@@ -2376,7 +2384,12 @@ func messageKind(media tg.MessageMediaClass) string {
 func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 	switch typed := media.(type) {
 	case *tg.MessageMediaPhoto:
-		return []harvest.Attachment{{Kind: "photo"}}
+		attachment := harvest.Attachment{Kind: "photo"}
+		if _, fileName, mediaID, size, ok := photoDownload(typed); ok {
+			attachment.MIMEType, attachment.FileName = "image/jpeg", fileName
+			attachment.MediaID, attachment.Size = mediaID, size
+		}
+		return []harvest.Attachment{attachment}
 	case *tg.MessageMediaDocument:
 		kind := documentKind(typed)
 		attachment := harvest.Attachment{Kind: kind}

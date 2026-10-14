@@ -56,8 +56,15 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 	if rich.Part {
 		return "", nil, fmt.Errorf("partial rich message needs resolution")
 	}
-	if len(rich.Photos)+len(rich.Documents) != 0 {
-		return "", nil, fmt.Errorf("rich message attachments need explicit support; history not complete")
+	if _, err := richMessageMedia(rich); err != nil {
+		return "", nil, err
+	}
+	photos, documents := map[int64]bool{}, map[int64]bool{}
+	for _, photo := range rich.Photos {
+		photos[photo.(*tg.Photo).ID] = true
+	}
+	for _, document := range rich.Documents {
+		documents[document.(*tg.Document).ID] = true
 	}
 	var links []string
 	var text func(tg.RichTextClass) (string, error)
@@ -96,6 +103,31 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 			var part string
 			var err error
 			switch v := block.(type) {
+			case *tg.PageBlockCover:
+				part, err = blocks([]tg.PageBlockClass{v.Cover})
+			case *tg.PageBlockCollage:
+				part, err = blocks(v.Items)
+			case *tg.PageBlockSlideshow:
+				part, err = blocks(v.Items)
+			case *tg.PageBlockPhoto:
+				if !photos[v.PhotoID] {
+					err = fmt.Errorf("rich photo %d is missing", v.PhotoID)
+				}
+				if v.URL != "" {
+					links = mergeLinks(links, []string{v.URL})
+				}
+			case *tg.PageBlockDocument:
+				if !documents[v.DocumentID] {
+					err = fmt.Errorf("rich document %d is missing", v.DocumentID)
+				}
+			case *tg.PageBlockVideo:
+				if !documents[v.VideoID] {
+					err = fmt.Errorf("rich video %d is missing", v.VideoID)
+				}
+			case *tg.PageBlockAudio:
+				if !documents[v.AudioID] {
+					err = fmt.Errorf("rich audio %d is missing", v.AudioID)
+				}
 			case *tg.PageBlockDivider:
 				continue
 			case *tg.PageBlockList:
@@ -170,6 +202,19 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 			default:
 				err = fmt.Errorf("unsupported rich block %T", block)
 			}
+			if caption, ok := block.(interface{ GetCaption() tg.PageCaption }); ok && err == nil {
+				value := caption.GetCaption()
+				for _, richText := range []tg.RichTextClass{value.Text, value.Credit} {
+					var extra string
+					extra, err = text(richText)
+					if err != nil {
+						break
+					}
+					if extra != "" {
+						part = strings.TrimSpace(part + "\n" + extra)
+					}
+				}
+			}
 			if err != nil {
 				return "", err
 			}
@@ -181,4 +226,29 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 	}
 	body, err := blocks(rich.Blocks)
 	return strings.TrimSpace(body), mergeLinks(links, extractLinks(body, nil)), err
+}
+
+// Reuse the ordinary media path, including download limits, cache and ASR.
+// Container resources stay in their source order even when a block has no caption.
+func richMessageMedia(rich tg.RichMessage) ([]tg.MessageMediaClass, error) {
+	var media []tg.MessageMediaClass
+	for _, value := range rich.Photos {
+		photo, ok := value.(*tg.Photo)
+		if !ok || photo.ID == 0 {
+			return nil, fmt.Errorf("rich message contains an unavailable photo")
+		}
+		item := &tg.MessageMediaPhoto{}
+		item.SetPhoto(photo)
+		media = append(media, item)
+	}
+	for _, value := range rich.Documents {
+		document, ok := value.(*tg.Document)
+		if !ok || document.ID == 0 {
+			return nil, fmt.Errorf("rich message contains an unavailable document")
+		}
+		item := &tg.MessageMediaDocument{}
+		item.SetDocument(document)
+		media = append(media, item)
+	}
+	return media, nil
 }

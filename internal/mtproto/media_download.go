@@ -67,45 +67,61 @@ func (s *Session) planRecordMediaDownloads(
 	if !ok {
 		return
 	}
-	switch typed := msg.Media.(type) {
+	s.planMediaDownloads(msg.Media, record, 0, opts, pipeline, plan)
+	if rich, present := msg.GetRichMessage(); present {
+		media, err := richMessageMedia(rich)
+		if err != nil {
+			return
+		}
+		index := len(extractAttachments(msg.Media))
+		for _, item := range media {
+			s.planMediaDownloads(item, record, index, opts, pipeline, plan)
+			index += len(extractAttachments(item))
+		}
+	}
+}
+
+func (s *Session) planMediaDownloads(media tg.MessageMediaClass, record *harvest.MessageRecord, index int, opts harvest.HistoryOptions, pipeline *mediaPipeline, plan *mediaDownloadPlan) {
+	if index < 0 || index >= len(record.Attachments) {
+		return
+	}
+	switch typed := media.(type) {
 	case *tg.MessageMediaPhoto:
 		location, fileName, mediaID, size, ok := photoDownload(typed)
 		if !ok {
-			record.Attachments[0].DownloadError = "photo location is unavailable"
+			record.Attachments[index].DownloadError = "photo location is unavailable"
 			return
 		}
-		record.Attachments[0].MIMEType = "image/jpeg"
-		record.Attachments[0].MediaID = mediaID
-		record.Attachments[0].FileName = fileName
-		record.Attachments[0].Size = size
-		s.planAttachmentDownload(record, 0, location, fileName, opts, pipeline, plan)
+		record.Attachments[index].MIMEType = "image/jpeg"
+		record.Attachments[index].MediaID = mediaID
+		record.Attachments[index].FileName = fileName
+		record.Attachments[index].Size = size
+		s.planAttachmentDownload(record, index, location, fileName, opts, pipeline, plan)
 	case *tg.MessageMediaDocument:
 		document, ok := typed.GetDocument()
 		if !ok {
-			record.Attachments[0].DownloadError = "document location is unavailable"
+			record.Attachments[index].DownloadError = "document location is unavailable"
 			return
 		}
 		doc, ok := document.(*tg.Document)
 		if !ok {
-			record.Attachments[0].DownloadError = "document location is unavailable"
+			record.Attachments[index].DownloadError = "document location is unavailable"
 			return
 		}
 		fileName := documentFileName(doc)
 		if strings.TrimSpace(fileName) == "" {
 			fileName = fallbackFileName(record.Kind, record.MessageID, doc.MimeType)
 		}
-		record.Attachments[0].MediaID = documentMediaID(doc)
-		record.Attachments[0].Kind = documentKind(typed)
-		record.Attachments[0].MIMEType = doc.MimeType
-		record.Attachments[0].Size = doc.Size
-		record.Attachments[0].FileName = fileName
-		applyDocumentMetadata(&record.Attachments[0], doc)
-		s.planAttachmentDownload(record, 0, doc.AsInputDocumentFileLocation(""), fileName, opts, pipeline, plan)
+		record.Attachments[index].MediaID = documentMediaID(doc)
+		record.Attachments[index].Kind = documentKind(typed)
+		record.Attachments[index].MIMEType = doc.MimeType
+		record.Attachments[index].Size = doc.Size
+		record.Attachments[index].FileName = fileName
+		applyDocumentMetadata(&record.Attachments[index], doc)
+		s.planAttachmentDownload(record, index, doc.AsInputDocumentFileLocation(""), fileName, opts, pipeline, plan)
 	case *tg.MessageMediaPoll:
 		if attached, ok := typed.GetAttachedMedia(); ok {
-			copyMsg := *msg
-			copyMsg.Media = attached
-			s.planRecordMediaDownloads(&copyMsg, record, opts, pipeline, plan)
+			s.planMediaDownloads(attached, record, index, opts, pipeline, plan)
 		}
 	}
 }

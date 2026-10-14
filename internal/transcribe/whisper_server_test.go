@@ -347,6 +347,103 @@ func TestLongFormDecodeRequestAppliesPromptOnlyToRussian(t *testing.T) {
 	}
 }
 
+func TestLongFormTailRecoveryIsBoundedAndPreservesPrefix(t *testing.T) {
+	for _, scenario := range []string{"recovered", "still uncovered", "invalid metadata", "too long", "text mismatch"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			wavPath := filepath.Join(dir, "long.wav")
+			if err := os.WriteFile(wavPath, make([]byte, 44+801*32000), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ffmpeg := filepath.Join(dir, "ffmpeg")
+			script := `#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+bytes=$(awk -v duration="$8" 'BEGIN {print int(duration*32000)+44}')
+head -c "$bytes" /dev/zero > "$last"
+`
+			if err := os.WriteFile(ffmpeg, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			segment := func(start, end float64, text string) whisperSegment {
+				return whisperSegment{Start: &start, End: &end, Text: text}
+			}
+			full := whisperResponse{Duration: 801, Text: "Основная часть.\nВыберем время.\nХорошо.\nДо свидания.\nРад знакомству.", Segments: []whisperSegment{
+				segment(0, 780, "Основная часть."),
+				segment(780, 788.8, "Выберем время."),
+				segment(788.8, 790.1, "Хорошо."),
+				segment(790.86, 791.86, "До свидания."),
+				segment(791.86, 793.18, "Рад знакомству."),
+			}}
+			switch scenario {
+			case "invalid metadata":
+				full.Segments[0].Start = nil
+			case "too long":
+				full.Segments = []whisperSegment{segment(0, 690, "Основная часть.")}
+				full.Text = "Основная часть."
+			case "text mismatch":
+				full.Text += " Текст вне сегментов."
+			}
+			requests, recoveryRequests := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				requests++
+				if err := request.ParseMultipartForm(32 << 20); err != nil {
+					t.Error(err)
+					return
+				}
+				defer request.MultipartForm.RemoveAll()
+				switch requests {
+				case 1:
+					_ = json.NewEncoder(w).Encode(whisperResponse{Language: "russian"})
+				case 2:
+					_ = json.NewEncoder(w).Encode(full)
+				case 3:
+					recoveryRequests++
+					file, header, err := request.FormFile("file")
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_ = file.Close()
+					if header.Size >= 45*32000 || request.FormValue("no_timestamps") != "false" || request.FormValue("language") != "ru" || request.FormValue("prompt") != "" {
+						t.Errorf("unsafe recovery request: size=%d fields=%v", header.Size, request.MultipartForm.Value)
+					}
+					tailEnd := 15.6
+					if scenario == "still uncovered" {
+						tailEnd = 1
+					}
+					_ = json.NewEncoder(w).Encode(whisperResponse{Duration: wavPCM16MonoDuration(header.Size), Text: "Выберем время. Хорошо. До свидания. Рад знакомству.\nВзаимно, взаимно.", Segments: []whisperSegment{segment(0, tailEnd, "Выберем время. Хорошо. До свидания. Рад знакомству. Взаимно, взаимно.")}})
+				default:
+					t.Error("more than one recovery attempt")
+				}
+			}))
+			defer server.Close()
+			runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
+			text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 795.359)
+			if scenario == "recovered" {
+				if err != nil || text != "Основная часть.\nВыберем время. Хорошо. До свидания. Рад знакомству.\nВзаимно, взаимно." {
+					t.Fatalf("recovered transcript: %q, %v", text, err)
+				}
+				if diagnostics == nil || !diagnostics.TailRecoveryApplied || !diagnostics.CoverageValidated || diagnostics.TailRecoveryOffsetSeconds != 780 || math.Abs(diagnostics.InitialTrailingCoverageGapSeconds-2.179) > 0.001 || diagnostics.LastSegmentEndSeconds < 795.359 {
+					t.Fatalf("recovery evidence: %+v", diagnostics)
+				}
+			} else if err == nil {
+				t.Fatal("unsafe or still incomplete transcript was accepted")
+			}
+			wantRecovery := 0
+			if scenario == "recovered" || scenario == "still uncovered" {
+				wantRecovery = 1
+			}
+			if recoveryRequests != wantRecovery {
+				t.Fatalf("recovery requests = %d, want %d", recoveryRequests, wantRecovery)
+			}
+			if paths, _ := filepath.Glob(filepath.Join(dir, ".asr-*-*.wav")); len(paths) != 0 {
+				t.Fatalf("temporary audio remains: %v", paths)
+			}
+		})
+	}
+}
+
 func TestValidateTimestampedLongFormResponseRejectsIncompleteMetadata(t *testing.T) {
 	start0, end0 := 0.1, 0.8
 	start1, end1 := 0.7, 0.6
