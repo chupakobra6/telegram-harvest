@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -9,6 +10,35 @@ import (
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/tg"
 )
+
+func TestPrepareAndNormalizeRichMessagePreservesCustomEmoji(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		alt  string
+		want string
+	}{
+		{name: "fallback text", alt: "🏠", want: "🏠"},
+		{name: "missing fallback text", want: "[custom emoji -123]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &tg.Message{ID: 24474, Date: 1700000000}
+			msg.SetRichMessage(tg.RichMessage{Blocks: []tg.PageBlockClass{
+				&tg.PageBlockParagraph{Text: &tg.TextConcat{Texts: []tg.RichTextClass{
+					&tg.TextPlain{Text: "Plan "},
+					&tg.TextBold{Text: &tg.TextCustomEmoji{DocumentID: -123, Alt: tt.alt}},
+					&tg.TextURL{Text: &tg.TextPlain{Text: " details"}, URL: "https://example.org/plan"},
+				}}},
+			}})
+			if err := (&Session{}).prepareRichMessage(context.Background(), resolvedTarget{}, msg); err != nil {
+				t.Fatalf("complete custom emoji message rejected: %v", err)
+			}
+			record, ok := normalizeRecord(msg, harvest.Chat{ID: 42, Type: "group"}, peer.Entities{})
+			if !ok || record.Text != "Plan "+tt.want+" details" || len(record.Links) != 1 || record.Links[0] != "https://example.org/plan" {
+				t.Fatalf("custom emoji content lost: %+v", record)
+			}
+		})
+	}
+}
 
 func TestNormalizeRichRecruiterMessagePreservesParagraphsListsAndLinks(t *testing.T) {
 	msg := &tg.Message{ID: 170, Date: 1700000000}

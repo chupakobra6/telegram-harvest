@@ -78,6 +78,11 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 		switch v := value.(type) {
 		case *tg.TextEmpty:
 			return "", nil
+		case *tg.TextCustomEmoji:
+			if v.Alt != "" {
+				return v.Alt, nil
+			}
+			return fmt.Sprintf("[custom emoji %d]", v.DocumentID), nil
 		case *tg.TextConcat:
 			var out strings.Builder
 			for _, child := range v.Texts {
