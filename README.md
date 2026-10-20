@@ -309,9 +309,13 @@ go run ./cmd/asr-benchmark \
 
 ```bash
 make chats PROFILE=study QUERY=вшэ
+bin/telegram-harvest --profile main chats --all --json
+# Эквивалент через Make: make chats PROFILE=main ALL=1
 ```
 
-Если `TG_HARVEST_STUDY_ALLOWED_CHATS` задан, `chats`, `topics`, `dump` и `sync` работают только в этом scope.
+`chats --all` последовательно читает обычную и архивную папки до подтверждённого конца и убирает дубли по типу/ID чата. Фильтр `--query` применяется после полного обхода; `--all` нельзя сочетать с `--limit`. Без `--all` сохраняется диагностическая выборка `--limit` (по умолчанию 300), которая не подтверждает полный охват архива. JSON остаётся массивом чатов; папка каждого чата в нём не хранится.
+
+Если `TG_HARVEST_STUDY_ALLOWED_CHATS` задан, `chats` (включая `--all`), `topics`, `dump` и `sync` работают только в этом scope.
 
 Полная выгрузка:
 

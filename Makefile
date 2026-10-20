@@ -33,7 +33,7 @@ help:
 	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make transcribe-file PROFILE=main # adaptive local production ASR; INPUT=... OUTPUT=...\\n"
-	@printf "  make chats PROFILE=study # list dialogs; pass QUERY='вшэ' to filter\\n"
+	@printf "  make chats PROFILE=study # list dialogs; ALL=1 includes ordinary + archived; QUERY='вшэ' filters\\n"
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
 	@printf "  make sync PROFILE=study # exhaustive incremental; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
@@ -122,7 +122,7 @@ transcribe-file:
 
 chats:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) chats $(if $(strip $(QUERY)),--query "$(QUERY)",)
+	$(CLI) $(PROFILE_ARG) chats $(if $(strip $(ALL)),--all,) $(if $(strip $(QUERY)),--query "$(QUERY)",)
 
 topics:
 	$(REQUIRE_PROFILE)

@@ -1144,3 +1144,46 @@ func readCLIFile(t *testing.T, path string) string {
 	}
 	return string(content)
 }
+
+type chatsSourceStub struct {
+	chats                  []harvest.Chat
+	err                    error
+	allCalls, previewCalls int
+}
+
+func (s *chatsSourceStub) ListAllDialogs(context.Context) ([]harvest.Chat, error) {
+	s.allCalls++
+	return s.chats, s.err
+}
+func (s *chatsSourceStub) ListDialogs(context.Context, int, string) ([]harvest.Chat, error) {
+	s.previewCalls++
+	return s.chats, s.err
+}
+func TestChatsAllPreservesQueryAndStudyScope(t *testing.T) {
+	source := &chatsSourceStub{chats: []harvest.Chat{
+		{ID: 1, Type: "user", Title: "Needle allowed"},
+		{ID: 2, Type: "user", Title: "Needle excluded"},
+		{ID: 3, Type: "user", Title: "Other allowed"},
+	}}
+	cfg := config.Config{Mode: config.ModeStudy, AllowedChats: []string{"1", "3"}}
+	chats, err := collectChats(context.Background(), cfg, source, true, 1, " NEEDLE ")
+	if err != nil || len(chats) != 1 || chats[0].ID != 1 || source.allCalls != 1 || source.previewCalls != 0 {
+		t.Fatalf("chats=%v source=%+v err=%v", chats, source, err)
+	}
+	if _, err := collectChats(context.Background(), cfg, source, false, 1, ""); err != nil || source.previewCalls != 1 {
+		t.Fatalf("preview path: source=%+v err=%v", source, err)
+	}
+}
+func TestChatsAllRejectsPartialDiscoveryAndAmbiguousLimit(t *testing.T) {
+	want := errors.New("archive folder failed")
+	source := &chatsSourceStub{chats: []harvest.Chat{{ID: 1}}, err: want}
+	chats, err := collectChats(context.Background(), config.Config{}, source, true, 300, "")
+	if !errors.Is(err, want) || chats != nil {
+		t.Fatalf("partial result leaked: %v %v", chats, err)
+	}
+	var out strings.Builder
+	err = runChats(config.Config{}, nil, []string{"--all", "--limit", "300"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("ambiguous flags reached runtime: %v", err)
+	}
+}

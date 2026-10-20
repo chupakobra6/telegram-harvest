@@ -113,3 +113,59 @@ func TestBoundedPreviewDoesNotClaimCompleteRange(t *testing.T) {
 		t.Fatalf("preview stats=%+v err=%v", stats, err)
 	}
 }
+
+type archivedDialogsInvoker struct{ calls [][2]int }
+
+func (f *archivedDialogsInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	req, ok := input.(*tg.MessagesGetDialogsRequest)
+	if !ok {
+		return fmt.Errorf("unexpected RPC %T", input)
+	}
+	folder, set := req.GetFolderID()
+	if !set || (folder != 0 && folder != 1) {
+		return fmt.Errorf("explicit folder missing")
+	}
+	f.calls = append(f.calls, [2]int{folder, req.OffsetID})
+	page := &tg.MessagesDialogsSlice{Count: 2}
+	id := 0
+	if req.OffsetID == 0 {
+		id = 2
+	} else if req.OffsetID == 2 {
+		id = 1
+	}
+	if id > 0 {
+		// Chat 2 appears in both folders, while chat 1 has a distinct peer type.
+		peer := tg.PeerClass(&tg.PeerChat{ChatID: int64(id)})
+		page.Chats = []tg.ChatClass{&tg.Chat{ID: int64(id), Title: fmt.Sprint(id)}}
+		if folder == 1 && id == 1 {
+			peer = &tg.PeerUser{UserID: 1}
+			page.Users = []tg.UserClass{&tg.User{ID: 1, FirstName: "Archived", AccessHash: 1}}
+			page.Chats = nil
+		}
+		page.Dialogs = []tg.DialogClass{&tg.Dialog{Peer: peer, TopMessage: id}}
+		page.Messages = []tg.MessageClass{&tg.Message{ID: id, Date: 1000, PeerID: peer}}
+	}
+	output.(*tg.MessagesDialogsBox).Dialogs = page
+	return nil
+}
+func TestListAllDialogsTraversesBothFoldersAndDeduplicatesTypedPeers(t *testing.T) {
+	fake := &archivedDialogsInvoker{}
+	s := &Session{raw: tg.NewClient(fake), dialogCache: map[string]resolvedTarget{}}
+	chats, err := s.ListAllDialogs(context.Background())
+	if err != nil || len(chats) != 3 {
+		t.Fatalf("chats=%+v err=%v", chats, err)
+	}
+	want := [][2]int{{0, 0}, {0, 2}, {0, 1}, {1, 0}, {1, 2}, {1, 1}}
+	if fmt.Sprint(fake.calls) != fmt.Sprint(want) {
+		t.Fatalf("folder pages=%v want=%v", fake.calls, want)
+	}
+	keys := map[string]bool{}
+	for _, chat := range chats {
+		keys[harvest.AccountChatKey(chat)] = true
+	}
+	for _, key := range []string{"basic_group:1", "basic_group:2", "user:1"} {
+		if !keys[key] {
+			t.Fatalf("missing typed peer %s in %v", key, keys)
+		}
+	}
+}

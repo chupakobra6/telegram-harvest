@@ -303,7 +303,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  account list  # list registered full-account profiles")
 	fmt.Fprintln(out, "  --profile work login  # enter this account's phone, Telegram code and optional 2FA password")
 	fmt.Fprintln(out, "  me [--json]")
-	fmt.Fprintln(out, "  chats --query вшэ --limit 300 [--json]  # output is filtered by the study allowlist when set")
+	fmt.Fprintln(out, "  chats [--all | --limit 300] --query вшэ [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  account-sync  # registered accounts only; resume/update all available dialogs")
 	fmt.Fprintln(out, "  send-saved --text <message> [--json]  # @Pheik13 main session -> InputPeerSelf only")
@@ -429,18 +429,25 @@ func runChats(cfg config.Config, client *mtproto.Client, args []string, out io.W
 	fs := flag.NewFlagSet("chats", flag.ContinueOnError)
 	fs.SetOutput(out)
 	limit := fs.Int("limit", 300, "maximum dialogs to scan")
+	all := fs.Bool("all", false, "list all ordinary and archived dialogs; no dialog limit")
 	query := fs.String("query", "", "case-insensitive title/username/id filter")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *all {
+		limitSet := false
+		fs.Visit(func(f *flag.Flag) { limitSet = limitSet || f.Name == "limit" })
+		if limitSet {
+			return fmt.Errorf("--all cannot be combined with --limit")
+		}
+	}
 	return withRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
-			chats, err := session.ListDialogs(ctx, *limit, *query)
+			chats, err := collectChats(ctx, cfg, session, *all, *limit, *query)
 			if err != nil {
 				return err
 			}
-			chats = filterAllowedChats(cfg, chats)
 			if *jsonOut {
 				encoder := json.NewEncoder(out)
 				encoder.SetIndent("", "  ")
@@ -462,6 +469,36 @@ func runChats(cfg config.Config, client *mtproto.Client, args []string, out io.W
 			return nil
 		})
 	})
+}
+
+type dialogLister interface {
+	ListDialogs(context.Context, int, string) ([]harvest.Chat, error)
+	ListAllDialogs(context.Context) ([]harvest.Chat, error)
+}
+
+func collectChats(ctx context.Context, cfg config.Config, source dialogLister, all bool, limit int, query string) ([]harvest.Chat, error) {
+	var chats []harvest.Chat
+	var err error
+	if all {
+		chats, err = source.ListAllDialogs(ctx)
+		query = strings.ToLower(strings.TrimSpace(query))
+		if err == nil && query != "" {
+			filtered := make([]harvest.Chat, 0, len(chats))
+			for _, chat := range chats {
+				haystack := strings.ToLower(strings.Join([]string{chat.Title, chat.Username, chat.Display, fmt.Sprint(chat.ID)}, " "))
+				if strings.Contains(haystack, query) {
+					filtered = append(filtered, chat)
+				}
+			}
+			chats = filtered
+		}
+	} else {
+		chats, err = source.ListDialogs(ctx, limit, query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return filterAllowedChats(cfg, chats), nil
 }
 
 func runTopics(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
