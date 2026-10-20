@@ -97,6 +97,7 @@ func TestRichMessageCannotSilentlyDropPartialOrUnsupportedContent(t *testing.T) 
 		{Blocks: []tg.PageBlockClass{&tg.PageBlockUnsupported{}}},
 		{Documents: []tg.DocumentClass{&tg.DocumentEmpty{ID: 123}}},
 		{Blocks: []tg.PageBlockClass{&tg.PageBlockDocument{DocumentID: 123}}},
+		{Blocks: []tg.PageBlockClass{&tg.PageBlockBlockquoteBlocks{Blocks: []tg.PageBlockClass{&tg.PageBlockUnsupported{}}, Caption: &tg.TextPlain{Text: "Do not hide missing body"}}}},
 	} {
 		msg := &tg.Message{ID: 1}
 		msg.SetRichMessage(rich)
@@ -106,6 +107,34 @@ func TestRichMessageCannotSilentlyDropPartialOrUnsupportedContent(t *testing.T) 
 		if _, ok := normalizeRecord(msg, harvest.Chat{}, peer.Entities{}); ok {
 			t.Fatal("empty record would conceal incomplete content")
 		}
+	}
+}
+
+func TestPrepareAndNormalizeRichNestedBlockquotesPreservesBodyCaptionsAndLinks(t *testing.T) {
+	msg := &tg.Message{ID: 4325, Date: 1700000000}
+	msg.SetRichMessage(tg.RichMessage{Blocks: []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Before"}},
+		&tg.PageBlockBlockquoteBlocks{
+			Blocks: []tg.PageBlockClass{
+				&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Quoted paragraph"}},
+				&tg.PageBlockBlockquoteBlocks{
+					Blocks: []tg.PageBlockClass{&tg.PageBlockList{Items: []tg.PageListItemClass{
+						&tg.PageListItemText{Text: &tg.TextCustomEmoji{DocumentID: -123, Alt: "🏠"}},
+					}}},
+					Caption: &tg.TextURL{Text: &tg.TextPlain{Text: "Inner source"}, URL: "https://example.org/inner"},
+				},
+			},
+			Caption: &tg.TextURL{Text: &tg.TextPlain{Text: "Outer source"}, URL: "https://example.org/outer"},
+		},
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "After"}},
+	}})
+	if err := (&Session{}).prepareRichMessage(context.Background(), resolvedTarget{}, msg); err != nil {
+		t.Fatalf("complete nested blockquote rejected: %v", err)
+	}
+	record, ok := normalizeRecord(msg, harvest.Chat{ID: 42, Type: "group"}, peer.Entities{})
+	want := "Before\n\nQuoted paragraph\n\n- 🏠\nInner source\nOuter source\n\nAfter"
+	if !ok || record.Text != want || len(record.Links) != 2 || record.Links[0] != "https://example.org/inner" || record.Links[1] != "https://example.org/outer" {
+		t.Fatalf("nested quote content or link order lost: %+v", record)
 	}
 }
 

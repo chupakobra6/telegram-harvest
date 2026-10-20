@@ -192,6 +192,15 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 					body, err = blocks(v.Blocks)
 					part += "\n\n" + body
 				}
+			case *tg.PageBlockBlockquoteBlocks:
+				part, err = blocks(v.Blocks)
+				if err == nil {
+					var caption string
+					caption, err = text(v.Caption)
+					if caption != "" {
+						part += "\n" + caption
+					}
+				}
 			case *tg.PageBlockPreformatted:
 				part, err = text(v.Text)
 				part = "```" + v.Language + "\n" + part + "\n```"
