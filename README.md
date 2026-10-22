@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/chupakobra6/telegram-harvest/actions/workflows/ci.yml/badge.svg)](https://github.com/chupakobra6/telegram-harvest/actions/workflows/ci.yml)
 
-Локальный CLI для сбора Telegram-данных через MTProto user authorization. Сбор остаётся read-only. Отдельные узкие команды отправляют результат самому себе в «Избранное» основного аккаунта и по прямому поручению организуют метаданные завершённых рабочих диалогов.
+Локальный CLI для сбора Telegram-данных через MTProto user authorization. Сбор остаётся read-only. Отдельные узкие команды отправляют результат самому себе в «Избранное» основного аккаунта, организуют метаданные завершённых рабочих диалогов и по прямому поручению правят собственные материалы в закреплённом топике собеседований.
 Проект рассчитан на три практических сценария:
 
 - **daily reports** - личные исходящие сообщения и настроенные chat-scoped источники за день, Markdown-отчеты в `reports/daily`, локальная транскрибация voice/audio/round-video и коротких вертикальных phone-like video через production Whisper pipeline;
@@ -24,7 +24,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Полный архив | `account-sync` обходит все доступные диалоги выбранного зарегистрированного аккаунта без allowlist, сохраняет полную историю по чатам вне репозитория и обновляет приватный индекс. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
-| Safety | Harvest-команды не мутируют Telegram. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. `account-organize --apply` ограничена папкой «Отработка» и архивом точных user peers из проверенного manifest. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
+| Safety | Harvest-команды не мутируют Telegram. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. `account-organize --apply` ограничена папкой «Отработка» и архивом точных user peers из проверенного manifest; `interview-topic-update --apply` – собственными правками и двумя backed-up ZIP в закреплённом топике. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
 
 ## Быстрый старт
 
@@ -145,6 +145,28 @@ Manifest – один приватный JSON-файл (`0600` или строж
 Результат – JSON. В dry-run `dry_run=true`, успешная сверка даёт `ready=true`, а `complete` остаётся `false`. После применения каждая строка получает `in_folder`, `archived` и `server_verified` только по серверному readback; `complete=true` требует подтверждения всех peers. При сбое возвращаются частичные строки и ненулевой exit code. Сохраняй этот результат приватно; повтор по тому же актуальному manifest перечитывает сервер и не повторяет подтверждённые изменения. Telegram не объединяет проверку head и перенос в одну транзакцию: ответ между RPC может дать частичный результат, который требует повторного разбора, без автоматического снятия архива. Одновременно редактировать эту папку другим клиентом во время команды не следует.
 
 Локальный адресный набор: `go test ./internal/mtproto ./cmd/telegram-harvest -run 'TestAccountOrganize|TestAccountFolders|TestAccountOrganization' -count=1`. Он проверяет ограничения manifest, сохранность фильтра, dry-run, идемпотентность, свежесть heads, частичный сбой и серверные подтверждения. Живая проверка выполняется отдельно в разрешённом сценарии.
+
+## Правка материалов в топике собеседований
+
+`interview-topic-update` работает только по прямому поручению Игоря с уже опубликованными собственными материалами: `main/@Pheik13`, account ID `1266978055`, супергруппа `2621478426`, топик `115` «Собеседования». Другие аккаунты, получатели, новые сообщения и загрузки не поддерживаются. Используются обычные session/runtime lock и RPC pacing; команда не помечает сообщения прочитанными.
+
+```bash
+bin/telegram-harvest --profile main interview-topic-update --manifest /private/interview-review.json
+bin/telegram-harvest --profile main interview-topic-update --manifest /private/interview-review.json --apply
+make interview-topic-update PROFILE=main MANIFEST=/private/interview-review.json APPLY=1
+```
+
+Manifest – один JSON-объект в приватном файле `0600` или строже, до 1 MiB. Неизвестные поля и дубликаты message IDs отклоняются. Поля верхнего уровня: `profile: "main"`, `account_id: 1266978055`, `channel_id: 2621478426`, `topic_id: 115`, массивы `edits` и `delete_zip`; всего 1–100 операций.
+
+- `edits`: `{id, expected_text_hash, new_text, expected_media_id?, new_entities?}`. Hash – SHA-256 полного старого текста/подписи в UTF-8 без нормализации. `expected_media_id` обязателен при имеющемся document/photo и имеет вид `document:123` или `photo:123`; для сообщения без вложения он отсутствует. Лимиты нового текста – 1024 UTF-16 единицы для подписи и 4096 для текста. Media, reply, album group и topic сохраняются.
+- `new_entities`: массив `{type, offset, length, url?, language?}` с UTF-16 offsets, не разделяющими emoji. Поддерживаются `bold`, `italic`, `underline`, `strike`, `code`, `pre` (опциональный `language`), `url`, `hashtag`, `text_url` (явный HTTP(S) `url`). `hashtag` создаёт нативный кликабельный тег. `[]` задаёт обычный текст. При неизменном тексте и отсутствии поля прежние entities сохраняются; при изменении текста с прежними entities поле обязательно, чтобы не переносить старые offsets автоматически. Web previews и RichMessage этой узкой командой не редактируются.
+- `delete_zip`: `{id, expected_text_hash, expected_media_id, filename, local_backup_path, sha256}`. Допустимы только IDs `2348`, `2352`. Команда проверяет своё авторство, топик, точные подпись/media ID/имя/MIME/размер, локальный абсолютный путь к непустому ZIP, его формат и SHA-256. Без подходящей локальной копии удаление не выполняется.
+
+Все операции проходят preflight до первой записи. Перед каждой записью проверка повторяется; после неё сервер должен вернуть точные новые текст/entities и прежние media/reply/topic либо точный `MessageEmpty` удалённого ZIP. По умолчанию `dry_run=true`, успешный preflight даёт `ready=true`, но не `complete`. После `--apply` результат содержит частичные `rows` с `server_verified`, `already_applied`, `outcome_unknown`, `error`; `complete=true` требует подтверждения всего manifest. При ошибке записи команда делает одно readback, сохраняет подтверждённые строки и останавливается с ненулевым exit code, без повторной записи. Повторный запуск распознаёт уже новый текст и уже отсутствующий ZIP. Сохраняй JSON результата приватно. Изменение сообщения между RPC не проверяется атомарно; несовпадение означает остановку и повторный разбор, а не автоматический откат.
+
+Для document сравниваются ID, MIME, размер, имя, все атрибуты/длительность/кодек, access hash и остальные прежние поля; исключён только временный `Document.FileReference`. Два нативных read одного неизменного сообщения подтвердили изменение именно этого поля. Dry-run повторно читает каждую правку, проверяет устойчивость защищённых полей и возвращает только имена изменившихся путей в `protected_changed_paths`; значения ссылок доступа не выводятся. `source_entity_types` первой строки содержит только классы исходных entities.
+
+Адресная проверка: `go test ./internal/mtproto ./cmd/telegram-harvest -run 'TestInterviewTopicUpdate' -count=1`. Живой preflight/apply выполняется отдельно в разрешённом сценарии.
 
 ## Отправка в «Избранное»
 
