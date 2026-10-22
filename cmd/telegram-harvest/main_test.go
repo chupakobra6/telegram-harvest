@@ -117,6 +117,8 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"send-saved --from-chat",
 		"account add --name work",
 		"account-sync  # registered accounts",
+		"account-folders  # registered bound account",
+		"account-organize --manifest <private.json> [--apply]",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
 		"required account profile",

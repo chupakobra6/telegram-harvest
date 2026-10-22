@@ -181,6 +181,16 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 			return printError(stderr, 1, err)
 		}
 		return 0
+	case "account-folders":
+		if err := runAccountFolders(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "account-organize":
+		if err := runAccountOrganize(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
 	case "compact":
 		if err := runCompact(cfg, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
@@ -201,7 +211,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 func knownCommand(command string) bool {
 	switch command {
 	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
-		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "compact", "agent-view", "transcribe-file", "send-saved":
+		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "account-folders", "account-organize", "compact", "agent-view", "transcribe-file", "send-saved":
 		return true
 	default:
 		return false
@@ -287,9 +297,9 @@ func loadProfileConfig(profile string) (config.Config, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-harvest account add --name <name> --api-profile main|study")
 	fmt.Fprintln(out, "       telegram-harvest account list")
-	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
+	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|account-folders|account-organize|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Harvesting operations are read-only; send-saved is the only Telegram write operation")
+	fmt.Fprintln(out, "Harvesting operations are read-only; writes are limited to send-saved and explicit account-organize --apply metadata")
 	fmt.Fprintln(out, "  --profile main|study|<account-name>  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
@@ -306,6 +316,8 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  chats [--all | --limit 300] --query вшэ [--json]  # output is filtered by the study allowlist when set")
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  account-sync  # registered accounts only; resume/update all available dialogs")
+	fmt.Fprintln(out, "  account-folders  # registered bound account; read existing folder filters as private JSON")
+	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; only Отработка membership + archive")
 	fmt.Fprintln(out, "  send-saved --text <message> [--json]  # @Pheik13 main session -> InputPeerSelf only")
 	fmt.Fprintln(out, "  send-saved --file </absolute/path> [--caption <message>] [--json]")
 	fmt.Fprintln(out, "  send-saved --from-chat <id-or-username> --message-id 123 [--json]  # copy one Telegram video unchanged")
