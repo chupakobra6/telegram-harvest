@@ -242,7 +242,18 @@ func (f *topicUpdateWireInvoker) Invoke(_ context.Context, input bin.Encoder, _ 
 	case *tg.MessagesEditMessageRequest:
 		f.calls = append(f.calls, "edit")
 		peer, ok := request.Peer.(*tg.InputPeerChannel)
-		if !ok || peer.ChannelID != InterviewTopicChannelID || request.Media != nil || request.ReplyMarkup != nil || request.ScheduleDate != 0 || request.RichMessage != nil || request.Message != "new caption" {
+		var encoded bin.Buffer
+		if err := request.Encode(&encoded); err != nil {
+			f.t.Fatal(err)
+		}
+		var decoded tg.MessagesEditMessageRequest
+		if err := decoded.Decode(&encoded); err != nil {
+			f.t.Fatal(err)
+		}
+		if !request.NoWebpage || !decoded.NoWebpage {
+			f.t.Fatal("text edit may create an unrequested webpage preview")
+		}
+		if !ok || peer.ChannelID != InterviewTopicChannelID || request.Media != nil || request.ReplyMarkup != nil || request.ScheduleDate != 0 || request.RichMessage != nil || request.Message != "https://dion.vc/event/oal-uvj-kgx." {
 			f.t.Fatal("wire edit exceeded text/entities scope", request)
 		}
 	case *tg.ChannelsDeleteMessagesRequest:
@@ -260,7 +271,7 @@ func (f *topicUpdateWireInvoker) Invoke(_ context.Context, input bin.Encoder, _ 
 func TestInterviewTopicUpdateWireNeverSendsUploadsOrMarksRead(t *testing.T) {
 	fake := &topicUpdateWireInvoker{t: t}
 	source := &interviewTopicSession{Session: &Session{raw: tg.NewClient(fake)}, target: resolvedTarget{InputPeer: &tg.InputPeerChannel{ChannelID: InterviewTopicChannelID}}}
-	if err := source.interviewTopicEdit(context.Background(), 2300, "new caption", nil); err != nil {
+	if err := source.interviewTopicEdit(context.Background(), 2300, "https://dion.vc/event/oal-uvj-kgx.", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := source.interviewTopicDeleteZIP(context.Background(), 2348); err != nil {
@@ -358,5 +369,36 @@ func TestInterviewTopicUpdateNativeHashtagEntitiesUseUTF16(t *testing.T) {
 	}
 	if _, err := topicEntities("🎙 #тест", []InterviewTopicEntity{{Type: "hashtag", Offset: 1, Length: 1}}); err == nil {
 		t.Fatal("hashtag range split an emoji")
+	}
+}
+
+func TestInterviewTopicUpdateURLPreservesExistingDocument(t *testing.T) {
+	m, f := topicUpdateFixture(t)
+	m.DeleteZIP = nil
+	m.Edits[0].NewText = "Recording: https://dion.vc/event/oal-uvj-kgx."
+	before, err := topicProtectedSnapshot(f.messages[2300])
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := updateInterviewTopic(context.Background(), f, m, true)
+	if err != nil || !result.Complete || !result.Rows[0].ServerVerified {
+		t.Fatal(result, err)
+	}
+	after, err := topicProtectedSnapshot(f.messages[2300])
+	if err != nil || !bytes.Equal(before, after) || f.messages[2300].Message != m.Edits[0].NewText {
+		t.Fatal("URL text edit changed existing document/reply/topic", err)
+	}
+}
+
+func TestInterviewTopicUpdateRejectsExistingWebpageBeforeEdit(t *testing.T) {
+	for _, page := range []tg.WebPageClass{&tg.WebPage{ID: 1, URL: "https://dion.vc/event/oal-uvj-kgx"}, &tg.WebPagePending{ID: 1}, &tg.WebPageEmpty{ID: 1}} {
+		m, f := topicUpdateFixture(t)
+		m.DeleteZIP = nil
+		m.Edits[0].ExpectedMediaID = ""
+		f.messages[2300].Media = &tg.MessageMediaWebPage{Webpage: page}
+		result, err := updateInterviewTopic(context.Background(), f, m, true)
+		if err == nil || !strings.Contains(err.Error(), "webpage") || result.Complete || len(f.edits)+len(f.deletes) != 0 {
+			t.Fatal("existing preview could be removed by no_webpage", result, err, f.edits, f.deletes)
+		}
 	}
 }

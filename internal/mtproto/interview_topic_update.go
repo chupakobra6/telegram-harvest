@@ -214,6 +214,9 @@ func validateTopicMessage(m *tg.Message, id int) error {
 }
 
 func topicMediaID(m *tg.Message) (string, error) {
+	if _, ok := m.Media.(*tg.MessageMediaWebPage); ok {
+		return "", fmt.Errorf("existing webpage previews are outside the text-edit contract")
+	}
 	if m.Media == nil {
 		return "", nil
 	}
@@ -587,7 +590,7 @@ func (s *interviewTopicSession) interviewTopicRead(ctx context.Context, id int) 
 
 func (s *interviewTopicSession) interviewTopicEdit(ctx context.Context, id int, text string, entities []tg.MessageEntityClass) error {
 	return s.performRPC(ctx, "edit_own_interview_topic_message", func(ctx context.Context) error {
-		request := &tg.MessagesEditMessageRequest{Peer: s.target.InputPeer, ID: id}
+		request := &tg.MessagesEditMessageRequest{Peer: s.target.InputPeer, ID: id, NoWebpage: true}
 		request.SetMessage(text)
 		request.SetEntities(entities)
 		_, err := s.raw.MessagesEditMessage(ctx, request)
