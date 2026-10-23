@@ -24,7 +24,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Полный архив | `account-sync` обходит все доступные диалоги выбранного зарегистрированного аккаунта без allowlist, сохраняет полную историю по чатам вне репозитория и обновляет приватный индекс. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
-| Safety | Harvest-команды не мутируют Telegram. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. `account-organize --apply` ограничена папкой «Отработка» и архивом точных user peers из проверенного manifest; `interview-topic-update --apply` – собственными правками и двумя backed-up ZIP в закреплённом топике. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
+| Safety | Сбор читает Telegram; узкие команды записи выполняются только по прямой просьбе Игоря. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. `account-organize --apply` ограничена папкой «Отработка» и архивом точных user peers из проверенного manifest; `interview-topic-update --apply` – собственными правками и двумя backed-up ZIP в закреплённом топике. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
 
 ## Быстрый старт
 
@@ -521,7 +521,7 @@ bin/telegram-harvest --profile main daily-catchup --help
 
 ## Границы доступа
 
-- Сбор читает Telegram. Единственная запись — явно запрошенный `main send-saved` в собственное «Избранное» `@Pheik13` с проверкой отправленного; другие send/click/delete/join/pin/mark-read операции не поддерживаются.
+- Сбор читает Telegram. По прямой просьбе Игоря доступны три узкие операции с серверной проверкой результата: [`main send-saved`](#отправка-в-избранное) в собственное «Избранное» `@Pheik13`, [`account-organize --apply`](#организация-рабочих-диалогов) для завершённых рабочих диалогов и [`interview-topic-update --apply`](#правка-материалов-в-топике-собеседований) для собственных материалов в закреплённом топике. Получатели, действия и проверки ограничены контрактом каждой команды; остальные операции записи не поддерживаются.
 - Broad daily scan пишет только outgoing/self messages и явно настроенных sender IDs строго в их настроенных chat IDs.
 - Study scope ограничивается `TG_HARVEST_STUDY_ALLOWED_CHATS`, когда allowlist задан.
 - `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, дефолтные `chat.jsonl`/`media-manual` и generated views приватные и не коммитятся.
