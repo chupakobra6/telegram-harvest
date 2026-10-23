@@ -65,7 +65,7 @@ type savedVideoEvidence struct {
 	SupportsStreaming bool
 }
 
-// SendSaved is the sole new-message sending primitive exposed by telegram-harvest.
+// SendSaved is the self-only sending primitive exposed by telegram-harvest.
 // It is intentionally bound to the main profile and InputPeerSelf: callers
 // cannot provide or resolve a recipient.
 func (c *Client) SendSaved(ctx context.Context, opts SendSavedOptions) (SendSavedResult, error) {
