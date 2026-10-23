@@ -24,7 +24,7 @@ CLI один и тот же для всех сценариев. Аккаунт �
 | Study sync | `dump`/`sync` читают только allowlisted-чаты, поддерживают resumable backfill и производят JSONL. |
 | Полный архив | `account-sync` обходит все доступные диалоги выбранного зарегистрированного аккаунта без allowlist, сохраняет полную историю по чатам вне репозитория и обновляет приватный индекс. |
 | Agent view | `agent-view` и `compact` строят компактные Markdown/TOON-представления из JSONL. |
-| Safety | Сбор читает Telegram; узкие команды записи выполняются только по прямой просьбе Игоря. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. `account-organize --apply` ограничена папкой «Отработка» и архивом точных user peers из проверенного manifest; `interview-topic-update --apply` – собственными правками и двумя backed-up ZIP в закреплённом топике; `interview-topic-publish --apply` – новыми собственными интервью в том же фиксированном топике. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
+| Safety | Сбор читает Telegram; узкие команды записи выполняются только по прямой просьбе Игоря. `send-saved` доступна только профилю `main`, проверяет активную сессию как `@Pheik13`, использует только `InputPeerSelf` и не принимает адресата. `account-organize --apply` ограничена папкой «Отработка» и архивом точных user peers из проверенного manifest; `interview-topic-update --apply` – собственными правками и двумя backed-up ZIP в закреплённом топике; `interview-topic-publish --apply` – новыми собственными интервью в том же фиксированном топике. `interview-topic-replace-video --apply` заменяет только audio IDs `2362`/`2365` на video с сохранением ID/родителя. History и выбор файлов идут последовательно и с pacing; downloader использует не более двух глобальных Telegram chunk slots. |
 
 ## Быстрый старт
 
@@ -202,7 +202,7 @@ Manifest – приватный JSON-файл `0600` или строже, не �
 
 - `document`: только `.md` с `text/markdown` либо `.pdf` с `application/pdf`; PDF проходит проверку заголовка.
 - `audio`: только `.m4a` с `audio/mp4` либо `.mp3` с `audio/mpeg`, `has_audio: true`, целая `duration` = округлённая вверх фактическая длительность в секундах. Загружается как обычное проигрываемое audio с `DocumentAttributeAudio`, без voice-флага.
-- `video`: MP4 с `mime: "video/mp4"`, фактическими `duration`, `width`, `height`, `has_audio`. Загружается как video с `supports_streaming: true` и правильным аудиопризнаком.
+- `video`: `.mp4` с MP4 `major_brand` (QuickTime `qt` отклоняется), `mime: "video/mp4"`, фактическими `duration`, `width`, `height`, `has_audio`. Загружается как video с `supports_streaming: true` и правильным аудиопризнаком.
 
 Для audio/video нужен локальный `ffprobe`. Его format/streams/duration сверяются с manifest; допуск video duration – 0.1 секунды. Файлы не перекодируются, новый ASR не запускается. Локальные hash/метаданные проверяются до первой записи, перед каждой загрузкой и после неё. Аккаунт, группа, имя/ID топика и принадлежность родителя проверяются до отправки, в том числе после загрузки. Как и другие Telegram-операции, CLI использует runtime lock и общий RPC pacing; сам send не повторяется после ошибки.
 
@@ -213,6 +213,42 @@ Apply атомарно сохраняет и синхронизирует при
 Серверный readback проверяет собственное авторство, группу, forum topic, точный reply parent, текст/entities и для файла имя, MIME и размер. Для audio также проверяет audio attribute, длительность и отсутствие voice/video; для video – длительность, разрешение, streaming, отсутствие round-video и аудиопризнак. `complete=true` требует проверки всех записей. Telegram readback подтверждает метаданные, а не повторное скачивание и hash серверных байтов. Локальные файлы и родительские сообщения нельзя менять во время выполнения; сервер не предоставляет атомарную проверку родителя вместе с send.
 
 Адресная проверка без живых сообщений: `go test ./internal/mtproto ./cmd/telegram-harvest -run 'TestInterviewTopicPublish|TestInterviewTopicUpdate|TestSendSaved' -count=1`. Живой preflight и apply выполняются отдельно в разрешённом сценарии.
+
+## Замена двух аудиопостов собеседований на видео
+
+`interview-topic-replace-video` – отдельная корректирующая команда по прямому поручению Игоря. Она заменяет audio на video в существующих собственных сообщениях `2362` (родитель `2361`) и `2365` (родитель `2364`) закреплённого топика `main/@Pheik13`, группа `2621478426`, топик `115`. Она не создаёт и не удаляет сообщения, не меняет MD/родителей и не удаляет локальные исходники. Альбомы исключены. API [`messages.editMessage`](https://core.telegram.org/method/messages.editMessage) принимает новое `InputMedia`; реальную допустимость конкретного media сервер подтверждает при apply.
+
+```bash
+bin/telegram-harvest --profile main interview-topic-replace-video --manifest /private/replace-video.json
+bin/telegram-harvest --profile main interview-topic-replace-video --manifest /private/replace-video.json --apply
+make interview-topic-replace-video PROFILE=main MANIFEST=/private/replace-video.json APPLY=1
+```
+
+Manifest – приватный JSON `0600` или строже, до 1 MiB; неизвестные поля отклоняются. Верхние поля: `profile: "main"`, `account_id: 1266978055`, `channel_id: 2621478426`, `topic_id: 115`, `replacements` с одной или двумя записями:
+
+```json
+{
+  "id": 2362,
+  "parent_id": 2361,
+  "parent_text_hash": "<SHA-256 полного текста родителя>",
+  "expected_caption_hash": "<SHA-256 полной старой подписи>",
+  "expected_media_id": "document:<точный старый Telegram ID>",
+  "old_audio": {"filename": "screening.m4a", "mime": "audio/mp4", "size": 12345, "duration": 60},
+  "new_caption": "Видеозапись",
+  "new_entities": [],
+  "new_video": {
+    "path": "/private/screening.mp4", "sha256": "<SHA-256 байтов MP4>",
+    "kind": "video", "filename": "screening.mp4", "mime": "video/mp4", "size": 123456,
+    "duration": 60.0, "width": 1920, "height": 1080, "has_audio": true
+  }
+}
+```
+
+`new_video` использует тот же hash/ffprobe/upload/video attributes, что publisher; `new_entities` – тот же UTF-16 формат entities. До первой загрузки проверяются обе строки, локальные hash/metadata, текущий аккаунт, группа/топик, авторство, точные ID/родитель/старые caption hash/media ID, имя/MIME/размер/длительность и обычный audio attribute без voice/video. После загрузки проверки локальных байтов, аккаунта/топика и исходного сообщения повторяются. Новый caption задаётся явно, без переноса прежних offsets.
+
+Dry-run не загружает, не редактирует и не пишет receipts. Apply сохраняет приватный `<manifest>.receipts.json` до edit; каждый edit вызывает ровно один paced RPC, без автоматического retry. После любого результата RPC выполняется readback того же ID: точные video metadata, caption/entities, sender, topic и прежний reply parent. `complete=true` требует подтверждения всех строк. Если сервер уже возвращает ожидаемое video, повторный запуск только проверяет его. Ошибка с неизвестным исходом оставляет `pending` receipt; если сервер всё ещё возвращает старое audio, автоматический повтор запрещён до ручной сверки. Если уже возвращает точное новое video, apply завершает receipt без нового upload/edit. Сохраняй manifest/receipts вместе вне Git и не очищай journal ради повторной попытки. Публикационные receipts исходного audio сохраняются как историческое подтверждение; прежний `publish` manifest после замены повторно не применяй.
+
+Адресная проверка без живого Telegram: `go test ./internal/mtproto ./cmd/telegram-harvest -run 'TestInterviewTopicReplaceVideo|TestInterviewTopicPublish' -count=1`. В тестах локальный `ffmpeg/ffprobe` создаёт короткий MP4; проверены оба ID, dry-run, точный edit без send/delete, readback/recovery, остановка unknown outcome и изменение исходного сообщения во время upload.
 
 ## Отправка в «Избранное»
 
@@ -567,7 +603,7 @@ bin/telegram-harvest --profile main daily-catchup --help
 
 ## Границы доступа
 
-- Сбор читает Telegram. По прямой просьбе Игоря доступны четыре узкие операции с серверной проверкой результата: [`main send-saved`](#отправка-в-избранное) в собственное «Избранное» `@Pheik13`, [`account-organize --apply`](#организация-рабочих-диалогов) для завершённых рабочих диалогов и [`interview-topic-update --apply`](#правка-материалов-в-топике-собеседований) для собственных материалов в закреплённом топике и [`interview-topic-publish --apply`](#публикация-новых-интервью-в-закреплённый-топик) для новых собственных интервью там же. Получатели, действия и проверки ограничены контрактом каждой команды; остальные операции записи не поддерживаются.
+- Сбор читает Telegram. По прямой просьбе Игоря доступны пять узких операций с серверной проверкой результата: [`main send-saved`](#отправка-в-избранное) в собственное «Избранное» `@Pheik13`, [`account-organize --apply`](#организация-рабочих-диалогов) для завершённых рабочих диалогов и [`interview-topic-update --apply`](#правка-материалов-в-топике-собеседований) для собственных материалов в закреплённом топике и [`interview-topic-publish --apply`](#публикация-новых-интервью-в-закреплённый-топик) для новых собственных интервью там же, а также [`interview-topic-replace-video --apply`](#замена-двух-аудиопостов-собеседований-на-видео) для замены audio IDs `2362`/`2365` на video в тех же сообщениях. Получатели, действия и проверки ограничены контрактом каждой команды; остальные операции записи не поддерживаются.
 - Broad daily scan пишет только outgoing/self messages и явно настроенных sender IDs строго в их настроенных chat IDs.
 - Study scope ограничивается `TG_HARVEST_STUDY_ALLOWED_CHATS`, когда allowlist задан.
 - `.env`, `.sessions/`, `.state/`, `reports/`, `models/`, `bin/`, дефолтные `chat.jsonl`/`media-manual` и generated views приватные и не коммитятся.

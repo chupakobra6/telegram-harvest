@@ -142,7 +142,7 @@ func ValidateInterviewTopicPublishManifest(m InterviewTopicPublishManifest) erro
 					return fmt.Errorf("audio requires M4A/audio-mp4 or MP3/audio-mpeg, integral duration and an audio stream")
 				}
 			case "video":
-				if f.MIME != "video/mp4" || f.Duration <= 0 || f.Width <= 0 || f.Height <= 0 {
+				if f.MIME != "video/mp4" || strings.ToLower(filepath.Ext(f.Filename)) != ".mp4" || f.Duration <= 0 || f.Width <= 0 || f.Height <= 0 {
 					return fmt.Errorf("video requires MP4, duration and dimensions")
 				}
 			default:
@@ -197,11 +197,12 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 			Height    int    `json:"height"`
 		} `json:"streams"`
 		Format struct {
-			Duration   string `json:"duration"`
-			FormatName string `json:"format_name"`
+			Duration   string            `json:"duration"`
+			FormatName string            `json:"format_name"`
+			Tags       map[string]string `json:"tags"`
 		} `json:"format"`
 	}
-	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration,format_name", "-of", "json", f.Path).Output()
+	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration,format_name:format_tags=major_brand", "-of", "json", f.Path).Output()
 	if err != nil {
 		return fmt.Errorf("ffprobe failed: %w", err)
 	}
@@ -236,8 +237,12 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 			return fmt.Errorf("audio container differs from declared MIME")
 		}
 	}
-	if f.Kind == "video" && !strings.Contains(probe.Format.FormatName, "mp4") {
-		return fmt.Errorf("video is not MP4")
+	if f.Kind == "video" {
+		brand := strings.TrimSpace(probe.Format.Tags["major_brand"])
+		allowedBrand := map[string]bool{"isom": true, "iso2": true, "iso3": true, "iso4": true, "iso5": true, "iso6": true, "mp41": true, "mp42": true, "avc1": true, "dash": true, "M4V": true, "MSNV": true}
+		if strings.ToLower(filepath.Ext(f.Filename)) != ".mp4" || !strings.Contains(","+probe.Format.FormatName+",", ",mp4,") || !allowedBrand[brand] {
+			return fmt.Errorf("video is not an allowed MP4 container/major_brand")
+		}
 	}
 	return nil
 }
@@ -498,39 +503,47 @@ func publishInterviewTopic(ctx context.Context, s topicPublishSource, m Intervie
 
 // PublishInterviewTopic requires a private durable journal beside the reviewed manifest.
 func (s *Session) PublishInterviewTopic(ctx context.Context, m InterviewTopicPublishManifest, journalPath string, apply bool) (InterviewTopicPublishResult, error) {
+	j, err := loadPublishJournal(journalPath)
+	if err != nil {
+		return InterviewTopicPublishResult{}, err
+	}
+	save := func() error { return savePublishJournal(journalPath, j) }
+	return publishInterviewTopic(ctx, &interviewTopicSession{Session: s}, m, j, save, apply)
+}
+func loadPublishJournal(journalPath string) (topicPublishJournal, error) {
 	j := topicPublishJournal{}
 	f, err := os.Open(journalPath)
 	if err == nil {
 		defer f.Close()
 		info, statErr := f.Stat()
 		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > 1<<20 {
-			return InterviewTopicPublishResult{}, fmt.Errorf("journal must be private regular file, at most 1 MiB")
+			return nil, fmt.Errorf("journal must be private regular file, at most 1 MiB")
 		}
 		b, readErr := io.ReadAll(io.LimitReader(f, (1<<20)+1))
 		if readErr != nil {
-			return InterviewTopicPublishResult{}, readErr
+			return nil, readErr
 		}
 		decoder := json.NewDecoder(bytes.NewReader(b))
 		decoder.DisallowUnknownFields()
 		if err = decoder.Decode(&j); err != nil {
-			return InterviewTopicPublishResult{}, err
+			return nil, err
 		}
 		var extra any
 		if err = decoder.Decode(&extra); !errors.Is(err, io.EOF) || j == nil {
-			return InterviewTopicPublishResult{}, fmt.Errorf("journal must contain one non-null object")
+			return nil, fmt.Errorf("journal must contain one non-null object")
 		}
 		for _, receipt := range j {
 			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= InterviewTopicID {
-				return InterviewTopicPublishResult{}, fmt.Errorf("invalid receipt")
+				return nil, fmt.Errorf("invalid receipt")
 			}
 		}
 	} else if !os.IsNotExist(err) {
-		return InterviewTopicPublishResult{}, err
+		return nil, err
 	}
 
-	save := func() error { return savePublishJournal(journalPath, j) }
-	return publishInterviewTopic(ctx, &interviewTopicSession{Session: s}, m, j, save, apply)
+	return j, nil
 }
+
 func savePublishJournal(path string, j topicPublishJournal) error {
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
@@ -604,22 +617,11 @@ func (s *interviewTopicSession) publishSend(ctx context.Context, p InterviewTopi
 	}
 	var media tg.InputMediaClass
 	if p.File != nil {
-		f := p.File
-		uploaded, e := message.NewSender(s.raw).Self().Upload(message.FromPath(f.Path)).AsInputFile(ctx)
-		if e != nil {
-			return 0, e
+		var uploadErr error
+		media, uploadErr = s.uploadInterviewFile(ctx, p.File)
+		if uploadErr != nil {
+			return 0, uploadErr
 		}
-		if e = verifyPublishFile(ctx, f); e != nil {
-			return 0, e
-		}
-		attrs := []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: f.Filename}}
-		switch f.Kind {
-		case "audio":
-			attrs = append(attrs, &tg.DocumentAttributeAudio{Duration: int(f.Duration)})
-		case "video":
-			attrs = append(attrs, &tg.DocumentAttributeVideo{Duration: f.Duration, W: f.Width, H: f.Height, SupportsStreaming: true, Nosound: !f.HasAudio})
-		}
-		media = &tg.InputMediaUploadedDocument{File: uploaded, MimeType: f.MIME, Attributes: attrs, NosoundVideo: f.Kind == "video" && !f.HasAudio}
 	}
 	if err = checkPublishIdentity(ctx, s); err != nil {
 		return 0, err
@@ -653,4 +655,22 @@ func (s *interviewTopicSession) publishSend(ctx context.Context, p InterviewTopi
 	}
 	id, err := unpack.MessageID(updates, nil)
 	return id, err
+}
+
+func (s *interviewTopicSession) uploadInterviewFile(ctx context.Context, f *InterviewTopicFile) (tg.InputMediaClass, error) {
+	uploaded, e := message.NewSender(s.raw).Self().Upload(message.FromPath(f.Path)).AsInputFile(ctx)
+	if e != nil {
+		return nil, e
+	}
+	if e = verifyPublishFile(ctx, f); e != nil {
+		return nil, e
+	}
+	attrs := []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: f.Filename}}
+	switch f.Kind {
+	case "audio":
+		attrs = append(attrs, &tg.DocumentAttributeAudio{Duration: int(f.Duration)})
+	case "video":
+		attrs = append(attrs, &tg.DocumentAttributeVideo{Duration: f.Duration, W: f.Width, H: f.Height, SupportsStreaming: true, Nosound: !f.HasAudio})
+	}
+	return &tg.InputMediaUploadedDocument{File: uploaded, MimeType: f.MIME, Attributes: attrs, NosoundVideo: f.Kind == "video" && !f.HasAudio}, nil
 }
