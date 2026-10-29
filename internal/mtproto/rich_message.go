@@ -135,6 +135,8 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 				}
 			case *tg.PageBlockDivider:
 				continue
+			case *tg.PageBlockTable:
+				part, err = richTableText(v, text)
 			case *tg.PageBlockList:
 				var list []string
 				for _, item := range v.Items {
@@ -240,6 +242,46 @@ func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 	}
 	body, err := blocks(rich.Blocks)
 	return strings.TrimSpace(body), mergeLinks(links, extractLinks(body, nil)), err
+}
+
+// Plain text has no merged cells. Keep source row/cell order and annotate spans
+// rather than inventing a rectangular grid or dropping empty cells.
+func richTableText(table *tg.PageBlockTable, text func(tg.RichTextClass) (string, error)) (string, error) {
+	title, err := text(table.Title)
+	if err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	out.WriteString("Table")
+	if title != "" {
+		out.WriteString(": " + title)
+	}
+	for rowIndex, row := range table.Rows {
+		fmt.Fprintf(&out, "\nRow %d:", rowIndex+1)
+		for cellIndex, cell := range row.Cells {
+			var attributes []string
+			if cell.Header {
+				attributes = append(attributes, "header")
+			}
+			if span, ok := cell.GetColspan(); ok {
+				attributes = append(attributes, "colspan="+strconv.Itoa(span))
+			}
+			if span, ok := cell.GetRowspan(); ok {
+				attributes = append(attributes, "rowspan="+strconv.Itoa(span))
+			}
+			value, _ := cell.GetText()
+			content, err := text(value)
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(&out, "\n- Cell %d", cellIndex+1)
+			if len(attributes) != 0 {
+				fmt.Fprintf(&out, " [%s]", strings.Join(attributes, ", "))
+			}
+			out.WriteString(": " + content)
+		}
+	}
+	return out.String(), nil
 }
 
 // Reuse the ordinary media path, including download limits, cache and ASR.

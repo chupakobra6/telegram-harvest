@@ -144,3 +144,75 @@ func TestRichMediaIDsRemainOpaqueSignedValues(t *testing.T) {
 		t.Fatalf("signed media ID was rejected: %v, %v", media, err)
 	}
 }
+
+func TestPrepareAndNormalizeRichTablePreservesCellsSpansHeadersAndLinks(t *testing.T) {
+	cell := func(value tg.RichTextClass) tg.PageTableCell {
+		var result tg.PageTableCell
+		result.SetText(value)
+		return result
+	}
+	header := cell(&tg.TextBold{Text: &tg.TextPlain{Text: "Role | level"}})
+	header.Header = true
+	header.SetColspan(2)
+	header.SetRowspan(3)
+	details := cell(&tg.TextConcat{Texts: []tg.RichTextClass{
+		&tg.TextItalic{Text: &tg.TextURL{Text: &tg.TextPlain{Text: "Details"}, URL: "https://example.org/table-job"}},
+		&tg.TextPlain{Text: "\nGo "},
+		&tg.TextCustomEmoji{DocumentID: -123, Alt: "🏠"},
+	}})
+	unitSpan := cell(&tg.TextPlain{Text: "Last"})
+	unitSpan.SetColspan(1)
+	msg := &tg.Message{ID: 4784, Date: 1700000000}
+	msg.SetRichMessage(tg.RichMessage{Blocks: []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Before"}},
+		&tg.PageBlockDetails{Title: &tg.TextPlain{Text: "Section"}, Blocks: []tg.PageBlockClass{
+			&tg.PageBlockTable{
+				Title: &tg.TextURL{Text: &tg.TextBold{Text: &tg.TextPlain{Text: "Openings"}}, URL: "https://example.org/table"},
+				Rows: []tg.PageTableRow{
+					{Cells: []tg.PageTableCell{header, {}, details}},
+					{},
+					{Cells: []tg.PageTableCell{cell(&tg.TextEmpty{}), unitSpan}},
+				},
+			},
+		}},
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "After"}},
+	}})
+	if err := (&Session{}).prepareRichMessage(context.Background(), resolvedTarget{}, msg); err != nil {
+		t.Fatalf("complete rich table rejected: %v", err)
+	}
+	record, ok := normalizeRecord(msg, harvest.Chat{ID: 42, Type: "channel"}, peer.Entities{})
+	want := "Before\n\nSection\n\nTable: Openings\nRow 1:\n- Cell 1 [header, colspan=2, rowspan=3]: Role | level\n- Cell 2: \n- Cell 3: Details\nGo 🏠\nRow 2:\nRow 3:\n- Cell 1: \n- Cell 2 [colspan=1]: Last\n\nAfter"
+	if !ok || record.Text != want {
+		t.Fatalf("table content or structure lost: got %q, want %q (ok=%v)", record.Text, want, ok)
+	}
+	if len(record.Links) != 2 || record.Links[0] != "https://example.org/table" || record.Links[1] != "https://example.org/table-job" {
+		t.Fatalf("table rich text links or order lost: %v", record.Links)
+	}
+}
+
+func TestRichTablePreservesEmptyStructureAndRejectsUnsupportedText(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		table *tg.PageBlockTable
+		want  string
+	}{
+		{name: "empty table", table: &tg.PageBlockTable{}, want: "Table"},
+		{name: "empty row", table: &tg.PageBlockTable{Rows: []tg.PageTableRow{{}}}, want: "Table\nRow 1:"},
+		{name: "empty cell", table: &tg.PageBlockTable{Rows: []tg.PageTableRow{{Cells: []tg.PageTableCell{{}}}}}, want: "Table\nRow 1:\n- Cell 1:"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := richMessageContent(tg.RichMessage{Blocks: []tg.PageBlockClass{tt.table}})
+			if err != nil || got != tt.want {
+				t.Fatalf("empty table structure lost: got %q, err %v, want %q", got, err, tt.want)
+			}
+		})
+	}
+	var unsupported tg.PageTableCell
+	unsupported.SetText(&tg.TextImage{DocumentID: 123})
+	rich := tg.RichMessage{Blocks: []tg.PageBlockClass{
+		&tg.PageBlockTable{Rows: []tg.PageTableRow{{Cells: []tg.PageTableCell{unsupported}}}},
+	}}
+	if _, _, err := richMessageContent(rich); err == nil {
+		t.Fatal("unsupported cell text silently accepted")
+	}
+}
