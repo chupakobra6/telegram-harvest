@@ -24,7 +24,7 @@ help:
 	@printf "  make race    # run tests with the race detector\\n"
 	@printf "  make check   # formatting, module, vet, and test validation\\n"
 	@printf "  make audit   # static analysis and reachable vulnerability scan\\n"
-	@printf "  make verify  # full local and CI validation\\n"
+	@printf "  make verify  # full local validation\\n"
 	@printf "  make account-add ACCOUNT_NAME=work API_PROFILE=main # register a full-account profile\\n"
 	@printf "  make account-list # list registered full-account profiles\\n"
 	@printf "  make doctor PROFILE=main|study|<account-name> # show config/session status\\n"

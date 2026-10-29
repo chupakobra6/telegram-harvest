@@ -186,7 +186,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	if err != nil {
 		return result, err
 	}
-	folder, changed, err := mergeCompletedWorkFolder(filters, m.Peers, users)
+	folder, _, err := mergeCompletedWorkFolder(filters, m.Peers, users)
 	if err != nil {
 		return result, err
 	}
@@ -213,7 +213,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	if err != nil {
 		return result, err
 	}
-	folder, changed, err = mergeCompletedWorkFolder(filters, m.Peers, users)
+	folder, changed, err := mergeCompletedWorkFolder(filters, m.Peers, users)
 	if err != nil {
 		return result, err
 	}
