@@ -5,10 +5,14 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -19,6 +23,7 @@ import (
 	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/message/unpack"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 const SavedMessagesMainUsername = "Pheik13"
@@ -44,10 +49,14 @@ type SavedCopyVerification struct {
 	SourceMessageID    int    `json:"source_message_id"`
 	SourceMediaID      string `json:"source_media_id"`
 	DestinationMediaID string `json:"destination_media_id"`
-	SourceSHA256       string `json:"source_sha256"`
+	Method             string `json:"method"`
+	SourceSHA256       string `json:"source_sha256,omitempty"`
+	SameServerDocument bool   `json:"same_server_document"`
 	ExactFileUploaded  bool   `json:"exact_file_uploaded"`
+	PreviewPresent     bool   `json:"preview_present"`
 	PreviewPreserved   bool   `json:"preview_preserved"`
 	Video              bool   `json:"video"`
+	Audio              bool   `json:"audio"`
 	SupportsStreaming  bool   `json:"supports_streaming"`
 }
 
@@ -164,6 +173,11 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 	var sourceEvidence savedVideoEvidence
 	var sourceTarget resolvedTarget
 	var sourceSHA256 string
+	var copyMethod string
+	var sourceMessageValue *tg.Message
+	var sourceAudio *tg.DocumentAttributeAudio
+	var sourcePreviewSHA256 string
+	var copyTempDir string
 	var updates tg.UpdatesClass
 	if strings.TrimSpace(opts.SourceChat) != "" {
 		sourceTarget, err = s.resolveTarget(ctx, opts.SourceChat)
@@ -178,55 +192,85 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 		if !ok {
 			return SendSavedResult{}, fmt.Errorf("source message %d has an unsupported type", opts.SourceMessageID)
 		}
-		sourceEvidence, err = savedVideoEvidenceFromMessage(sourceMessage)
-		if err != nil {
-			return SendSavedResult{}, fmt.Errorf("source message %d is not a copyable Telegram video: %w", opts.SourceMessageID, err)
-		}
-		if !sourceEvidence.HasPreview {
-			return SendSavedResult{}, fmt.Errorf("source message %d has no Telegram video preview; refusing a transfer that cannot prove preview preservation", opts.SourceMessageID)
-		}
 		sourceRecord = &normalizedSource
-		sourceMessageValue, sourceDocument, documentErr := savedVideoDocumentFromMessage(sourceMessage)
+		sourceValue, sourceDocument, documentErr := savedVideoDocumentFromMessage(sourceMessage)
+		sourceMessageValue = sourceValue
 		if documentErr != nil {
 			return SendSavedResult{}, fmt.Errorf("prepare source message %d for copy: %w", opts.SourceMessageID, documentErr)
 		}
-		tempDir, tempErr := os.MkdirTemp("", "telegram-harvest-send-saved-")
-		if tempErr != nil {
-			return SendSavedResult{}, fmt.Errorf("prepare temporary video transfer: %w", tempErr)
+		sourceAudio, err = savedNativeAudioAttribute(sourceDocument)
+		if err != nil {
+			return SendSavedResult{}, err
 		}
-		defer os.RemoveAll(tempDir)
-		videoPath, thumbPath, hashValue, downloadErr := s.downloadSavedVideoSource(ctx, sourceDocument, tempDir)
-		if downloadErr != nil {
-			return SendSavedResult{}, fmt.Errorf("download source message %d for exact upload: %w", opts.SourceMessageID, downloadErr)
+		if sourceAudio != nil {
+			if len(normalizedSource.Attachments) != 1 || normalizedSource.Attachments[0].Kind != "audio" {
+				return SendSavedResult{}, fmt.Errorf("source is not an ordinary native audio document")
+			}
+			sourceEvidence.DocumentID = sourceDocument.ID
+			randomID, randomErr := nonzeroRandomID()
+			if randomErr != nil {
+				return SendSavedResult{}, randomErr
+			}
+			updates, err = s.raw.MessagesSendMedia(ctx, savedDocumentReuseRequest(sourceMessageValue, sourceDocument, randomID))
+			copyMethod = savedVideoServerReuse
+		} else {
+			sourceEvidence, err = savedVideoEvidenceFromMessage(sourceMessage)
+			if err != nil {
+				return SendSavedResult{}, fmt.Errorf("source message %d is not a supported Telegram video or native audio: %w", opts.SourceMessageID, err)
+			}
+
+			tempDir, tempErr := os.MkdirTemp("", "telegram-harvest-send-saved-")
+			if tempErr != nil {
+				return SendSavedResult{}, fmt.Errorf("prepare temporary video transfer: %w", tempErr)
+			}
+			defer os.RemoveAll(tempDir)
+			copyTempDir = tempDir
+			var thumbPath string
+			if sourceEvidence.HasPreview {
+				var previewErr error
+				thumbPath, sourcePreviewSHA256, previewErr = s.downloadSavedVideoPreview(ctx, sourceMessageValue, tempDir, "source-preview.jpg")
+				if previewErr != nil {
+					return SendSavedResult{}, fmt.Errorf("verify source video preview before sending: %w", previewErr)
+				}
+			}
+			randomID, randomErr := nonzeroRandomID()
+			if randomErr != nil {
+				return SendSavedResult{}, fmt.Errorf("generate copy random id: %w", randomErr)
+			}
+			request := savedDocumentReuseRequest(sourceMessageValue, sourceDocument, randomID)
+			updates, copyMethod, sourceSHA256, err = sendSavedVideoCopy(ctx, request, !sourceMessageValue.Noforwards, s.raw.MessagesSendMedia, func() (tg.InputMediaClass, string, error) {
+				if err := validateSavedVideoUploadPreview(sourceDocument); err != nil {
+					return nil, "", err
+				}
+				uploadThumbPath := thumbPath
+				if sourceMessageValue.Media.(*tg.MessageMediaDocument).VideoCover != nil {
+					staticMessage := &tg.Message{Media: &tg.MessageMediaDocument{Document: sourceDocument}}
+					var previewErr error
+					uploadThumbPath, _, previewErr = s.downloadSavedVideoPreview(ctx, staticMessage, tempDir, "upload-preview.jpg")
+					if previewErr != nil {
+						return nil, "", previewErr
+					}
+				}
+				videoPath, hashValue, downloadErr := s.downloadSavedVideoSource(ctx, sourceDocument, tempDir)
+				if downloadErr != nil {
+					return nil, "", fmt.Errorf("download source message %d for exact upload: %w", opts.SourceMessageID, downloadErr)
+				}
+				uploadedVideo, uploadErr := builder.Upload(message.FromPath(videoPath)).AsInputFile(ctx)
+				if uploadErr != nil {
+					return nil, "", fmt.Errorf("upload source video to Saved Messages: %w", uploadErr)
+				}
+				uploadedThumb, uploadErr := builder.Upload(message.FromPath(uploadThumbPath)).AsInputFile(ctx)
+				if uploadErr != nil {
+					return nil, "", fmt.Errorf("upload source video preview to Saved Messages: %w", uploadErr)
+				}
+				return &tg.InputMediaUploadedDocument{
+					NosoundVideo: normalizedSource.Attachments[0].NoAudio,
+					Spoiler:      sourceMessageValue.Media.(*tg.MessageMediaDocument).Spoiler,
+					File:         uploadedVideo, Thumb: uploadedThumb,
+					MimeType: sourceDocument.MimeType, Attributes: sourceDocument.Attributes,
+				}, hashValue, nil
+			})
 		}
-		sourceSHA256 = hashValue
-		uploadedVideo, uploadErr := builder.Upload(message.FromPath(videoPath)).AsInputFile(ctx)
-		if uploadErr != nil {
-			return SendSavedResult{}, fmt.Errorf("upload source video to Saved Messages: %w", uploadErr)
-		}
-		uploadedThumb, uploadErr := builder.Upload(message.FromPath(thumbPath)).AsInputFile(ctx)
-		if uploadErr != nil {
-			return SendSavedResult{}, fmt.Errorf("upload source video preview to Saved Messages: %w", uploadErr)
-		}
-		randomID, randomErr := nonzeroRandomID()
-		if randomErr != nil {
-			return SendSavedResult{}, fmt.Errorf("generate copy random id: %w", randomErr)
-		}
-		sourceMedia := sourceMessageValue.Media.(*tg.MessageMediaDocument)
-		updates, err = s.raw.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer: &tg.InputPeerSelf{},
-			Media: &tg.InputMediaUploadedDocument{
-				NosoundVideo: normalizedSource.Attachments[0].NoAudio,
-				Spoiler:      sourceMedia.Spoiler,
-				File:         uploadedVideo,
-				Thumb:        uploadedThumb,
-				MimeType:     sourceDocument.MimeType,
-				Attributes:   sourceDocument.Attributes,
-			},
-			Message:  sourceMessageValue.Message,
-			RandomID: randomID,
-			Entities: sourceMessageValue.Entities,
-		})
 	} else if fileMetadata == nil {
 		updates, err = builder.Text(ctx, opts.Text)
 	} else {
@@ -245,7 +289,7 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 		updates, err = builder.Media(ctx, document)
 	}
 	if err != nil {
-		return SendSavedResult{}, fmt.Errorf("send to Saved Messages: %w", err)
+		return SendSavedResult{}, fmt.Errorf("send to Saved Messages failed; outcome may be unknown, do not retry blindly: %w", err)
 	}
 
 	messageID, err := unpack.MessageID(updates, nil)
@@ -276,23 +320,50 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 	}
 	result.Message = record
 	if sourceRecord != nil {
-		destinationEvidence, evidenceErr := savedVideoEvidenceFromMessage(readbackMessage)
-		if evidenceErr != nil {
-			return result, fmt.Errorf("message %d was copied to Saved Messages but video readback failed; do not retry blindly: %w", messageID, evidenceErr)
-		}
-		if verifyErr := verifyCopiedSavedMessage(record, *sourceRecord, profile, sourceEvidence, destinationEvidence); verifyErr != nil {
-			return result, fmt.Errorf("message %d was copied to Saved Messages but verification failed; do not retry blindly: %w", messageID, verifyErr)
-		}
-		result.Copy = &SavedCopyVerification{
-			SourceChatID:       sourceTarget.Chat.ID,
-			SourceMessageID:    opts.SourceMessageID,
-			SourceMediaID:      sourceRecord.Attachments[0].MediaID,
-			DestinationMediaID: record.Attachments[0].MediaID,
-			SourceSHA256:       sourceSHA256,
-			ExactFileUploaded:  true,
-			PreviewPreserved:   true,
-			Video:              true,
-			SupportsStreaming:  destinationEvidence.SupportsStreaming,
+		if sourceAudio != nil {
+			if verifyErr := verifyCopiedSavedAudio(record, *sourceRecord, profile, sourceMessageValue, readbackMessage); verifyErr != nil {
+				return result, fmt.Errorf("message %d audio copy verification failed; do not retry blindly: %w", messageID, verifyErr)
+			}
+			result.Copy = &SavedCopyVerification{
+				SourceChatID: sourceTarget.Chat.ID, SourceMessageID: opts.SourceMessageID,
+				SourceMediaID: sourceRecord.Attachments[0].MediaID, DestinationMediaID: record.Attachments[0].MediaID,
+				Method: savedVideoServerReuse, SameServerDocument: true, Audio: true,
+			}
+		} else {
+
+			destinationEvidence, evidenceErr := savedVideoEvidenceFromMessage(readbackMessage)
+			if evidenceErr != nil {
+				return result, fmt.Errorf("message %d was copied to Saved Messages but video readback failed; do not retry blindly: %w", messageID, evidenceErr)
+			}
+			if verifyErr := verifyCopiedSavedMessage(record, *sourceRecord, profile, sourceEvidence, destinationEvidence); verifyErr != nil {
+				return result, fmt.Errorf("message %d was copied to Saved Messages but verification failed; do not retry blindly: %w", messageID, verifyErr)
+			}
+			if verifyErr := verifySavedVideoCopyMethod(sourceMessageValue, readbackMessage, copyMethod, sourceEvidence, destinationEvidence); verifyErr != nil {
+				return result, fmt.Errorf("message %d copy verification failed; do not retry blindly: %w", messageID, verifyErr)
+			}
+			if sourceEvidence.HasPreview {
+				_, destinationPreviewHash, previewErr := s.downloadSavedVideoPreview(ctx, readbackMessage, copyTempDir, "destination-preview.jpg")
+				if previewErr != nil {
+					return result, fmt.Errorf("message %d preview readback failed; do not retry blindly: %w", messageID, previewErr)
+				}
+				if copyMethod == savedVideoServerReuse && destinationPreviewHash != sourcePreviewSHA256 {
+					return result, fmt.Errorf("message %d reused preview bytes changed; do not retry blindly", messageID)
+				}
+			}
+			result.Copy = &SavedCopyVerification{
+				SourceChatID:       sourceTarget.Chat.ID,
+				SourceMessageID:    opts.SourceMessageID,
+				SourceMediaID:      sourceRecord.Attachments[0].MediaID,
+				DestinationMediaID: record.Attachments[0].MediaID,
+				Method:             copyMethod,
+				SourceSHA256:       sourceSHA256,
+				SameServerDocument: sourceEvidence.DocumentID == destinationEvidence.DocumentID,
+				ExactFileUploaded:  copyMethod == savedVideoExactUpload,
+				PreviewPresent:     destinationEvidence.HasPreview,
+				PreviewPreserved:   sourceEvidence.HasPreview && destinationEvidence.HasPreview,
+				Video:              true,
+				SupportsStreaming:  destinationEvidence.SupportsStreaming,
+			}
 		}
 	} else if err := verifySavedMessage(record, profile, opts, fileMetadata); err != nil {
 		return result, fmt.Errorf("message %d was sent to Saved Messages but verification failed; do not retry blindly: %w", messageID, err)
@@ -409,7 +480,7 @@ func verifyCopiedSavedMessage(record, source harvest.MessageRecord, profile harv
 	if sourceEvidence.DocumentID == 0 || destinationEvidence.DocumentID == 0 {
 		return fmt.Errorf("telegram document id is missing from source or destination readback")
 	}
-	if !sourceEvidence.HasPreview || !destinationEvidence.HasPreview {
+	if sourceEvidence.HasPreview && !destinationEvidence.HasPreview {
 		return fmt.Errorf("telegram video preview was not preserved")
 	}
 	if destinationEvidence.SupportsStreaming != sourceEvidence.SupportsStreaming {
@@ -418,36 +489,152 @@ func verifyCopiedSavedMessage(record, source harvest.MessageRecord, profile harv
 	return nil
 }
 
-func (s *Session) downloadSavedVideoSource(ctx context.Context, document *tg.Document, tempDir string) (string, string, string, error) {
+const (
+	savedVideoServerReuse = "server_reuse"
+	savedVideoExactUpload = "exact_upload"
+)
+
+func savedDocumentReuseRequest(source *tg.Message, document *tg.Document, randomID int64) *tg.MessagesSendMediaRequest {
+	sourceMedia := source.Media.(*tg.MessageMediaDocument)
+	media := &tg.InputMediaDocument{
+		ID:      &tg.InputDocument{ID: document.ID, AccessHash: document.AccessHash, FileReference: document.FileReference},
+		Spoiler: sourceMedia.Spoiler,
+	}
+	if cover, ok := sourceMedia.VideoCover.(*tg.Photo); ok {
+		media.VideoCover = &tg.InputPhoto{ID: cover.ID, AccessHash: cover.AccessHash, FileReference: cover.FileReference}
+	}
+	if timestamp, ok := sourceMedia.GetVideoTimestamp(); ok {
+		media.SetVideoTimestamp(timestamp)
+	}
+	return &tg.MessagesSendMediaRequest{
+		Peer: &tg.InputPeerSelf{}, Media: media,
+		Message: source.Message, Entities: source.Entities, RandomID: randomID,
+	}
+}
+
+// Only a Telegram RPC rejection of the file reference proves that this request
+// did not send. Privacy restrictions and uncertain transport errors never fall
+// back to an upload. Keep the same random ID across the definitive rejection.
+func sendSavedVideoCopy(ctx context.Context, request *tg.MessagesSendMediaRequest, reuse bool,
+	send func(context.Context, *tg.MessagesSendMediaRequest) (tg.UpdatesClass, error),
+	upload func() (tg.InputMediaClass, string, error),
+) (tg.UpdatesClass, string, string, error) {
+	if reuse {
+		updates, err := send(ctx, request)
+		if err == nil {
+			return updates, savedVideoServerReuse, "", nil
+		}
+		rpcErr, ok := tgerr.As(err)
+		if !ok || rpcErr.Code != 400 || (rpcErr.Message != "FILE_REFERENCE_EXPIRED" && rpcErr.Message != "FILE_REFERENCE_INVALID") {
+			return nil, "", "", err
+		}
+	}
+	media, hash, err := upload()
+	if err != nil {
+		return nil, "", "", err
+	}
+	request.Media = media
+	updates, err := send(ctx, request)
+	return updates, savedVideoExactUpload, hash, err
+}
+
+func verifySavedVideoCopyMethod(source *tg.Message, destination tg.MessageClass, method string, before, after savedVideoEvidence) error {
+	message, ok := destination.(*tg.Message)
+	if !ok || source.Message != message.Message || !reflect.DeepEqual(source.Entities, message.Entities) {
+		return fmt.Errorf("exact caption or entities readback mismatch")
+	}
+	switch method {
+	case savedVideoServerReuse:
+		sourceMedia, sourceOK := source.Media.(*tg.MessageMediaDocument)
+		destinationMedia, destinationOK := message.Media.(*tg.MessageMediaDocument)
+		if sourceOK && destinationOK {
+			if cover, ok := sourceMedia.VideoCover.(*tg.Photo); ok {
+				copiedCover, ok := destinationMedia.VideoCover.(*tg.Photo)
+				if !ok || copiedCover.ID != cover.ID {
+					return fmt.Errorf("server reuse changed video cover")
+				}
+			}
+		}
+		if before.DocumentID != after.DocumentID {
+			return fmt.Errorf("server reuse returned a different document ID")
+		}
+	case savedVideoExactUpload:
+	default:
+		return fmt.Errorf("unknown video copy method %q", method)
+	}
+	return nil
+}
+
+func validateSavedVideoUploadPreview(document *tg.Document) error {
+	if _, _, ok := savedVideoThumbnailLocation(document); !ok {
+		return fmt.Errorf("exact upload requires a downloadable static video thumbnail; no full transfer or send attempted")
+	}
+	return nil
+}
+
+func savedVideoPreviewLocation(message tg.MessageClass) (tg.InputFileLocationClass, int64, bool) {
+	value, document, err := savedVideoDocumentFromMessage(message)
+	if err != nil {
+		return nil, 0, false
+	}
+	media := value.Media.(*tg.MessageMediaDocument)
+	if cover, ok := media.VideoCover.(*tg.Photo); ok {
+		thumbSize := bestPhotoThumbSize(cover)
+		size := photoThumbSizeBytes(cover, thumbSize)
+		if thumbSize == "" || size <= 0 {
+			return nil, 0, false
+		}
+		return cover.AsInputPhotoFileLocation(thumbSize), size, true
+	}
+	return savedVideoThumbnailLocation(document)
+}
+
+func (s *Session) downloadSavedVideoPreview(ctx context.Context, message tg.MessageClass, tempDir, name string) (string, string, error) {
+	location, size, ok := savedVideoPreviewLocation(message)
+	if !ok {
+		return "", "", fmt.Errorf("telegram preview has no downloadable static thumbnail")
+	}
+	path := filepath.Join(tempDir, name)
+	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
+	defer cancel()
+	if err := s.downloadFile(downloadCtx, location, path, size, nil); err != nil {
+		return "", "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", "", err
+	}
+	config, _, decodeErr := image.DecodeConfig(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return "", "", fmt.Errorf("decode preview: %w", decodeErr)
+	}
+	if closeErr != nil {
+		return "", "", closeErr
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		return "", "", fmt.Errorf("empty preview dimensions")
+	}
+	hash, err := fileSHA256(path)
+	return path, hash, err
+}
+
+func (s *Session) downloadSavedVideoSource(ctx context.Context, document *tg.Document, tempDir string) (string, string, error) {
 	fileName := safeFileName(documentFileName(document))
 	if fileName == "" {
-		return "", "", "", fmt.Errorf("source filename is missing")
+		return "", "", fmt.Errorf("source filename is missing")
 	}
 	videoPath := filepath.Join(tempDir, fileName)
 	downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
-	err := s.downloadFile(downloadCtx, document.AsInputDocumentFileLocation(""), videoPath, document.Size, nil)
-	cancel()
-	if err != nil {
-		return "", "", "", fmt.Errorf("video: %w", err)
+	defer cancel()
+	if err := s.downloadFile(downloadCtx, document.AsInputDocumentFileLocation(""), videoPath, document.Size, nil); err != nil {
+		return "", "", fmt.Errorf("video: %w", err)
 	}
-
-	thumbLocation, thumbSize, ok := savedVideoThumbnailLocation(document)
-	if !ok {
-		return "", "", "", fmt.Errorf("source Telegram preview has no downloadable static thumbnail")
-	}
-	thumbPath := filepath.Join(tempDir, "preview.jpg")
-	thumbCtx, thumbCancel := context.WithTimeout(ctx, defaultDownloadTimeout)
-	err = s.downloadFile(thumbCtx, thumbLocation, thumbPath, thumbSize, nil)
-	thumbCancel()
-	if err != nil {
-		return "", "", "", fmt.Errorf("preview: %w", err)
-	}
-
 	hashValue, err := fileSHA256(videoPath)
 	if err != nil {
-		return "", "", "", fmt.Errorf("hash downloaded source video: %w", err)
+		return "", "", fmt.Errorf("hash downloaded source video: %w", err)
 	}
-	return videoPath, thumbPath, hashValue, nil
+	return videoPath, hashValue, nil
 }
 
 func savedVideoThumbnailLocation(document *tg.Document) (tg.InputFileLocationClass, int64, bool) {
@@ -547,4 +734,53 @@ func savedVideoEvidenceFromMessage(messageClass tg.MessageClass) (savedVideoEvid
 		return evidence, nil
 	}
 	return savedVideoEvidence{}, fmt.Errorf("telegram video attribute is missing")
+}
+
+// Native audio is reused as a Telegram document, never downloaded or uploaded.
+func savedNativeAudioAttribute(document *tg.Document) (*tg.DocumentAttributeAudio, error) {
+	for _, attribute := range document.Attributes {
+		if audio, ok := attribute.(*tg.DocumentAttributeAudio); ok {
+			if audio.Voice {
+				return nil, fmt.Errorf("voice messages are not supported by send-saved source copy")
+			}
+			return audio, nil
+		}
+	}
+	return nil, nil
+}
+
+func verifyCopiedSavedAudio(record, source harvest.MessageRecord, profile harvest.SelfProfile, original, copied tg.MessageClass) error {
+	sourceValue, sourceDocument, err := savedVideoDocumentFromMessage(original)
+	if err != nil {
+		return err
+	}
+	destinationValue, destinationDocument, err := savedVideoDocumentFromMessage(copied)
+	if err != nil {
+		return err
+	}
+	if sourceDocument.ID == 0 || sourceDocument.ID != destinationDocument.ID {
+		return fmt.Errorf("native audio document ID changed")
+	}
+	sourceAudio, err := savedNativeAudioAttribute(sourceDocument)
+	if err != nil {
+		return err
+	}
+	destinationAudio, err := savedNativeAudioAttribute(destinationDocument)
+	if err != nil {
+		return err
+	}
+	if sourceAudio == nil || destinationAudio == nil || sourceAudio.Duration != destinationAudio.Duration || sourceAudio.Title != destinationAudio.Title || sourceAudio.Performer != destinationAudio.Performer {
+		return fmt.Errorf("native audio attributes changed")
+	}
+	if sourceValue.Message != destinationValue.Message || !reflect.DeepEqual(sourceValue.Entities, destinationValue.Entities) {
+		return fmt.Errorf("exact audio caption or entities changed")
+	}
+	if len(source.Attachments) != 1 || source.Attachments[0].Kind != "audio" || len(record.Attachments) != 1 || record.Attachments[0].Kind != "audio" {
+		return fmt.Errorf("expected one native audio attachment")
+	}
+	attachment := source.Attachments[0]
+	if attachment.MediaID == "" || record.Attachments[0].MediaID != attachment.MediaID {
+		return fmt.Errorf("native audio media ID changed")
+	}
+	return verifySavedMessage(record, profile, SendSavedOptions{Caption: source.Text}, &savedFileMetadata{Name: attachment.FileName, MIMEType: attachment.MIMEType, Size: attachment.Size})
 }
