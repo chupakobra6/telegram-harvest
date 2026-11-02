@@ -1,7 +1,8 @@
 CLI := bin/telegram-harvest
 GO_FILES := $(shell find cmd internal -type f -name '*.go' | sort)
-GO_SOURCE_SET := $(shell printf '%s\n' '$(GO_FILES)' | cksum | awk '{print $$1 "-" $$2}')
+GO_SOURCE_SET := $(shell shasum -a 256 $(GO_FILES) go.mod go.sum | shasum -a 256 | awk '{print $$1}')
 GO_SOURCE_STAMP := bin/.go-sources-$(GO_SOURCE_SET)
+GO_SOURCE_CHANGED := $(if $(wildcard $(GO_SOURCE_STAMP)),,build-source-changed)
 PROFILE ?=
 PROFILE_ARG = --profile "$(PROFILE)"
 REQUIRE_PROFILE = @test -n "$(strip $(PROFILE))" || { printf "PROFILE=main|study|<account-name> is required\n"; exit 2; }
@@ -13,7 +14,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup build fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build build-source-changed fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -54,14 +55,13 @@ setup:
 
 build: $(CLI)
 
-$(GO_SOURCE_STAMP):
-	@mkdir -p "$(dir $@)"
-	@rm -f bin/.go-sources-*
-	@touch "$@"
+build-source-changed:
 
-$(CLI): $(GO_SOURCE_STAMP) $(GO_FILES) go.mod go.sum
+$(CLI): $(GO_SOURCE_CHANGED)
 	@mkdir -p "$(dir $@)"
 	go build -trimpath -o "$@" ./cmd/telegram-harvest
+	@rm -f bin/.go-sources-*
+	@touch "$(GO_SOURCE_STAMP)"
 
 fmt:
 	gofmt -w $(GO_FILES)

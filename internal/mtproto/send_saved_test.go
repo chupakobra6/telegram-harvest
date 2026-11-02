@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -108,6 +109,134 @@ func TestVerifySavedMessageChecksSelfChatAndFileMetadata(t *testing.T) {
 	record.Chat.ID = 99
 	if err := verifySavedMessage(record, profile, opts, metadata); err == nil {
 		t.Fatal("different chat must fail verification")
+	}
+}
+
+type savedLocalFileWire struct {
+	message      *tg.Message
+	upload       []byte
+	uploadedName string
+	sentName     string
+	sends        int
+	mutate       func(*tg.Message)
+}
+
+func (f *savedLocalFileWire) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	switch req := input.(type) {
+	case *tg.UsersGetFullUserRequest:
+		user := &tg.User{ID: 42}
+		user.SetUsername(SavedMessagesMainUsername)
+		*output.(*tg.UsersUserFull) = tg.UsersUserFull{
+			FullUser: tg.UserFull{ID: 42},
+			Users:    []tg.UserClass{user},
+		}
+	case *tg.UploadSaveFilePartRequest:
+		f.upload = append(f.upload, req.Bytes...)
+		output.(*tg.BoolBox).Bool = &tg.BoolTrue{}
+	case *tg.MessagesSendMediaRequest:
+		f.sends++
+		var encoded bin.Buffer
+		if err := req.Encode(&encoded); err != nil {
+			return err
+		}
+		var wire tg.MessagesSendMediaRequest
+		if err := wire.Decode(&encoded); err != nil {
+			return err
+		}
+		if _, ok := wire.Peer.(*tg.InputPeerSelf); !ok {
+			return fmt.Errorf("unexpected recipient %T", wire.Peer)
+		}
+		media, ok := wire.Media.(*tg.InputMediaUploadedDocument)
+		if !ok || !media.ForceFile {
+			return fmt.Errorf("expected plain uploaded document, got %T", wire.Media)
+		}
+		switch file := media.File.(type) {
+		case *tg.InputFile:
+			f.uploadedName = file.Name
+		case *tg.InputFileBig:
+			f.uploadedName = file.Name
+		default:
+			return fmt.Errorf("unexpected uploaded file %T", media.File)
+		}
+		attributes := append([]tg.DocumentAttributeClass(nil), media.Attributes...)
+		for i, attr := range attributes {
+			if filename, ok := attr.(*tg.DocumentAttributeFilename); ok {
+				f.sentName = filename.FileName
+				name := filename.FileName
+				// Model the two observed M4A server readbacks, independently
+				// of the client's expected metadata.
+				if strings.EqualFold(filepath.Ext(name), ".m4a") {
+					name = strings.ReplaceAll(name, "-", "_")
+				}
+				attributes[i] = &tg.DocumentAttributeFilename{FileName: name}
+			}
+		}
+		readbackMedia := &tg.MessageMediaDocument{}
+		readbackMedia.SetDocument(&tg.Document{
+			ID: 456, MimeType: media.MimeType, Size: int64(len(f.upload)), Attributes: attributes,
+		})
+		f.message = &tg.Message{
+			ID: 123, PeerID: &tg.PeerUser{UserID: 42}, Message: wire.Message, Media: readbackMedia,
+		}
+		output.(*tg.UpdatesBox).Updates = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewMessage{Message: f.message}}}
+	case *tg.MessagesGetMessagesRequest:
+		if f.mutate != nil {
+			f.mutate(f.message)
+		}
+		output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{f.message}}
+	default:
+		return fmt.Errorf("unexpected RPC %T", input)
+	}
+	return nil
+}
+
+func TestSendSavedLocalFileUsesExactOutgoingFilename(t *testing.T) {
+	data := []byte("unchanged audio bytes")
+	for _, names := range []struct{ source, outgoing string }{
+		{"01_Андрей_Зорин_Домашняя_ИИ-лаборатория.m4a", "01_Андрей_Зорин_Домашняя_ИИ_лаборатория.m4a"},
+		{"03_Александр_Подмосковный_Флант_AI-ассистент.m4a", "03_Александр_Подмосковный_Флант_AI_ассистент.m4a"},
+		{"Talk-AI.M4A", "Talk_AI.M4A"},
+		{"Доклад-пример.pdf", "Доклад-пример.pdf"},
+	} {
+		path := filepath.Join(t.TempDir(), names.source)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, caption := range []string{"", "Описание доклада"} {
+			for _, changedName := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/caption=%t/changed_filename=%t", names.source, caption != "", changedName), func(t *testing.T) {
+					opts, metadata, err := normalizeSendSavedOptions(SendSavedOptions{FilePath: path, Caption: caption})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if opts.FilePath != path || metadata.Path != path {
+						t.Fatalf("source path changed: opts=%+v metadata=%+v", opts, metadata)
+					}
+					fake := &savedLocalFileWire{}
+					if changedName {
+						fake.mutate = func(msg *tg.Message) {
+							doc := msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document)
+							doc.Attributes = []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: names.outgoing + ".unexpected"}}
+						}
+					}
+					session := &Session{raw: tg.NewClient(fake)}
+					result, err := session.sendSaved(context.Background(), opts, metadata)
+					if changedName {
+						if err == nil || result.Verified || !strings.Contains(err.Error(), "filename readback mismatch") {
+							t.Fatalf("changed filename was accepted: result=%+v err=%v", result, err)
+						}
+					} else if err != nil || !result.Verified || result.Message.Attachments[0].FileName != names.outgoing {
+						t.Fatalf("exact filename failed: result=%+v err=%v", result, err)
+					}
+					if fake.sends != 1 || !bytes.Equal(fake.upload, data) {
+						t.Fatalf("sends=%d uploaded=%q", fake.sends, fake.upload)
+					}
+					if metadata.Name != names.outgoing || fake.uploadedName != names.outgoing || fake.sentName != names.outgoing {
+						t.Fatalf("wire names: upload=%q document=%q, want %q", fake.uploadedName, fake.sentName, names.outgoing)
+					}
+				})
+			}
+		}
 	}
 }
 

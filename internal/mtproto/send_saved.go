@@ -22,6 +22,7 @@ import (
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/message/unpack"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -151,9 +152,16 @@ func normalizeSendSavedOptions(opts SendSavedOptions) (SendSavedOptions, *savedF
 	}
 	normalized := opts
 	normalized.FilePath = absolutePath
+	name := info.Name()
+	// Local M4A uploads use an explicit outgoing name: observed Telegram
+	// readbacks replace ASCII hyphens with underscores. Keep the source path
+	// and bytes unchanged, and verify this one outgoing name exactly.
+	if strings.EqualFold(filepath.Ext(name), ".m4a") {
+		name = strings.ReplaceAll(name, "-", "_")
+	}
 	return normalized, &savedFileMetadata{
 		Path:     absolutePath,
-		Name:     info.Name(),
+		Name:     name,
 		MIMEType: mimeType,
 		Size:     info.Size(),
 	}, nil
@@ -274,9 +282,17 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 	} else if fileMetadata == nil {
 		updates, err = builder.Text(ctx, opts.Text)
 	} else {
-		uploaded, uploadErr := builder.Upload(message.FromPath(fileMetadata.Path)).AsInputFile(ctx)
+		file, openErr := os.Open(fileMetadata.Path)
+		if openErr != nil {
+			return SendSavedResult{}, fmt.Errorf("open file for Saved Messages: %w", openErr)
+		}
+		uploaded, uploadErr := uploader.NewUploader(s.raw).Upload(ctx, uploader.NewUpload(fileMetadata.Name, file, fileMetadata.Size))
+		closeErr := file.Close()
 		if uploadErr != nil {
 			return SendSavedResult{}, fmt.Errorf("upload file to Saved Messages: %w", uploadErr)
+		}
+		if closeErr != nil {
+			return SendSavedResult{}, fmt.Errorf("close uploaded file for Saved Messages: %w", closeErr)
 		}
 		document := message.File(uploaded).
 			Filename(fileMetadata.Name).
