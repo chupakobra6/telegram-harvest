@@ -224,8 +224,8 @@ func TestWhisperServerRunnerLongFormDetectsLanguageThenUsesOneTimestampedRequest
 	ffmpegScript := `#!/bin/sh
 last=""
 for arg in "$@"; do last="$arg"; done
-test "$8" = "15.000" || exit 42
-head -c 480044 /dev/zero > "$last"
+test "$8" = "30.000" || exit 42
+head -c 960044 /dev/zero > "$last"
 `
 	if err := os.WriteFile(ffmpegPath, []byte(ffmpegScript), 0o700); err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ head -c 480044 /dev/zero > "$last"
 				http.Error(w, "language probe", http.StatusBadRequest)
 				return
 			}
-			if header.Size != 44+15*32000 {
+			if header.Size != 44+30*32000 {
 				http.Error(w, fmt.Sprintf("language probe bytes = %d", header.Size), http.StatusBadRequest)
 				return
 			}
@@ -408,11 +408,11 @@ head -c "$bytes" /dev/zero > "$last"
 					if header.Size >= 45*32000 || request.FormValue("no_timestamps") != "false" || request.FormValue("language") != "ru" || request.FormValue("prompt") != "" {
 						t.Errorf("unsafe recovery request: size=%d fields=%v", header.Size, request.MultipartForm.Value)
 					}
-					tailEnd := 15.6
+					tailEnd := 3.74
 					if scenario == "still uncovered" {
 						tailEnd = 1
 					}
-					_ = json.NewEncoder(w).Encode(whisperResponse{Duration: wavPCM16MonoDuration(header.Size), Text: "Выберем время. Хорошо. До свидания. Рад знакомству.\nВзаимно, взаимно.", Segments: []whisperSegment{segment(0, tailEnd, "Выберем время. Хорошо. До свидания. Рад знакомству. Взаимно, взаимно.")}})
+					_ = json.NewEncoder(w).Encode(whisperResponse{Duration: wavPCM16MonoDuration(header.Size), Text: "Рад знакомству.\nВзаимно, взаимно.", Segments: []whisperSegment{segment(0, tailEnd, "Рад знакомству. Взаимно, взаимно.")}})
 				default:
 					t.Error("more than one recovery attempt")
 				}
@@ -421,10 +421,10 @@ head -c "$bytes" /dev/zero > "$last"
 			runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
 			text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 795.359)
 			if scenario == "recovered" {
-				if err != nil || text != "Основная часть.\nВыберем время. Хорошо. До свидания. Рад знакомству.\nВзаимно, взаимно." {
+				if err != nil || text != "Основная часть.\nВыберем время.\nХорошо.\nДо свидания.\nРад знакомству.\nВзаимно, взаимно." {
 					t.Fatalf("recovered transcript: %q, %v", text, err)
 				}
-				if diagnostics == nil || !diagnostics.TailRecoveryApplied || !diagnostics.CoverageValidated || diagnostics.TailRecoveryOffsetSeconds != 780 || math.Abs(diagnostics.InitialTrailingCoverageGapSeconds-2.179) > 0.001 || diagnostics.LastSegmentEndSeconds < 795.359 {
+				if diagnostics == nil || !diagnostics.TailRecoveryApplied || !diagnostics.CoverageValidated || diagnostics.TailRecoveryOffsetSeconds != 791.86 || math.Abs(diagnostics.InitialTrailingCoverageGapSeconds-2.179) > 0.001 || diagnostics.LastSegmentEndSeconds < 795.359 {
 					t.Fatalf("recovery evidence: %+v", diagnostics)
 				}
 			} else if err == nil {
@@ -441,6 +441,76 @@ head -c "$bytes" /dev/zero > "$last"
 				t.Fatalf("temporary audio remains: %v", paths)
 			}
 		})
+	}
+}
+
+// A quiet isolated final utterance can be suppressed when the retry repeats
+// a stronger earlier exchange. Keep that exchange and focus the retry on the
+// terminal segment; the same coverage gate must still reject a missing outro.
+func TestLongFormTailRecoveryFocusesQuietFinalUtterance(t *testing.T) {
+	dir := t.TempDir()
+	wavPath := filepath.Join(dir, "interview.wav")
+	if err := os.WriteFile(wavPath, make([]byte, 44+70*32000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffmpeg := filepath.Join(dir, "ffmpeg")
+	script := `#!/bin/sh
+last=""
+for arg in "$@"; do last="$arg"; done
+bytes=$(awk -v duration="$8" 'BEGIN {print int(duration*32000)+44}')
+head -c "$bytes" /dev/zero > "$last"
+`
+	if err := os.WriteFile(ffmpeg, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	segment := func(start, end float64, text string) whisperSegment {
+		return whisperSegment{Start: &start, End: &end, Text: text}
+	}
+	full := whisperResponse{Duration: 70, Text: "Основная часть.\nВопросы закончились.\nДо свидания.\nПока.", Segments: []whisperSegment{
+		segment(0, 40, "Основная часть."), segment(40, 60, "Вопросы закончились."), segment(60, 61, "До свидания."), segment(61.5, 62.5, "Пока."),
+	}}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		if err := req.ParseMultipartForm(4 << 20); err != nil {
+			t.Error(err)
+			return
+		}
+		defer req.MultipartForm.RemoveAll()
+		if requests == 1 {
+			_ = json.NewEncoder(w).Encode(whisperResponse{Language: "russian"})
+			return
+		}
+		if requests == 2 {
+			_ = json.NewEncoder(w).Encode(full)
+			return
+		}
+		if requests != 3 {
+			t.Error("more than one tail recovery")
+			return
+		}
+		file, header, err := req.FormFile("file")
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = file.Close()
+		duration := wavPCM16MonoDuration(header.Size)
+		// Repeating the earlier exchange suppresses the quiet final sound.
+		end := 4.8
+		if duration > 6 {
+			end = duration - 4
+		}
+		_ = json.NewEncoder(w).Encode(whisperResponse{Duration: duration, Text: "Пока.\nБррр.", Segments: []whisperSegment{segment(0, 1, "Пока."), segment(end-0.4, end, "Бррр.")}})
+	}))
+	defer server.Close()
+	runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
+	text, diag, err := runner.inferLongFormLocked(t.Context(), wavPath, 66)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "Основная часть.\nВопросы закончились.\nДо свидания.\nПока.\nБррр." || diag == nil || !diag.CoverageValidated || diag.TailRecoveryOffsetSeconds != 61.5 || requests != 3 {
+		t.Fatalf("focused recovery: text=%q diagnostics=%+v requests=%d", text, diag, requests)
 	}
 }
 

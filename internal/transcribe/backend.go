@@ -22,7 +22,7 @@ const (
 	ProductionModelFile                = "ggml-large-v3-turbo-q5_0.bin"
 	ProductionSpeechGateFile           = "ggml-silero-v6.2.0.bin"
 	whisperShortFormStrategy           = "auto-language-no-timestamps-v2"
-	whisperLongFormStrategy            = "native-timestamped-tail-recovery-v4"
+	whisperLongFormStrategy            = "native-timestamped-tail-recovery-v5"
 	whisperAdaptiveRoutingPolicy       = "duration-or-leading-silence-v1"
 	whisperAdaptiveLanguagePolicy      = "auto-short-detect-russian-punctuation-long-v2"
 	whisperRepetitionPolicy            = "collapse-exact-token-cycle-v2"
@@ -31,11 +31,11 @@ const (
 	adaptiveRepetitionMinRepeats       = 5
 	adaptiveRepetitionMinSpanTokens    = 20
 	adaptiveRepetitionMaxBlockTokens   = 32
-	longFormLanguageProbeSeconds       = 15
+	longFormLanguageProbeSeconds       = 30
 	longFormRussianInitialPrompt       = "Да. Нет? Хорошо! Пожалуйста, продолжайте."
 	longFormCoverageToleranceSeconds   = 2.0
 	longFormTailRecoveryMaxSeconds     = 45.0
-	longFormTailRecoveryContextSeconds = 20.0
+	longFormTailRecoveryContextSeconds = 2.0
 	StrategyShortMessage               = whisperShortFormStrategy
 	StrategyLongForm                   = whisperLongFormStrategy
 )
@@ -432,7 +432,7 @@ func (o WhisperAdaptiveOptions) normalized() WhisperAdaptiveDescriptor {
 		RussianInitialPrompt:             strings.TrimSpace(o.RussianInitialPrompt),
 		CarryInitialPrompt:               o.CarryInitialPrompt,
 		TrailingCoverageToleranceSeconds: positiveFloatOr(o.TrailingCoverageToleranceSeconds, longFormCoverageToleranceSeconds),
-		TrailingRecoveryPolicy:           "replace-terminal-segments-once-v1",
+		TrailingRecoveryPolicy:           "replace-terminal-segments-once-v2",
 		TrailingRecoveryMaxSeconds:       longFormTailRecoveryMaxSeconds,
 		TrailingRecoveryContextSeconds:   longFormTailRecoveryContextSeconds,
 		ShortDecodeStrategy:              whisperShortFormStrategy,

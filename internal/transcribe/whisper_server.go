@@ -321,6 +321,8 @@ func (r *WhisperServerRunner) recoverLongFormTailLocked(ctx context.Context, wav
 	fail := func(err error) (whisperResponse, float64, error) {
 		return whisperResponse{}, 0, fmt.Errorf("whisper.cpp long-form tail recovery: %w", err)
 	}
+	// Preserve the established exchange. A focused terminal retry can detect
+	// a quiet isolated outro that a long conversational context suppresses.
 	replaceAt := len(decoded.Segments) - 1
 	lastEnd := boundedTerminalSegmentEnd(decoded)
 	for replaceAt > 0 && *decoded.Segments[replaceAt-1].Start >= lastEnd-settings.TrailingRecoveryContextSeconds {
