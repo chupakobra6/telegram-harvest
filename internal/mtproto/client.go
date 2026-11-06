@@ -777,7 +777,7 @@ func (s *Session) DumpOutgoingRange(ctx context.Context, opts harvest.OutgoingRa
 		dialogOpts := opts
 		dialogOpts.History.MinID = max(dialogOpts.History.MinID, dialogPlan.MinID)
 		scanStart := time.Now()
-		target, err := s.resolveTarget(ctx, strconv.FormatInt(chat.ID, 10))
+		target, err := s.resolveTarget(ctx, harvest.AccountChatKey(chat))
 		stages.ObserveSince(opts.History.StageTiming, stages.TelegramScan, scanStart)
 		if err != nil {
 			stats.DialogErrors = append(stats.DialogErrors, dailyDialogError(chat, err))
@@ -1277,12 +1277,12 @@ func (s *Session) collectDailyHistory(
 				reachedMinID = true
 				continue
 			}
-			if messageAtOrBefore(msgClass, opts.Start) {
+			if date := messageDate(msgClass); date > 0 && time.Unix(int64(date), 0).Before(opts.Start) {
 				reachedStart = true
 			}
 			if msg, ok := msgClass.(*tg.Message); ok {
 				sender := senderFromPeer(msg.FromID, msg.Out, entities)
-				if !msg.Out && !sender.Self && !dailyAdditionalSenderAllowed(opts, target.Chat.ID, sender.ID) {
+				if !msg.Out && !sender.Self && !dailySelfTarget(target, entities) && !dailyAdditionalSenderAllowed(opts, target.Chat.ID, sender.ID) {
 					continue
 				}
 			}
@@ -1426,11 +1426,6 @@ func dailyCheckpointPageComplete(
 	}
 }
 
-func messageAtOrBefore(msg tg.MessageClass, boundary time.Time) bool {
-	date := messageDate(msg)
-	return date > 0 && !time.Unix(int64(date), 0).UTC().After(boundary)
-}
-
 func historyMessageBeforeStart(msg tg.MessageClass, opts harvest.HistoryOptions) bool {
 	if opts.Start.IsZero() {
 		return false
@@ -1480,8 +1475,12 @@ func (s *Session) normalizeOutgoingDayRecord(
 	if record.Date.Before(opts.Start) || !record.Date.Before(opts.End) {
 		return harvest.MessageRecord{}, false
 	}
-	if !record.Outgoing && !record.Sender.Self && !dailyAdditionalSenderAllowed(opts, record.Chat.ID, record.Sender.ID) {
+	selfPeer := dailySelfTarget(target, entities)
+	if !record.Outgoing && !record.Sender.Self && !selfPeer && !dailyAdditionalSenderAllowed(opts, record.Chat.ID, record.Sender.ID) {
 		return harvest.MessageRecord{}, false
+	}
+	if selfPeer && record.Sender.ID == 0 {
+		record.Sender = harvest.Sender{Type: "self", Display: "self", Self: true}
 	}
 	if record.Sender.Display == "" && record.Outgoing {
 		record.Sender = harvest.Sender{Type: "self", Display: "self", Self: true}
@@ -1491,6 +1490,14 @@ func (s *Session) normalizeOutgoingDayRecord(
 	}
 	ensureDailyAttachments(msgClass, &record)
 	return record, true
+}
+
+func dailySelfTarget(target resolvedTarget, entities peer.Entities) bool {
+	if _, self := target.InputPeer.(*tg.InputPeerSelf); self {
+		return true
+	}
+	user, ok := entities.User(target.Chat.ID)
+	return target.Chat.Type == "user" && ok && user.Self
 }
 
 func dailyAdditionalSenderAllowed(opts harvest.OutgoingRangeOptions, chatID int64, senderID int64) bool {
@@ -2005,13 +2012,17 @@ func chatFromPeer(peerClass tg.PeerClass, entities peer.Entities) (harvest.Chat,
 		if display == "" {
 			display = usernameOrID(username, user.ID)
 		}
+		var inputPeer tg.InputPeerClass = user.AsInputPeer()
+		if user.Self {
+			inputPeer = &tg.InputPeerSelf{}
+		}
 		return harvest.Chat{
 			ID:       user.ID,
 			Type:     "user",
 			Title:    display,
 			Username: username,
 			Display:  display,
-		}, user.AsInputPeer(), true
+		}, inputPeer, true
 	case *tg.PeerChat:
 		chat, ok := entities.Chat(typed.ChatID)
 		if !ok {

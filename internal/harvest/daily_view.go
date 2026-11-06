@@ -11,12 +11,13 @@ import (
 const dailyTranscriptPreviewRunes = 4000
 
 type DailyMarkdownOptions struct {
-	OutputPath string
-	Date       string
-	Start      time.Time
-	End        time.Time
-	Stats      OutgoingStats
-	Records    []MessageRecord
+	OutputPath      string
+	Date            string
+	Start           time.Time
+	End             time.Time
+	Stats           OutgoingStats
+	Records         []MessageRecord
+	FullTranscripts bool
 }
 
 func WriteDailyMarkdown(opts DailyMarkdownOptions) error {
@@ -62,7 +63,7 @@ func renderDailyMarkdown(opts DailyMarkdownOptions, records []MessageRecord) str
 			b.WriteString(fmt.Sprintf("### %s\n\n", hour))
 			lastHour = hour
 		}
-		writeDailyMessage(&b, record)
+		writeDailyMessage(&b, record, opts.FullTranscripts)
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -74,7 +75,7 @@ func writeDailySummaryCount(b *strings.Builder, label string, count int) {
 	}
 }
 
-func writeDailyMessage(b *strings.Builder, record MessageRecord) {
+func writeDailyMessage(b *strings.Builder, record MessageRecord, fullTranscripts bool) {
 	b.WriteString(dailyMessageHeader(record))
 	b.WriteString("\n")
 	if label, origin := dailyForwardOrigin(record.Forward); origin != "" {
@@ -91,7 +92,11 @@ func writeDailyMessage(b *strings.Builder, record MessageRecord) {
 	for _, attachment := range record.Attachments {
 		b.WriteString("\n")
 		b.WriteString("  **Вложение:** " + dailyAttachmentSummary(attachment) + "\n")
-		if transcript := compactTranscript(attachment.Transcript); transcript != "" {
+		transcript := compactTranscript(attachment.Transcript)
+		if fullTranscripts {
+			transcript = dailyMarkdownText(attachment.Transcript)
+		}
+		if transcript != "" {
 			b.WriteString("\n")
 			b.WriteString("  **Транскрипт:**\n")
 			writeDailyQuote(b, transcript, "  ")

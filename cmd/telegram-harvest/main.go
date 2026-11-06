@@ -320,6 +320,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "Primary daily workflow:")
 	fmt.Fprintln(out, "  daily --date today [--markdown-out reports/daily/YYYY-MM-DD.md] [--download-media=false] [--transcribe-video phone|all|off]")
 	fmt.Fprintln(out, "  daily-catchup [--from YYYY-MM-DD] [--report-dir reports/daily] [--download-media=false] [--transcribe-video phone|all|off]")
+	fmt.Fprintln(out, "  daily-catchup --recap [--from RFC3339] [--to RFC3339] | --recap --confirm-recap ID --delivery-ref CHAT_RESULT")
 	fmt.Fprintln(out, "  daily-download-media --chat <id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  transcribe-file --input recording.mp4 --output transcript.txt  # adaptive local production ASR; profile main only")
 	fmt.Fprintln(out, "")
@@ -1066,18 +1067,32 @@ func runDaily(cfg config.Config, client *mtproto.Client, args []string, out io.W
 }
 
 func runDailyCatchup(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
+	requestedAt := time.Now()
 	defaults := dailyRuntimeDefaults()
 	defaultReportDir := harvest.DailyDefaultReportRoot(cfg.StateDir)
 
 	fs := flag.NewFlagSet("daily-catchup", flag.ContinueOnError)
 	fs.SetOutput(out)
-	fromRaw := fs.String("from", "", "first day to generate, YYYY-MM-DD; default starts after newest Markdown report")
+	fromRaw := fs.String("from", "", "first day; with --recap: exact RFC3339 boundary or Moscow YYYY-MM-DD")
 	reportDirRaw := fs.String("report-dir", defaultReportDir, "directory with daily Markdown reports")
+	recap := fs.Bool("recap", false, "prepare personal recap sources through the request time, outside completed daily reports")
+	toRaw := fs.String("to", "", "recap only: exclusive RFC3339 cutoff; default is command start")
+	confirmRecap := fs.String("confirm-recap", "", "recap only: confirm a previously delivered prepared ID, without collecting")
+	deliveryRef := fs.String("delivery-ref", "", "recap confirmation: reference to the observed final narrative in its chat")
 	dailyFlags := addDailyOptionFlags(fs, defaults)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	dailyOpts := dailyFlags.values()
+	if *recap {
+		if flagWasSet(fs, "report-dir") {
+			return fmt.Errorf("--recap stores sources under the private state directory; --report-dir is for completed days")
+		}
+		return runDailyRecap(cfg, client, dailyOpts, *fromRaw, *toRaw, *confirmRecap, *deliveryRef, requestedAt, out)
+	}
+	if *toRaw != "" || *confirmRecap != "" || *deliveryRef != "" {
+		return fmt.Errorf("--to, --confirm-recap and --delivery-ref require --recap")
+	}
 	if err := validateDailyOptions(dailyOpts); err != nil {
 		return err
 	}
@@ -1227,12 +1242,13 @@ type dailyOptions struct {
 }
 
 type dailyJob struct {
-	Date         string
-	Start        time.Time
-	End          time.Time
-	OutputPath   string
-	MarkdownPath string
-	ASRLogPath   string
+	Date            string
+	Start           time.Time
+	End             time.Time
+	OutputPath      string
+	MarkdownPath    string
+	ASRLogPath      string
+	FullTranscripts bool
 }
 
 type dailyCatchupPlan struct {
@@ -1818,12 +1834,13 @@ func publishDailyJob(job dailyJob, stats harvest.OutgoingStats, records []harves
 			}
 		}()
 		if err := harvest.WriteDailyMarkdown(harvest.DailyMarkdownOptions{
-			OutputPath: markdownTempPath,
-			Date:       job.Date,
-			Start:      job.Start,
-			End:        job.End,
-			Stats:      stats,
-			Records:    records,
+			OutputPath:      markdownTempPath,
+			Date:            job.Date,
+			Start:           job.Start,
+			End:             job.End,
+			Stats:           stats,
+			Records:         records,
+			FullTranscripts: job.FullTranscripts,
 		}); err != nil {
 			return err
 		}

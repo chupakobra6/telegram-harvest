@@ -32,6 +32,7 @@ help:
 	@printf "  make login PROFILE=main|study|<account-name>  # authorize by phone, Telegram code, and optional 2FA\\n"
 	@printf "  make daily PROFILE=main DATE=today|yesterday|YYYY-MM-DD # build one daily report\\n"
 	@printf "  make daily-catchup PROFILE=main # generate missing days and one merged handoff file\\n"
+	@printf "  make daily-catchup PROFILE=main RECAP=1 [FROM=RFC3339] [TO=RFC3339] # personal recap sources through request time\\n"
 	@printf "  make daily-download-media PROFILE=main # manual uncapped daily media fetch; CHAT=... MESSAGE_ID=...\\n"
 	@printf "  make transcribe-file PROFILE=main # adaptive local production ASR; INPUT=... OUTPUT=...\\n"
 	@printf "  make chats PROFILE=study # list dialogs; ALL=1 includes ordinary + archived; QUERY='вшэ' filters\\n"
@@ -113,7 +114,7 @@ daily:
 
 daily-catchup:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) daily-catchup $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(REPORT_DIR)),--report-dir "$(REPORT_DIR)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) $(if $(strip $(PROGRESS)),--progress,)
+	$(CLI) $(PROFILE_ARG) daily-catchup $(if $(strip $(RECAP)),--recap,) $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(TO)),--to "$(TO)",) $(if $(strip $(CONFIRM_RECAP)),--confirm-recap "$(CONFIRM_RECAP)",) $(if $(strip $(DELIVERY_REF)),--delivery-ref "$(DELIVERY_REF)",) $(if $(strip $(REPORT_DIR)),--report-dir "$(REPORT_DIR)",) $(if $(strip $(DIALOG_LIMIT)),--dialog-limit "$(DIALOG_LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) $(if $(strip $(PROGRESS)),--progress,)
 
 daily-download-media:
 	$(REQUIRE_PROFILE)

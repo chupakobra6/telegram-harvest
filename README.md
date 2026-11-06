@@ -340,7 +340,9 @@ bin/telegram-harvest --profile main daily-catchup
 bin/telegram-harvest --profile main daily-catchup --from 2026-06-03
 ```
 
-Каноническое описание слова «catch-up», daily scope, медиа, ASR и проверок готовности находится в [`docs/catch-up.md`](docs/catch-up.md). `daily`/`daily-catchup` — единственный пользовательский catch-up flow.
+Для личного рекапа до текущего момента используй `make daily-catchup PROFILE=main RECAP=1 TO=<RFC3339>`: точная граница предыдущей подтверждённой выдачи, один проход недостающего диапазона, полные расшифровки и отдельное приватное состояние. Подготовка источников не подтверждает выдачу текста в чат. Первое начало, восстановление и подтверждение описаны в [`docs/catch-up.md`](docs/catch-up.md#личный-рекап-до-момента-запроса).
+
+Каноническое описание слова «catch-up», daily scope, медиа, ASR и проверок готовности находится в [`docs/catch-up.md`](docs/catch-up.md). `daily`/`daily-catchup` – единственный пользовательский catch-up flow.
 
 ## Telegram pacing
 

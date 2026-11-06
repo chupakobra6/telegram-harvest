@@ -802,6 +802,60 @@ func TestDailyRecordFilterRunsBeforeMediaProcessing(t *testing.T) {
 	}
 }
 
+func TestDailySavedMessagesWithoutOutgoingFlag(t *testing.T) {
+	start := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	opts := harvest.OutgoingRangeOptions{Start: start, End: start.Add(time.Hour)}
+	message := &tg.Message{ID: 1, Date: int(start.Unix()), Message: "сохранённая мысль"}
+	selfEntities := peer.NewEntities(map[int64]*tg.User{42: {ID: 42, Self: true}}, nil, nil)
+	_, inputPeer, ok := chatFromPeer(&tg.PeerUser{UserID: 42}, selfEntities)
+	if _, self := inputPeer.(*tg.InputPeerSelf); !ok || !self {
+		t.Fatal("self identity lost when resolving dialogs")
+	}
+	session := &Session{}
+	self := resolvedTarget{Chat: harvest.Chat{ID: 42, Type: "user"}, InputPeer: &tg.InputPeerSelf{}}
+	if record, ok := session.normalizeOutgoingDayRecord(message, self, peer.Entities{}, nil, opts); !ok || !record.Sender.Self {
+		t.Fatalf("Saved Messages without FromID/Out lost: %+v, %t", record, ok)
+	}
+	self.InputPeer = &tg.InputPeerUser{UserID: 42}
+	entities := peer.NewEntities(map[int64]*tg.User{42: {ID: 42, Self: true}}, nil, nil)
+	if _, ok := session.normalizeOutgoingDayRecord(message, self, entities, nil, opts); !ok {
+		t.Fatal("entity-proven self chat lost")
+	}
+	self.Chat.Display = "Saved Messages"
+	if _, ok := session.normalizeOutgoingDayRecord(message, self, peer.Entities{}, nil, opts); ok {
+		t.Fatal("display name accepted as self identity")
+	}
+	message.Out = true
+	message.Date = int(opts.End.Unix())
+	if _, ok := session.normalizeOutgoingDayRecord(message, self, entities, nil, opts); ok {
+		t.Fatal("exclusive end entered Saved Messages recap")
+	}
+}
+
+func TestDailyHistoryIncludesAllSavedMessagesAtStartAcrossPages(t *testing.T) {
+	start := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	target := resolvedTarget{Chat: harvest.Chat{ID: 42, Type: "user"}, InputPeer: &tg.InputPeerSelf{}}
+	opts := harvest.OutgoingRangeOptions{Start: start, End: start.Add(time.Hour), History: harvest.HistoryOptions{BatchSize: 1}}
+	pages := []tg.MessagesMessagesClass{
+		&tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 3, Date: int(start.Unix()), Message: "первая на границе"}}},
+		&tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 2, Date: int(start.Unix()), Message: "вторая на той же границе"}}},
+		&tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1, Date: int(start.Add(-time.Second).Unix()), Message: "до границы"}}},
+	}
+	calls := 0
+	load := func(_ context.Context, _, _ int) (tg.MessagesMessagesClass, error) {
+		if calls >= len(pages) {
+			t.Fatal("continued past proven boundary")
+		}
+		page := pages[calls]
+		calls++
+		return page, nil
+	}
+	records, stats, err := (&Session{}).collectDailyHistory(context.Background(), target, opts, nil, nil, load)
+	if err != nil || !stats.Complete || calls != 3 || len(records) != 2 || records[0].MessageID != 2 || records[1].MessageID != 3 {
+		t.Fatalf("Saved Messages boundary lost: records=%+v calls=%d complete=%t err=%v", records, calls, stats.Complete, err)
+	}
+}
+
 func TestNormalizeRecordPreservesForwardOrigin(t *testing.T) {
 	date := time.Date(2026, 7, 22, 0, 46, 0, 0, time.UTC)
 	channel := &tg.Channel{ID: 123, Title: "Source Channel"}
