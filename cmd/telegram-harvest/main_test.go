@@ -270,6 +270,25 @@ func TestRunAccountSyncRejectsRepoStateBeforeTelegramAccess(t *testing.T) {
 	}
 }
 
+func TestAccountSyncQuietOutputPreservesFailures(t *testing.T) {
+	updates := []harvest.AccountSyncProgress{
+		{ChatID: 1, Status: "complete", Records: 20},
+		{ChatID: 2, Status: "failed", Error: "history unavailable"},
+		{ChatID: 3, Status: "complete", Error: "unexpected warning"},
+		{ChatID: 4, Status: "pending"},
+	}
+	for _, verbose := range []bool{false, true} {
+		var out strings.Builder
+		for _, update := range updates {
+			printAccountSyncProgress(&out, update, verbose)
+		}
+		text := out.String()
+		if strings.Contains(text, "chat_id=1 ") != verbose || !strings.Contains(text, "history unavailable") || !strings.Contains(text, "unexpected warning") || !strings.Contains(text, "chat_id=4 status=pending") {
+			t.Fatalf("verbose=%t lost status: %s", verbose, text)
+		}
+	}
+}
+
 func TestRunRegisteredAccountCannotUseMainDailyWorkflow(t *testing.T) {
 	home := t.TempDir()
 	if code, _, stderr := runCommand(t, []string{"account", "add", "--name", "work", "--api-profile", "study"}, map[string]string{"HOME": home}); code != 0 {

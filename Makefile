@@ -144,7 +144,7 @@ sync:
 
 account-sync:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) account-sync $(if $(strip $(REFRESH_FROM)),--refresh-from "$(REFRESH_FROM)",)
+	$(CLI) $(PROFILE_ARG) account-sync $(if $(strip $(REFRESH_FROM)),--refresh-from "$(REFRESH_FROM)",) $(if $(strip $(PROGRESS)),--progress,)
 
 account-folders:
 	$(REQUIRE_PROFILE)

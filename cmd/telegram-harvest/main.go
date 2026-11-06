@@ -960,6 +960,7 @@ func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, ou
 	fs := flag.NewFlagSet("account-sync", flag.ContinueOnError)
 	fs.SetOutput(out)
 	refreshFrom := fs.String("refresh-from", "", "reconcile edited or newly decoded messages from YYYY-MM-DD without resetting archives")
+	progress := fs.Bool("progress", false, "print successful per-chat progress; failures and final account coverage are always shown")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -996,14 +997,25 @@ func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, ou
 				StateDir:          stateDir,
 				ExpectedAccountID: cfg.BoundAccountID,
 				RefreshFrom:       refreshStart,
-				Progress: func(progress harvest.AccountSyncProgress) {
-					fmt.Fprintf(out, "chat_id=%d status=%s records=%d\n", progress.ChatID, progress.Status, progress.Records)
+				Progress: func(update harvest.AccountSyncProgress) {
+					printAccountSyncProgress(out, update, *progress)
 				},
 			})
 			fmt.Fprintf(out, "account_id=%d dialogs=%d complete=%t index=%s\n", state.AccountID, len(state.Dialogs), state.Complete, harvest.AccountIndexPath(stateDir))
 			return err
 		})
 	})
+}
+
+func printAccountSyncProgress(out io.Writer, update harvest.AccountSyncProgress, verbose bool) {
+	if !verbose && update.Status == "complete" && update.Error == "" {
+		return
+	}
+	fmt.Fprintf(out, "chat_id=%d status=%s records=%d", update.ChatID, update.Status, update.Records)
+	if update.Error != "" {
+		fmt.Fprintf(out, " error=%q", update.Error)
+	}
+	fmt.Fprintln(out)
 }
 
 func ensureAccountStateOutsideRepo(projectRoot string, stateDir string) error {
