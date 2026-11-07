@@ -49,11 +49,13 @@ type PrintShopPDF struct {
 	Size     int64  `json:"size"`
 }
 type PrintShopPublishRow struct {
-	Post           PrintShopPost `json:"post"`
-	ID             int           `json:"id,omitempty"`
-	Status         string        `json:"status"`
-	ServerVerified bool          `json:"server_verified"`
-	OutcomeUnknown bool          `json:"outcome_unknown"`
+	Post               PrintShopPost `json:"post"`
+	ID                 int           `json:"id,omitempty"`
+	Status             string        `json:"status"`
+	ServerVerified     bool          `json:"server_verified"`
+	OutcomeUnknown     bool          `json:"outcome_unknown"`
+	ServerFilename     string        `json:"server_filename,omitempty"`
+	FilenameNormalized bool          `json:"filename_normalized"`
 }
 type PrintShopPublishResult struct {
 	AccountID      int64                 `json:"account_id"`
@@ -165,7 +167,18 @@ func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
 	if m.ReplyTo != nil || m.GroupedID != 0 {
 		return fmt.Errorf("unexpected print-shop reply/topic")
 	}
-	return verifyPublishedContent(m, p.publicationPost())
+	expected := p.publicationPost()
+	if p.File != nil {
+		if media, ok := m.Media.(*tg.MessageMediaDocument); ok {
+			if document, ok := media.Document.(*tg.Document); ok {
+				name := documentFileName(document)
+				if name == strings.ReplaceAll(p.File.Filename, " ", "_") {
+					expected.File.Filename = name
+				}
+			}
+		}
+	}
+	return verifyPublishedContent(m, expected)
 }
 
 // Stream uses one worker; never permit server bytes beyond the reviewed file size.
@@ -235,6 +248,8 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 		}
 		return nil
 	}
+	// Keep readback metadata only after all checks, including the downloaded hash.
+	verifiedNames := map[string]string{}
 	// Reject every bad local input/receipt and pre-existing match before any upload.
 	for _, p := range m.Posts {
 		if err = verifyPublishFile(ctx, p.publicationPost().File); err != nil {
@@ -253,8 +268,14 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 			if e != nil {
 				return r, e
 			}
+			if msg == nil || msg.ID != receipt.ID {
+				return r, fmt.Errorf("print-shop message ID mismatch")
+			}
 			if e = verifyPrintShopReadback(ctx, s, msg, p); e != nil {
 				return r, e
+			}
+			if p.File != nil {
+				verifiedNames[p.Key] = documentFileName(msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document))
 			}
 		} else {
 			exists, e := s.printShopExisting(ctx, p)
@@ -280,6 +301,10 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 			}
 			row.Status = "already_applied"
 			row.ServerVerified = true
+			if p.File != nil {
+				row.ServerFilename = verifiedNames[p.Key]
+				row.FilenameNormalized = row.ServerFilename != p.File.Filename
+			}
 			r.Rows = append(r.Rows, row)
 			continue
 		}
@@ -316,12 +341,20 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 			}
 			msg, readErr := s.printShopRead(ctx, id)
 			if readErr == nil {
-				readErr = verifyPrintShopReadback(ctx, s, msg, p)
+				if msg == nil || msg.ID != id {
+					readErr = fmt.Errorf("print-shop message ID mismatch")
+				} else {
+					readErr = verifyPrintShopReadback(ctx, s, msg, p)
+				}
 			}
 			if readErr == nil {
 				row.Status = "sent_verified"
 				row.ServerVerified = true
 				row.OutcomeUnknown = false
+				if p.File != nil {
+					row.ServerFilename = documentFileName(msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document))
+					row.FilenameNormalized = row.ServerFilename != p.File.Filename
+				}
 				j[p.Key] = topicPublishReceipt{Hash: publishPostHash(p.publicationPost()), ID: id}
 				if err = save(); err != nil {
 					r.Rows = append(r.Rows, row)

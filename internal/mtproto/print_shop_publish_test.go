@@ -38,6 +38,7 @@ type printShopFake struct {
 	username            string
 	sends, prepares     int
 	existing, wrongRead bool
+	normalizeFilename   bool
 	sendErr             error
 	beforeSend          func()
 }
@@ -84,7 +85,11 @@ func (f *printShopFake) printShopSend(_ context.Context, p PrintShopPost, _ int6
 			return 0, err
 		}
 		f.serverBytes[int64(id)] = data
-		msg.Media = &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(id), MimeType: v.MIME, Size: v.Size, Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: v.Filename}}}}
+		name := v.Filename
+		if f.normalizeFilename {
+			name = strings.ReplaceAll(name, " ", "_")
+		}
+		msg.Media = &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(id), MimeType: v.MIME, Size: v.Size, Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: name}}}}
 	}
 	f.messages[id] = msg
 	return id, nil
@@ -527,5 +532,92 @@ func TestPrintShopPublishDownloadWriterHardBound(t *testing.T) {
 	}
 	if n, err := w.Write([]byte("cd")); err == nil || n != 0 || out.String() != "ab" {
 		t.Fatal("overrun accepted", n, err, out.String())
+	}
+}
+
+// A known pending receipt must be read back and hashed, never sent again.
+func TestPrintShopNormalizedFilenameReceiptAndNewSend(t *testing.T) {
+	for _, known := range []bool{true, false} {
+		t.Run(map[bool]string{true: "pending-169", false: "new"}[known], func(t *testing.T) {
+			m, f := printShopFixture(t)
+			m.Posts = m.Posts[1:]
+			p := &m.Posts[0]
+			name := "ЕГЭ профиль №8 – исправленный образец.pdf"
+			path := filepath.Join(filepath.Dir(p.File.Path), name)
+			if err := os.Rename(p.File.Path, path); err != nil {
+				t.Fatal(err)
+			}
+			p.File.Path, p.File.Filename = path, name
+			f.normalizeFilename = true
+			j := topicPublishJournal{}
+			if known {
+				id, err := f.printShopSend(context.Background(), *p, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.messages[169] = f.messages[id]
+				f.messages[169].ID = 169
+				j[p.Key] = topicPublishReceipt{Hash: publishPostHash(p.publicationPost()), ID: 169, Pending: true}
+				f.sends = 0
+			}
+			if !known {
+				preview, err := publishPrintShop(context.Background(), f, m, j, func() error { return nil }, false)
+				if err != nil || preview.Complete || preview.Rows[0].ServerVerified || f.downloadCalls != 0 {
+					t.Fatal(preview, err)
+				}
+			}
+			r, err := publishPrintShop(context.Background(), f, m, j, func() error { return nil }, true)
+			wantSends := 1
+			status := "sent_verified"
+			if known {
+				wantSends = 0
+				status = "already_applied"
+			}
+			if err != nil || !r.Complete || f.sends != wantSends || f.downloadCalls != 1 || j[p.Key].Pending || r.Rows[0].Status != status || !r.Rows[0].FilenameNormalized || r.Rows[0].ServerFilename != strings.ReplaceAll(name, " ", "_") {
+				t.Fatal(r, err, f.sends, j)
+			}
+		})
+	}
+}
+func TestPrintShopNormalizedFilenameRejectsMismatch(t *testing.T) {
+	for _, bad := range []string{"name", "partial", "mime", "size", "bytes", "id"} {
+		t.Run(bad, func(t *testing.T) {
+			m, f := printShopFixture(t)
+			m.Posts = m.Posts[1:]
+			p := &m.Posts[0]
+			name := "два слова здесь.pdf"
+			path := filepath.Join(filepath.Dir(p.File.Path), name)
+			if err := os.Rename(p.File.Path, path); err != nil {
+				t.Fatal(err)
+			}
+			p.File.Path, p.File.Filename = path, name
+			f.normalizeFilename = true
+			id, err := f.printShopSend(context.Background(), *p, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.sends = 0
+			msg := f.messages[id]
+			doc := msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document)
+			switch bad {
+			case "name":
+				doc.Attributes[0] = &tg.DocumentAttributeFilename{FileName: "чужой.pdf"}
+			case "partial":
+				doc.Attributes[0] = &tg.DocumentAttributeFilename{FileName: "два_слова здесь.pdf"}
+			case "mime":
+				doc.MimeType = "text/plain"
+			case "size":
+				doc.Size++
+			case "bytes":
+				f.serverBytes[doc.ID] = []byte(strings.Repeat("x", int(doc.Size)))
+			case "id":
+				msg.ID++
+			}
+			j := topicPublishJournal{p.Key: {Hash: publishPostHash(p.publicationPost()), ID: id, Pending: true}}
+			r, err := publishPrintShop(context.Background(), f, m, j, func() error { return nil }, true)
+			if err == nil || r.Complete || f.sends != 0 || !j[p.Key].Pending {
+				t.Fatal(r, err, f.sends, j)
+			}
+		})
 	}
 }
