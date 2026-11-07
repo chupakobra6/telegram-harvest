@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -186,6 +187,8 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 	var sourceAudio *tg.DocumentAttributeAudio
 	var sourcePreviewSHA256 string
 	var copyTempDir string
+	var localVideo *InterviewTopicFile
+	var localVideoTempDir string
 	var updates tg.UpdatesClass
 	if strings.TrimSpace(opts.SourceChat) != "" {
 		sourceTarget, err = s.resolveTarget(ctx, opts.SourceChat)
@@ -281,6 +284,31 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 		}
 	} else if fileMetadata == nil {
 		updates, err = builder.Text(ctx, opts.Text)
+	} else if strings.EqualFold(filepath.Ext(fileMetadata.Name), ".mp4") {
+		localVideo, localVideoTempDir, err = prepareSavedLocalVideo(ctx, fileMetadata)
+		if err != nil {
+			return SendSavedResult{}, fmt.Errorf("prepare local video before sending: %w", err)
+		}
+		defer os.RemoveAll(localVideoTempDir)
+		media, uploadErr := s.uploadPublishFile(ctx, localVideo)
+		if uploadErr != nil {
+			return SendSavedResult{}, fmt.Errorf("upload local video: %w", uploadErr)
+		}
+		thumb, uploadErr := builder.Upload(message.FromPath(filepath.Join(localVideoTempDir, "preview.jpg"))).AsInputFile(ctx)
+		if uploadErr != nil {
+			return SendSavedResult{}, fmt.Errorf("upload local video preview: %w", uploadErr)
+		}
+		media.(*tg.InputMediaUploadedDocument).Thumb = thumb
+		if err := verifyPublishFile(ctx, localVideo); err != nil {
+			return SendSavedResult{}, fmt.Errorf("local video changed before sending: %w", err)
+		}
+		randomID, randomErr := nonzeroRandomID()
+		if randomErr != nil {
+			return SendSavedResult{}, randomErr
+		}
+		updates, err = s.raw.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: &tg.InputPeerSelf{}, Media: media, Message: strings.TrimSpace(opts.Caption), RandomID: randomID,
+		})
 	} else {
 		file, openErr := os.Open(fileMetadata.Path)
 		if openErr != nil {
@@ -384,8 +412,73 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 	} else if err := verifySavedMessage(record, profile, opts, fileMetadata); err != nil {
 		return result, fmt.Errorf("message %d was sent to Saved Messages but verification failed; do not retry blindly: %w", messageID, err)
 	}
+	if localVideo != nil {
+		value, _, err := savedVideoDocumentFromMessage(readbackMessage)
+		if err == nil {
+			err = verifyPublishedContent(value, InterviewTopicPost{Text: strings.TrimSpace(opts.Caption), File: localVideo})
+		}
+		if err != nil {
+			return result, fmt.Errorf("message %d local video readback failed; do not retry blindly: %w", messageID, err)
+		}
+		if _, _, err := s.downloadSavedVideoPreview(ctx, readbackMessage, localVideoTempDir, "readback-preview.jpg"); err != nil {
+			return result, fmt.Errorf("message %d local video preview readback failed; do not retry blindly: %w", messageID, err)
+		}
+	}
 	result.Verified = true
 	return result, nil
+}
+
+// Prepare and validate local media and a bounded JPEG before any upload/send.
+// The input MP4 bytes are never transcoded; only its preview is generated.
+func prepareSavedLocalVideo(ctx context.Context, metadata *savedFileMetadata) (*InterviewTopicFile, string, error) {
+	probe, err := probeLocalPublishMedia(ctx, metadata.Path)
+	if err != nil {
+		return nil, "", err
+	}
+	hash, err := fileSHA256(metadata.Path)
+	if err != nil {
+		return nil, "", err
+	}
+	f := &InterviewTopicFile{Path: metadata.Path, Filename: metadata.Name, MIME: metadata.MIMEType,
+		Size: metadata.Size, SHA256: hash, Kind: "video", Duration: probe.Duration,
+		Width: probe.Width, Height: probe.Height, HasAudio: probe.HasAudio}
+	if f.MIME != "video/mp4" || f.Width <= 0 || f.Height <= 0 {
+		return nil, "", fmt.Errorf("local MP4 must contain a video stream")
+	}
+	if err := verifyPublishFile(ctx, f); err != nil {
+		return nil, "", err
+	}
+	dir, err := os.MkdirTemp("", "telegram-harvest-local-video-")
+	if err != nil {
+		return nil, "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			os.RemoveAll(dir)
+		}
+	}()
+	path := filepath.Join(dir, "preview.jpg")
+	if b, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-i", f.Path,
+		"-map", "0:v:0", "-frames:v", "1", "-vf", "scale=320:320:force_original_aspect_ratio=decrease,format=yuvj420p",
+		"-q:v", "4", "-y", path).CombinedOutput(); err != nil {
+		return nil, "", fmt.Errorf("generate video preview: %w: %s", err, strings.TrimSpace(string(b)))
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	imageConfig, format, decodeErr := image.DecodeConfig(file)
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if decodeErr != nil || statErr != nil || closeErr != nil {
+		return nil, "", fmt.Errorf("inspect generated preview: decode=%v stat=%v close=%v", decodeErr, statErr, closeErr)
+	}
+	if format != "jpeg" || imageConfig.Width <= 0 || imageConfig.Height <= 0 || imageConfig.Width > 320 || imageConfig.Height > 320 || info.Size() <= 0 || info.Size() > 200*1024 {
+		return nil, "", fmt.Errorf("generated preview must be a JPEG up to 320px and 200 KiB")
+	}
+	ok = true
+	return f, dir, nil
 }
 
 func validateSavedMessagesProfile(profile harvest.SelfProfile) error {

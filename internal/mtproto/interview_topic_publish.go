@@ -190,6 +190,42 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 		}
 		return nil
 	}
+	probe, err := probeLocalPublishMedia(ctx, f.Path)
+	if err != nil {
+		return err
+	}
+	duration, hasAudio, w, hgt := probe.Duration, probe.HasAudio, probe.Width, probe.Height
+	expectedDuration := duration
+	if f.Kind == "audio" {
+		expectedDuration = math.Ceil(duration)
+	}
+	if math.Abs(expectedDuration-f.Duration) > 0.1 || hasAudio != f.HasAudio || w != f.Width || hgt != f.Height {
+		return fmt.Errorf("local media streams/duration differ from manifest")
+	}
+	if f.Kind == "audio" {
+		formatOK := f.MIME == "audio/mp4" && strings.Contains(","+probe.FormatName+",", ",m4a,") || f.MIME == "audio/mpeg" && probe.FormatName == "mp3"
+		if !formatOK {
+			return fmt.Errorf("audio container differs from declared MIME")
+		}
+	}
+	if f.Kind == "video" {
+		brand := probe.Brand
+		allowedBrand := map[string]bool{"isom": true, "iso2": true, "iso3": true, "iso4": true, "iso5": true, "iso6": true, "mp41": true, "mp42": true, "avc1": true, "dash": true, "M4V": true, "MSNV": true}
+		if strings.ToLower(filepath.Ext(f.Filename)) != ".mp4" || !strings.Contains(","+probe.FormatName+",", ",mp4,") || !allowedBrand[brand] {
+			return fmt.Errorf("video is not an allowed MP4 container/major_brand")
+		}
+	}
+	return nil
+}
+
+type localPublishMedia struct {
+	Duration          float64
+	Width, Height     int
+	HasAudio          bool
+	FormatName, Brand string
+}
+
+func probeLocalPublishMedia(ctx context.Context, path string) (localPublishMedia, error) {
 	var probe struct {
 		Streams []struct {
 			CodecType string `json:"codec_type"`
@@ -202,16 +238,16 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 			Tags       map[string]string `json:"tags"`
 		} `json:"format"`
 	}
-	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration,format_name:format_tags=major_brand", "-of", "json", f.Path).Output()
+	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration,format_name:format_tags=major_brand", "-of", "json", path).Output()
 	if err != nil {
-		return fmt.Errorf("ffprobe failed: %w", err)
+		return localPublishMedia{}, fmt.Errorf("ffprobe failed: %w", err)
 	}
 	if err = json.Unmarshal(b, &probe); err != nil {
-		return err
+		return localPublishMedia{}, err
 	}
 	var duration float64
 	if _, err = fmt.Sscan(probe.Format.Duration, &duration); err != nil {
-		return err
+		return localPublishMedia{}, err
 	}
 	hasAudio := false
 	w, hgt := 0, 0
@@ -224,27 +260,11 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 			hgt = s.Height
 		}
 	}
-	expectedDuration := duration
-	if f.Kind == "audio" {
-		expectedDuration = math.Ceil(duration)
+	if duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
+		return localPublishMedia{}, fmt.Errorf("invalid local media duration")
 	}
-	if math.Abs(expectedDuration-f.Duration) > 0.1 || hasAudio != f.HasAudio || w != f.Width || hgt != f.Height {
-		return fmt.Errorf("local media streams/duration differ from manifest")
-	}
-	if f.Kind == "audio" {
-		formatOK := f.MIME == "audio/mp4" && strings.Contains(","+probe.Format.FormatName+",", ",m4a,") || f.MIME == "audio/mpeg" && probe.Format.FormatName == "mp3"
-		if !formatOK {
-			return fmt.Errorf("audio container differs from declared MIME")
-		}
-	}
-	if f.Kind == "video" {
-		brand := strings.TrimSpace(probe.Format.Tags["major_brand"])
-		allowedBrand := map[string]bool{"isom": true, "iso2": true, "iso3": true, "iso4": true, "iso5": true, "iso6": true, "mp41": true, "mp42": true, "avc1": true, "dash": true, "M4V": true, "MSNV": true}
-		if strings.ToLower(filepath.Ext(f.Filename)) != ".mp4" || !strings.Contains(","+probe.Format.FormatName+",", ",mp4,") || !allowedBrand[brand] {
-			return fmt.Errorf("video is not an allowed MP4 container/major_brand")
-		}
-	}
-	return nil
+	return localPublishMedia{Duration: duration, HasAudio: hasAudio, Width: w, Height: hgt,
+		FormatName: probe.Format.FormatName, Brand: strings.TrimSpace(probe.Format.Tags["major_brand"])}, nil
 }
 
 type topicPublishSource interface {
