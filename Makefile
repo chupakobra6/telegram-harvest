@@ -14,7 +14,7 @@ MEDIA_LIMIT_FLAGS = \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup build build-source-changed fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build build-source-changed fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish print-shop-publish interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
@@ -43,6 +43,7 @@ help:
 	@printf "  make account-folders PROFILE=<account-name> # read sanitized folder filters\\n"
 	@printf "  make account-organize PROFILE=<account-name> MANIFEST=/private/review.json [APPLY=1] # dry-run; Отработка + archive only\\n"
 	@printf "  make interview-topic-update PROFILE=main MANIFEST=/private/review.json [APPLY=1] # own edits and two backed-up ZIP removals in fixed topic\\n"
+	@printf "  make print-shop-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; text/PDF in fixed print-shop group\\n"
 	@printf "  make interview-topic-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; new posts in fixed interview topic\\n"
 	@printf "  make interview-topic-replace-video PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; replace audio 2362/2365 with video\\n"
 	@printf "  make download-media PROFILE=study # manual uncapped media fetch; CHAT=... MESSAGE_ID=...\\n"
@@ -88,7 +89,7 @@ audit:
 
 verify: check race audit
 
-doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish interview-topic-replace-video download-media compact agent-view: $(CLI)
+doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish print-shop-publish interview-topic-replace-video download-media compact agent-view: $(CLI)
 
 account-add account-list: $(CLI)
 
@@ -164,6 +165,11 @@ interview-topic-publish:
 	$(REQUIRE_PROFILE)
 	@test -n "$(strip $(MANIFEST))" || { printf "MANIFEST is required\n"; exit 2; }
 	$(CLI) $(PROFILE_ARG) interview-topic-publish --manifest "$(MANIFEST)" $(if $(filter 1,$(APPLY)),--apply,)
+
+print-shop-publish:
+	$(REQUIRE_PROFILE)
+	@test -n "$(strip $(MANIFEST))" || { printf "MANIFEST is required\n"; exit 2; }
+	$(CLI) $(PROFILE_ARG) print-shop-publish --manifest "$(MANIFEST)" $(if $(filter 1,$(APPLY)),--apply,)
 
 interview-topic-replace-video:
 	$(REQUIRE_PROFILE)

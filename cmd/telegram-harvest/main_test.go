@@ -120,6 +120,7 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"account-folders  # registered bound account",
 		"account-organize --manifest <private.json> [--apply]",
 		"interview-topic-update --manifest <private.json> [--apply]",
+		"print-shop-publish --manifest <private.json> [--apply]",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
 		"required account profile",

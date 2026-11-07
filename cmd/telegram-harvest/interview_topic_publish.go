@@ -17,28 +17,33 @@ import (
 
 func readInterviewTopicPublishManifest(path string) (mtproto.InterviewTopicPublishManifest, error) {
 	var manifest mtproto.InterviewTopicPublishManifest
+	err := readPrivatePublishManifest(path, &manifest)
+	return manifest, err
+}
+
+func readPrivatePublishManifest(path string, manifest any) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return manifest, err
+		return err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return manifest, err
+		return err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > 1<<20 {
-		return manifest, fmt.Errorf("manifest must be a private regular file (0600 or stricter), at most 1 MiB")
+		return fmt.Errorf("manifest must be a private regular file (0600 or stricter), at most 1 MiB")
 	}
 	decoder := json.NewDecoder(f)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
-		return manifest, err
+	if err := decoder.Decode(manifest); err != nil {
+		return err
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return manifest, fmt.Errorf("manifest must contain exactly one JSON object")
+		return fmt.Errorf("manifest must contain exactly one JSON object")
 	}
-	return manifest, nil
+	return nil
 }
 
 func runInterviewTopicPublish(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {

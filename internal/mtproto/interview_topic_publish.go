@@ -19,8 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
-	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/unpack"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
 
@@ -266,6 +266,11 @@ func verifyPublishedPost(m *tg.Message, p InterviewTopicPost, parent int) error 
 	if reply != parent {
 		return fmt.Errorf("reply parent mismatch")
 	}
+	return verifyPublishedContent(m, p)
+}
+
+// Shared content verification does not authorize any destination or operation.
+func verifyPublishedContent(m *tg.Message, p InterviewTopicPost) error {
 	entities, err := topicEntities(p.Text, p.Entities)
 	if err != nil {
 		return err
@@ -511,6 +516,10 @@ func (s *Session) PublishInterviewTopic(ctx context.Context, m InterviewTopicPub
 	return publishInterviewTopic(ctx, &interviewTopicSession{Session: s}, m, j, save, apply)
 }
 func loadPublishJournal(journalPath string) (topicPublishJournal, error) {
+	return loadPublicationJournal(journalPath, InterviewTopicID)
+}
+
+func loadPublicationJournal(journalPath string, minimumID int) (topicPublishJournal, error) {
 	j := topicPublishJournal{}
 	f, err := os.Open(journalPath)
 	if err == nil {
@@ -533,7 +542,7 @@ func loadPublishJournal(journalPath string) (topicPublishJournal, error) {
 			return nil, fmt.Errorf("journal must contain one non-null object")
 		}
 		for _, receipt := range j {
-			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= InterviewTopicID {
+			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= minimumID {
 				return nil, fmt.Errorf("invalid receipt")
 			}
 		}
@@ -658,8 +667,45 @@ func (s *interviewTopicSession) publishSend(ctx context.Context, p InterviewTopi
 }
 
 func (s *interviewTopicSession) uploadInterviewFile(ctx context.Context, f *InterviewTopicFile) (tg.InputMediaClass, error) {
-	uploaded, e := message.NewSender(s.raw).Self().Upload(message.FromPath(f.Path)).AsInputFile(ctx)
+	return s.Session.uploadPublishFile(ctx, f)
+}
+
+// Upload from one checked descriptor, not a path that can be replaced mid-upload.
+func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) (tg.InputMediaClass, error) {
+	file, e := os.Open(f.Path)
 	if e != nil {
+		return nil, e
+	}
+	defer file.Close()
+	check := func() error {
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() != f.Size {
+			return fmt.Errorf("upload file size/type changed")
+		}
+		if _, err = file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		h := sha256.New()
+		if _, err = io.Copy(h, file); err != nil {
+			return err
+		}
+		if hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
+			return fmt.Errorf("upload SHA-256 mismatch")
+		}
+		_, err = file.Seek(0, io.SeekStart)
+		return err
+	}
+	if e = check(); e != nil {
+		return nil, e
+	}
+	uploaded, e := uploader.NewUploader(s.raw).Upload(ctx, uploader.NewUpload(f.Filename, file, f.Size))
+	if e != nil {
+		return nil, e
+	}
+	if e = check(); e != nil {
 		return nil, e
 	}
 	if e = verifyPublishFile(ctx, f); e != nil {
