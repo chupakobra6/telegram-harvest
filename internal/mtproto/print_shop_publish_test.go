@@ -73,7 +73,7 @@ func (f *printShopFake) printShopSend(_ context.Context, p PrintShopPost, _ int6
 		return 0, f.sendErr
 	}
 	id := f.sends // Group message IDs may be below the interview topic ID.
-	entities, _ := topicEntities(p.Text, p.Entities)
+	entities, _ := topicEntities(p.Text, p.effectiveEntities())
 	msg := &tg.Message{ID: id, Out: true, FromID: &tg.PeerUser{UserID: InterviewTopicAccountID}, PeerID: &tg.PeerChannel{ChannelID: PrintShopChannelID}, Message: p.Text, Entities: entities}
 	if f.wrongRead {
 		msg.Message = "different"
@@ -305,6 +305,7 @@ type printShopWire struct {
 	allowUpload       bool
 	uploaded          []byte
 	afterUpload       func()
+	messageEntities   []tg.MessageEntityClass
 	bad               string
 }
 
@@ -343,6 +344,7 @@ func (f *printShopWire) Invoke(_ context.Context, input bin.Encoder, output bin.
 		}
 		response = &tg.ChannelsChannelParticipants{Count: count, Participants: participants}
 	case *tg.MessagesSendMessageRequest:
+		f.messageEntities = req.Entities
 		f.sends++
 		peer, ok := req.Peer.(*tg.InputPeerChannel)
 		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.SendAs != nil || !req.NoWebpage || req.RandomID != printShopRandomID("notice-v1") {
@@ -619,5 +621,86 @@ func TestPrintShopNormalizedFilenameRejectsMismatch(t *testing.T) {
 				t.Fatal(r, err, f.sends, j)
 			}
 		})
+	}
+}
+
+func TestPrintShopPublishLiteralURLAndPendingReadback(t *testing.T) {
+	m, f := printShopFixture(t)
+	m.Posts = m.Posts[:1]
+	p := &m.Posts[0]
+	p.Text = "📄 Привет\nhttps://t.me/ArinaMathMaterialsBot"
+	want := []InterviewTopicEntity{{Type: "url", Offset: 10, Length: 34}}
+	j := topicPublishJournal{}
+	ctx := context.Background()
+	preview, err := publishPrintShop(ctx, f, m, j, func() error { t.Fatal("preview saved"); return nil }, false)
+	if err != nil || !reflect.DeepEqual(preview.Rows[0].EffectiveEntities, want) || f.sends != 0 || len(p.Entities) != 0 {
+		t.Fatal(preview, err)
+	}
+	result, err := publishPrintShop(ctx, f, m, j, func() error { return nil }, true)
+	if err != nil || !result.Complete || f.sends != 1 || j[p.Key].Hash != publishPostHash(p.publicationPost()) {
+		t.Fatal(result, err, j)
+	}
+	receipt := j[p.Key]
+	receipt.Pending = true
+	j[p.Key] = receipt
+	result, err = publishPrintShop(ctx, f, m, j, func() error { return nil }, true)
+	if err != nil || !result.Complete || result.Rows[0].Status != "already_applied" || f.sends != 1 || j[p.Key].Pending {
+		t.Fatal(result, err, j)
+	}
+	for _, mutate := range []struct {
+		name   string
+		change func(*tg.Message)
+	}{
+		{"extra", func(m *tg.Message) { m.Entities = append(m.Entities, &tg.MessageEntityBold{Offset: 0, Length: 2}) }},
+		{"wrong-offset", func(m *tg.Message) { m.Entities = []tg.MessageEntityClass{&tg.MessageEntityURL{Offset: 9, Length: 34}} }},
+		{"surrogate", func(m *tg.Message) { m.Entities = []tg.MessageEntityClass{&tg.MessageEntityURL{Offset: 1, Length: 34}} }},
+		{"wrong-length", func(m *tg.Message) {
+			m.Entities = []tg.MessageEntityClass{&tg.MessageEntityURL{Offset: 10, Length: 33}}
+		}},
+		{"text-url", func(m *tg.Message) {
+			m.Entities = []tg.MessageEntityClass{&tg.MessageEntityTextURL{Offset: 10, Length: 34, URL: "https://evil.example"}}
+		}},
+		{"changed-text", func(m *tg.Message) { m.Message += "!" }},
+	} {
+		t.Run(mutate.name, func(t *testing.T) {
+			original := *f.messages[receipt.ID]
+			changed := original
+			mutate.change(&changed)
+			f.messages[receipt.ID] = &changed
+			r := receipt
+			r.Pending = true
+			j[p.Key] = r
+			_, err := publishPrintShop(ctx, f, m, j, func() error { t.Fatal("failed verification saved"); return nil }, true)
+			if err == nil || f.sends != 1 || !j[p.Key].Pending {
+				t.Fatal(err, f.sends, j)
+			}
+			f.messages[receipt.ID] = &original
+		})
+	}
+}
+
+func TestPrintShopPublishExplicitEntitiesUnchanged(t *testing.T) {
+	p := PrintShopPost{Text: "📄 https://example.com", Entities: []InterviewTopicEntity{{Type: "bold", Offset: 0, Length: 2}}}
+	if !reflect.DeepEqual(p.effectiveEntities(), p.Entities) {
+		t.Fatal(p.effectiveEntities())
+	}
+	p.Entities = nil
+	p.File = &PrintShopPDF{}
+	if len(p.effectiveEntities()) != 0 {
+		t.Fatal("PDF caption must not infer entities")
+	}
+}
+
+func TestPrintShopPublishWireLiteralURL(t *testing.T) {
+	m, _ := printShopFixture(t)
+	p := m.Posts[0]
+	p.Text = "📄 Привет\nhttps://t.me/ArinaMathMaterialsBot"
+	w := &printShopWire{t: t}
+	target := resolvedTarget{Chat: harvest.Chat{ID: PrintShopChannelID, Type: "supergroup", Title: PrintShopTitle}, InputPeer: &tg.InputPeerChannel{ChannelID: PrintShopChannelID, AccessHash: 123}}
+	s := &printShopSession{Session: &Session{raw: tg.NewClient(w), dialogCache: map[string]resolvedTarget{"supergroup:4415343946": target}}}
+	_, _ = s.printShopSend(context.Background(), p, printShopRandomID(p.Key))
+	want := []tg.MessageEntityClass{&tg.MessageEntityURL{Offset: 10, Length: 34}}
+	if w.sends != 1 || !sameTopicEntities(w.messageEntities, want) {
+		t.Fatal(w.sends, w.messageEntities)
 	}
 }

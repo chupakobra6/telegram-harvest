@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -49,13 +51,14 @@ type PrintShopPDF struct {
 	Size     int64  `json:"size"`
 }
 type PrintShopPublishRow struct {
-	Post               PrintShopPost `json:"post"`
-	ID                 int           `json:"id,omitempty"`
-	Status             string        `json:"status"`
-	ServerVerified     bool          `json:"server_verified"`
-	OutcomeUnknown     bool          `json:"outcome_unknown"`
-	ServerFilename     string        `json:"server_filename,omitempty"`
-	FilenameNormalized bool          `json:"filename_normalized"`
+	Post               PrintShopPost          `json:"post"`
+	EffectiveEntities  []InterviewTopicEntity `json:"effective_entities"`
+	ID                 int                    `json:"id,omitempty"`
+	Status             string                 `json:"status"`
+	ServerVerified     bool                   `json:"server_verified"`
+	OutcomeUnknown     bool                   `json:"outcome_unknown"`
+	ServerFilename     string                 `json:"server_filename,omitempty"`
+	FilenameNormalized bool                   `json:"filename_normalized"`
 }
 type PrintShopPublishResult struct {
 	AccountID      int64                 `json:"account_id"`
@@ -77,6 +80,40 @@ func (p PrintShopPost) publicationPost() InterviewTopicPost {
 	}
 	return post
 }
+
+// Only unformatted plain-text posts get literal whitespace-delimited HTTP(S)
+// tokens. The authored post is never mutated: receipts hash the original payload.
+func (p PrintShopPost) effectiveEntities() []InterviewTopicEntity {
+	result := append([]InterviewTopicEntity{}, p.Entities...)
+	if p.File != nil || len(p.Entities) != 0 {
+		return result
+	}
+	start := -1
+	for i, r := range p.Text {
+		if unicode.IsSpace(r) {
+			if start >= 0 {
+				result = appendPrintShopURL(result, p.Text, start, i)
+				start = -1
+			}
+		} else if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		result = appendPrintShopURL(result, p.Text, start, len(p.Text))
+	}
+	return result
+}
+
+func appendPrintShopURL(entities []InterviewTopicEntity, text string, start, end int) []InterviewTopicEntity {
+	token := text[start:end]
+	parsed, err := url.ParseRequestURI(token)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return entities
+	}
+	return append(entities, InterviewTopicEntity{Type: "url", Offset: len(utf16.Encode([]rune(text[:start]))), Length: len(utf16.Encode([]rune(token)))})
+}
+
 func printShopRandomID(key string) int64 {
 	h := sha256.Sum256([]byte("print-shop-publish/main/4415343946/" + key))
 	n := int64(binary.BigEndian.Uint64(h[:8]) & math.MaxInt64)
@@ -168,6 +205,7 @@ func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
 		return fmt.Errorf("unexpected print-shop reply/topic")
 	}
 	expected := p.publicationPost()
+	expected.Entities = p.effectiveEntities()
 	if p.File != nil {
 		if media, ok := m.Media.(*tg.MessageMediaDocument); ok {
 			if document, ok := media.Document.(*tg.Document); ok {
@@ -178,7 +216,33 @@ func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
 			}
 		}
 	}
+	entities, err := topicEntities(expected.Text, expected.Entities)
+	if err != nil {
+		return err
+	}
+	if m.Message != expected.Text {
+		return fmt.Errorf("print-shop text mismatch")
+	}
+	if !sameTopicEntities(m.Entities, entities) {
+		return fmt.Errorf("print-shop entities mismatch: server=%s expected=%s", printShopEntityShapes(m.Entities), printShopEntityShapes(entities))
+	}
 	return verifyPublishedContent(m, expected)
+}
+
+// Entity diagnostics deliberately exclude URL values and any media access fields.
+func printShopEntityShapes(entities []tg.MessageEntityClass) string {
+	shapes := make([]string, 0, len(entities))
+	for _, entity := range entities {
+		if bounds, ok := entity.(interface {
+			GetOffset() int
+			GetLength() int
+		}); ok {
+			shapes = append(shapes, fmt.Sprintf("%T(%d,%d)", entity, bounds.GetOffset(), bounds.GetLength()))
+		} else {
+			shapes = append(shapes, fmt.Sprintf("%T", entity))
+		}
+	}
+	return "[" + strings.Join(shapes, ", ") + "]"
 }
 
 // Stream uses one worker; never permit server bytes beyond the reviewed file size.
@@ -261,7 +325,7 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 				return r, fmt.Errorf("post key payload changed: %s", p.Key)
 			}
 			if receipt.ID == 0 {
-				r.Rows = append(r.Rows, PrintShopPublishRow{Post: p, Status: "outcome_unknown", OutcomeUnknown: true})
+				r.Rows = append(r.Rows, PrintShopPublishRow{Post: p, EffectiveEntities: p.effectiveEntities(), Status: "outcome_unknown", OutcomeUnknown: true})
 				return r, fmt.Errorf("outcome_unknown for %s; reconcile server manually; do not retry", p.Key)
 			}
 			msg, e := s.printShopRead(ctx, receipt.ID)
@@ -289,7 +353,7 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 	}
 	for _, p := range m.Posts {
 		receipt, known := j[p.Key]
-		row := PrintShopPublishRow{Post: p, ID: receipt.ID, Status: "would_send"}
+		row := PrintShopPublishRow{Post: p, EffectiveEntities: p.effectiveEntities(), ID: receipt.ID, Status: "would_send"}
 		if known {
 			// Already read and byte-verified in the all-input preflight; do not download twice.
 			if apply && receipt.Pending {
@@ -487,7 +551,7 @@ func (s *printShopSession) printShopExisting(ctx context.Context, p PrintShopPos
 	}
 }
 func (s *printShopSession) printShopSend(ctx context.Context, p PrintShopPost, randomID int64) (int, error) {
-	entities, err := topicEntities(p.Text, p.Entities)
+	entities, err := topicEntities(p.Text, p.effectiveEntities())
 	if err != nil {
 		return 0, err
 	}
