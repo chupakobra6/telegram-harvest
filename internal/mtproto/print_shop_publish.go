@@ -210,7 +210,7 @@ func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
 		if media, ok := m.Media.(*tg.MessageMediaDocument); ok {
 			if document, ok := media.Document.(*tg.Document); ok {
 				name := documentFileName(document)
-				if name == strings.ReplaceAll(p.File.Filename, " ", "_") {
+				if name == strings.ReplaceAll(p.File.Filename, " ", "_") || name == strings.NewReplacer(" ", "_", "-", "_").Replace(p.File.Filename) {
 					expected.File.Filename = name
 				}
 			}

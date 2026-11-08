@@ -37,6 +37,7 @@ type printShopFake struct {
 	account             int64
 	username            string
 	sends, prepares     int
+	sentKeys            []string
 	existing, wrongRead bool
 	normalizeFilename   bool
 	sendErr             error
@@ -66,6 +67,7 @@ func (f *printShopFake) printShopExisting(context.Context, PrintShopPost) (bool,
 }
 func (f *printShopFake) printShopSend(_ context.Context, p PrintShopPost, _ int64) (int, error) {
 	f.sends++
+	f.sentKeys = append(f.sentKeys, p.Key)
 	if f.beforeSend != nil {
 		f.beforeSend()
 	}
@@ -702,5 +704,51 @@ func TestPrintShopPublishWireLiteralURL(t *testing.T) {
 	want := []tg.MessageEntityClass{&tg.MessageEntityURL{Offset: 10, Length: 34}}
 	if w.sends != 1 || !sameTopicEntities(w.messageEntities, want) {
 		t.Fatal(w.sends, w.messageEntities)
+	}
+}
+
+// A copied durable pending receipt must recover ID 319 before sending later posts.
+func TestPrintShopPublishPending319FilenameAndContinuation(t *testing.T) {
+	for _, tc := range []struct {
+		name, server string
+		normalized   bool
+	}{
+		{"exact", "Телефон – без переносов и варианты А-Б.pdf", false},
+		{"spaces", "Телефон_–_без_переносов_и_варианты_А-Б.pdf", true},
+		{"spaces-hyphen", "Телефон_–_без_переносов_и_варианты_А_Б.pdf", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, f := printShopFixture(t)
+			p := m.Posts[1]
+			path := filepath.Join(filepath.Dir(p.File.Path), "Телефон – без переносов и варианты А-Б.pdf")
+			if err := os.Rename(p.File.Path, path); err != nil {
+				t.Fatal(err)
+			}
+			p.File.Path, p.File.Filename = path, filepath.Base(path)
+			m.Posts = []PrintShopPost{p, {Key: "next-1", Text: "один"}, {Key: "next-2", Text: "два"}, {Key: "next-3", Text: "три"}}
+			id, err := f.printShopSend(context.Background(), p, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg := f.messages[id]
+			msg.ID = 319
+			msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document).Attributes[0] = &tg.DocumentAttributeFilename{FileName: tc.server}
+			f.messages[319] = msg
+			f.sends, f.sentKeys = 0, nil
+			hash := publishPostHash(p.publicationPost())
+			original := topicPublishJournal{p.Key: {Hash: hash, ID: 319, Pending: true}}
+			receiptPath := filepath.Join(t.TempDir(), "copy.receipts.json")
+			if err := savePublishJournal(receiptPath, original); err != nil {
+				t.Fatal(err)
+			}
+			journal, err := loadPublicationJournal(receiptPath, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := publishPrintShop(context.Background(), f, m, journal, func() error { return savePublishJournal(receiptPath, journal) }, true)
+			if err != nil || !r.Complete || r.Rows[0].Status != "already_applied" || r.Rows[0].ID != 319 || r.Rows[0].ServerFilename != tc.server || r.Rows[0].FilenameNormalized != tc.normalized || journal[p.Key].Hash != hash || journal[p.Key].Pending || f.downloadCalls != 1 || !reflect.DeepEqual(f.sentKeys, []string{"next-1", "next-2", "next-3"}) {
+				t.Fatal(r, err, journal, f.sentKeys)
+			}
+		})
 	}
 }
