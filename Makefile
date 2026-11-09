@@ -43,7 +43,7 @@ help:
 	@printf "  make account-folders PROFILE=<account-name> # read sanitized folder filters\\n"
 	@printf "  make account-organize PROFILE=<account-name> MANIFEST=/private/review.json [APPLY=1] # dry-run; Отработка + archive or restore\\n"
 	@printf "  make interview-topic-update PROFILE=main MANIFEST=/private/review.json [APPLY=1] # own edits and two backed-up ZIP removals in fixed topic\\n"
-	@printf "  make print-shop-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; text/PDF in fixed print-shop group\\n"
+	@printf "  make print-shop-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; text/PDF/MP4 in fixed print-shop group\\n"
 	@printf "  make interview-topic-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; new posts in fixed interview topic\\n"
 	@printf "  make interview-topic-replace-video PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; replace audio 2362/2365 with video\\n"
 	@printf "  make download-media PROFILE=study # manual uncapped media fetch; CHAT=... MESSAGE_ID=...\\n"

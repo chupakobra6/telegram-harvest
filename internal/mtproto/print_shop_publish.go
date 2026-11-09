@@ -241,7 +241,9 @@ func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
 	if !sameTopicEntities(m.Entities, entities) {
 		return fmt.Errorf("print-shop entities mismatch: server=%s expected=%s", printShopEntityShapes(m.Entities), printShopEntityShapes(entities))
 	}
-	return verifyPublishedContent(m, expected)
+	// Telegram may clear Nosound on a silent print-shop video. Readback also
+	// downloads exact bytes and probes them for the declared absence of audio.
+	return verifyPublishedContentWithSilentVideoNormalization(m, expected, true)
 }
 
 // Entity diagnostics deliberately exclude URL values and any media access fields.

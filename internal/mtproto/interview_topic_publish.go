@@ -291,6 +291,10 @@ func verifyPublishedPost(m *tg.Message, p InterviewTopicPost, parent int) error 
 
 // Shared content verification does not authorize any destination or operation.
 func verifyPublishedContent(m *tg.Message, p InterviewTopicPost) error {
+	return verifyPublishedContentWithSilentVideoNormalization(m, p, false)
+}
+
+func verifyPublishedContentWithSilentVideoNormalization(m *tg.Message, p InterviewTopicPost, allowClearedNosound bool) error {
 	entities, err := topicEntities(p.Text, p.Entities)
 	if err != nil {
 		return err
@@ -329,8 +333,8 @@ func verifyPublishedContent(m *tg.Message, p InterviewTopicPost) error {
 			}
 		case *tg.DocumentAttributeVideo:
 			video = true
-			if f.Kind != "video" || a.RoundMessage || !a.SupportsStreaming || a.Nosound == f.HasAudio || math.Abs(a.Duration-f.Duration) > 0.1 || a.W != f.Width || a.H != f.Height {
-				return fmt.Errorf("video attributes mismatch")
+			if f.Kind != "video" || a.RoundMessage || !a.SupportsStreaming || (a.Nosound == f.HasAudio && !(allowClearedNosound && !f.HasAudio && !a.Nosound)) || math.Abs(a.Duration-f.Duration) > 0.1 || a.W != f.Width || a.H != f.Height {
+				return fmt.Errorf("video attributes mismatch: server round=%t streaming=%t nosound=%t duration=%v width=%d height=%d; expected audio=%t duration=%v width=%d height=%d", a.RoundMessage, a.SupportsStreaming, a.Nosound, a.Duration, a.W, a.H, f.HasAudio, f.Duration, f.Width, f.Height)
 			}
 		}
 	}

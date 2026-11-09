@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -872,5 +873,54 @@ func TestPrintShopUploadSnapshotSameInodeMutation(t *testing.T) {
 				t.Fatalf("send=%v parts=%d sends=%d uploaded_original=%v", sendErr, w.uploads, w.sends, bytes.Equal(w.uploaded, original))
 			}
 		})
+	}
+}
+
+func TestPrintShopSilentVideoClearedNosoundPendingReadback(t *testing.T) {
+	v := localReplacementVideo(t)
+	path := filepath.Join(t.TempDir(), "silent.mp4")
+	if output, err := exec.Command("ffmpeg", "-v", "error", "-i", v.Path, "-an", "-c:v", "copy", "-y", path).CombinedOutput(); err != nil {
+		t.Fatalf("silent fixture: %s: %v", output, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Path = path
+	v.Filename = "silent.mp4"
+	v.Size = int64(len(data))
+	v.SHA256 = topicTextHash(string(data))
+	v.HasAudio = false
+	m, f := printShopFixture(t)
+	m.Posts = []PrintShopPost{{Key: "silent-v1", Text: "Видео", File: &PrintShopPDF{Path: v.Path, Filename: v.Filename, MIME: v.MIME, SHA256: v.SHA256, Size: v.Size, Duration: v.Duration, Width: v.Width, Height: v.Height, HasAudio: false}}}
+	p := m.Posts[0]
+	id, err := f.printShopSend(context.Background(), p, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := f.messages[id].Media.(*tg.MessageMediaDocument).Document.(*tg.Document)
+	attr := doc.Attributes[1].(*tg.DocumentAttributeVideo)
+	attr.Nosound = false
+	if err := verifyPublishedContent(f.messages[id], p.publicationPost()); err == nil {
+		t.Fatal("interview path accepted normalized flag")
+	}
+	j := topicPublishJournal{p.Key: {Hash: publishPostHash(p.publicationPost()), ID: id, Pending: true}}
+	saved := 0
+	result, err := publishPrintShop(context.Background(), f, m, j, func() error { saved++; return nil }, false)
+	if err != nil || !result.Ready || !result.Rows[0].ServerVerified || !j[p.Key].Pending || saved != 0 || f.sends != 1 {
+		t.Fatal(result, err, saved, f.sends)
+	}
+	result, err = publishPrintShop(context.Background(), f, m, j, func() error { saved++; return nil }, true)
+	if err != nil || !result.Complete || j[p.Key].Pending || saved != 1 || f.sends != 1 {
+		t.Fatal(result, err, saved, f.sends)
+	}
+	attr.SupportsStreaming = false
+	if _, err = publishPrintShop(context.Background(), f, m, j, func() error { return nil }, true); err == nil || f.sends != 1 {
+		t.Fatal("non-streaming video accepted", err)
+	}
+	attr.SupportsStreaming = true
+	f.serverBytes[int64(id)][len(data)-1] ^= 1
+	if _, err = publishPrintShop(context.Background(), f, m, j, func() error { return nil }, true); err == nil || f.sends != 1 {
+		t.Fatal("modified video bytes accepted", err)
 	}
 }
