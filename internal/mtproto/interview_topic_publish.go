@@ -690,7 +690,7 @@ func (s *interviewTopicSession) uploadInterviewFile(ctx context.Context, f *Inte
 	return s.Session.uploadPublishFile(ctx, f)
 }
 
-// Upload from one checked descriptor, not a path that can be replaced mid-upload.
+// Upload only a verified private snapshot; keep checking the source descriptor and path.
 func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) (tg.InputMediaClass, error) {
 	file, e := os.Open(f.Path)
 	if e != nil {
@@ -704,6 +704,13 @@ func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) 
 		}
 		if !info.Mode().IsRegular() || info.Size() != f.Size {
 			return fmt.Errorf("upload file size/type changed")
+		}
+		pathInfo, err := os.Stat(f.Path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(info, pathInfo) {
+			return fmt.Errorf("upload source path changed")
 		}
 		if _, err = file.Seek(0, io.SeekStart); err != nil {
 			return err
@@ -721,7 +728,40 @@ func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) 
 	if e = check(); e != nil {
 		return nil, e
 	}
-	uploaded, e := uploader.NewUploader(s.raw).Upload(ctx, uploader.NewUpload(f.Filename, file, f.Size))
+	if e = verifyPublishFile(ctx, f); e != nil {
+		return nil, e
+	}
+	dir, e := os.MkdirTemp("", "telegram-publish-snapshot-*")
+	if e != nil {
+		return nil, e
+	}
+	defer os.RemoveAll(dir)
+	snapshotPath := filepath.Join(dir, "snapshot")
+	snapshot, e := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if e != nil {
+		return nil, e
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(snapshot, h), io.LimitReader(file, f.Size+1))
+	closeErr := snapshot.Close()
+	if e = errors.Join(copyErr, closeErr); e != nil {
+		return nil, e
+	}
+	if n != f.Size || hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
+		return nil, fmt.Errorf("upload snapshot size or SHA-256 mismatch")
+	}
+	if e = check(); e != nil {
+		return nil, e
+	}
+	snapshot, e = os.Open(snapshotPath)
+	if e != nil {
+		return nil, e
+	}
+	defer snapshot.Close()
+	if e = os.Remove(snapshotPath); e != nil {
+		return nil, e
+	}
+	uploaded, e := uploader.NewUploader(s.raw).Upload(ctx, uploader.NewUpload(f.Filename, snapshot, f.Size))
 	if e != nil {
 		return nil, e
 	}

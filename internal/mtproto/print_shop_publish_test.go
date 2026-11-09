@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -824,5 +825,52 @@ func TestPrintShopVideoWireUpload(t *testing.T) {
 	original, readErr := os.ReadFile(v.Path)
 	if err == nil || readErr != nil || w.sends != 1 || w.uploads != 1 || !reflect.DeepEqual(w.uploaded, original) {
 		t.Fatal(err, readErr, w.sends, w.uploads)
+	}
+}
+
+func TestPrintShopUploadSnapshotSameInodeMutation(t *testing.T) {
+	for _, restore := range []bool{true, false} {
+		t.Run(map[bool]string{true: "restored_before_send", false: "remains_changed"}[restore], func(t *testing.T) {
+			m, _ := printShopFixture(t)
+			p := m.Posts[1]
+			original := append([]byte("%PDF-1.7\n"), bytes.Repeat([]byte("original"), 300000)...)
+			changed := append([]byte("%PDF-1.7\n"), bytes.Repeat([]byte("modified"), 300000)...)
+			if err := os.WriteFile(p.File.Path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			p.File.Size = int64(len(original))
+			p.File.SHA256 = topicTextHash(string(original))
+			before, err := os.Stat(p.File.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := &printShopWire{t: t, allowUpload: true}
+			w.afterUpload = func() {
+				if w.uploads == 1 {
+					if err := os.WriteFile(p.File.Path, changed, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if restore && w.uploads == 2 {
+					if err := os.WriteFile(p.File.Path, original, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			target := resolvedTarget{Chat: harvest.Chat{ID: PrintShopChannelID, Type: "supergroup", Title: PrintShopTitle}, InputPeer: &tg.InputPeerChannel{ChannelID: PrintShopChannelID, AccessHash: 123}}
+			session := &printShopSession{Session: &Session{raw: tg.NewClient(w), dialogCache: map[string]resolvedTarget{"supergroup:4415343946": target}}}
+			_, sendErr := session.printShopSend(context.Background(), p, printShopRandomID(p.Key))
+			after, err := os.Stat(p.File.Path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatal("inode changed", err)
+			}
+			expectedSends := 0
+			if restore {
+				expectedSends = 1
+			}
+			if sendErr == nil || w.uploads < 2 || w.sends != expectedSends || !bytes.Equal(w.uploaded, original) {
+				t.Fatalf("send=%v parts=%d sends=%d uploaded_original=%v", sendErr, w.uploads, w.sends, bytes.Equal(w.uploaded, original))
+			}
+		})
 	}
 }
