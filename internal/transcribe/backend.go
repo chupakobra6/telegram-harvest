@@ -22,7 +22,7 @@ const (
 	ProductionModelFile                = "ggml-large-v3-turbo-q5_0.bin"
 	ProductionSpeechGateFile           = "ggml-silero-v6.2.0.bin"
 	whisperShortFormStrategy           = "auto-language-no-timestamps-v2"
-	whisperLongFormStrategy            = "native-timestamped-tail-recovery-v5"
+	whisperLongFormStrategy            = "native-timestamped-tail-recovery-v6"
 	whisperAdaptiveRoutingPolicy       = "duration-or-leading-silence-v1"
 	whisperAdaptiveLanguagePolicy      = "auto-short-detect-russian-punctuation-long-v2"
 	whisperRepetitionPolicy            = "collapse-exact-token-cycle-v2"
@@ -137,6 +137,10 @@ type WhisperAdaptiveDescriptor struct {
 	TrailingRecoveryPolicy           string  `json:"trailing_recovery_policy"`
 	TrailingRecoveryMaxSeconds       float64 `json:"trailing_recovery_max_seconds"`
 	TrailingRecoveryContextSeconds   float64 `json:"trailing_recovery_context_seconds"`
+	IsolatedTailLeadSeconds          float64 `json:"isolated_tail_lead_seconds"`
+	IsolatedTailAlignmentSeconds     float64 `json:"isolated_tail_alignment_seconds"`
+	IsolatedTailGainDB               int     `json:"isolated_tail_gain_db"`
+	IsolatedTailLimiterPeak          float64 `json:"isolated_tail_limiter_peak"`
 	ShortDecodeStrategy              string  `json:"short_decode_strategy"`
 	LongDecodeStrategy               string  `json:"long_decode_strategy"`
 	RepetitionPolicy                 string  `json:"repetition_policy"`
@@ -145,9 +149,8 @@ type WhisperAdaptiveDescriptor struct {
 	RepetitionMaxBlockTokens         int     `json:"repetition_max_block_tokens"`
 }
 
-// Diagnostics record backend confidence and routing evidence. Only explicit
-// long-form invariants (timestamps, tail coverage, extreme exact loops) reject
-// a result; probability fields remain benchmark signals.
+// Diagnostics record backend confidence and routing evidence. Confidence fields
+// remain benchmark signals. Recovery of isolated speech also requires agreement.
 type Diagnostics struct {
 	Segments                          int      `json:"segments"`
 	MeanAverageLogProb                float64  `json:"mean_average_log_probability,omitempty"`
@@ -165,6 +168,7 @@ type Diagnostics struct {
 	TrailingCoverageToleranceSeconds  float64  `json:"trailing_coverage_tolerance_seconds,omitempty"`
 	CoverageValidated                 bool     `json:"coverage_validated,omitempty"`
 	TailRecoveryApplied               bool     `json:"tail_recovery_applied,omitempty"`
+	IsolatedTailRecovery              bool     `json:"isolated_tail_recovery,omitempty"`
 	TailRecoveryOffsetSeconds         float64  `json:"tail_recovery_offset_seconds,omitempty"`
 	InitialTrailingCoverageGapSeconds float64  `json:"initial_trailing_coverage_gap_seconds,omitempty"`
 	DetectedLanguage                  string   `json:"detected_language,omitempty"`
@@ -432,9 +436,13 @@ func (o WhisperAdaptiveOptions) normalized() WhisperAdaptiveDescriptor {
 		RussianInitialPrompt:             strings.TrimSpace(o.RussianInitialPrompt),
 		CarryInitialPrompt:               o.CarryInitialPrompt,
 		TrailingCoverageToleranceSeconds: positiveFloatOr(o.TrailingCoverageToleranceSeconds, longFormCoverageToleranceSeconds),
-		TrailingRecoveryPolicy:           "replace-terminal-segments-once-v2",
+		TrailingRecoveryPolicy:           "terminal-retry-with-isolated-consensus-v3",
 		TrailingRecoveryMaxSeconds:       longFormTailRecoveryMaxSeconds,
 		TrailingRecoveryContextSeconds:   longFormTailRecoveryContextSeconds,
+		IsolatedTailLeadSeconds:          quietTailLeadSeconds,
+		IsolatedTailAlignmentSeconds:     quietTailSpanToleranceSeconds,
+		IsolatedTailGainDB:               quietTailGainDB,
+		IsolatedTailLimiterPeak:          quietTailLimiterPeak,
 		ShortDecodeStrategy:              whisperShortFormStrategy,
 		LongDecodeStrategy:               whisperLongFormStrategy,
 		RepetitionPolicy:                 whisperRepetitionPolicy,

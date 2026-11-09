@@ -348,7 +348,7 @@ func TestLongFormDecodeRequestAppliesPromptOnlyToRussian(t *testing.T) {
 }
 
 func TestLongFormTailRecoveryIsBoundedAndPreservesPrefix(t *testing.T) {
-	for _, scenario := range []string{"recovered", "still uncovered", "invalid metadata", "too long", "text mismatch"} {
+	for _, scenario := range []string{"recovered", "isolated", "isolated duplicate", "still uncovered", "invalid metadata", "too long", "text mismatch"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			wavPath := filepath.Join(dir, "long.wav")
@@ -359,10 +359,23 @@ func TestLongFormTailRecoveryIsBoundedAndPreservesPrefix(t *testing.T) {
 			script := `#!/bin/sh
 last=""
 for arg in "$@"; do last="$arg"; done
+if [ "$7" = -af ]; then
+  cp "$6" "$last"
+  exit
+fi
 bytes=$(awk -v duration="$8" 'BEGIN {print int(duration*32000)+44}')
 head -c "$bytes" /dev/zero > "$last"
 `
 			if err := os.WriteFile(ffmpeg, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			isolated := strings.HasPrefix(scenario, "isolated")
+			vad := filepath.Join(dir, "vad")
+			vadResult := "Detected 0 speech segments:"
+			if isolated {
+				vadResult = "Detected 2 speech segments:\nSpeech segment 0: start = 0, end = 120\nSpeech segment 1: start = 300, end = 349"
+			}
+			if err := os.WriteFile(vad, []byte("#!/bin/sh\nprintf '%s\\n' '"+vadResult+"'\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			segment := func(start, end float64, text string) whisperSegment {
@@ -409,16 +422,31 @@ head -c "$bytes" /dev/zero > "$last"
 						t.Errorf("unsafe recovery request: size=%d fields=%v", header.Size, request.MultipartForm.Value)
 					}
 					tailEnd := 3.74
-					if scenario == "still uncovered" {
+					if scenario == "still uncovered" || isolated {
 						tailEnd = 1
 					}
 					_ = json.NewEncoder(w).Encode(whisperResponse{Duration: wavPCM16MonoDuration(header.Size), Text: "Рад знакомству.\nВзаимно, взаимно.", Segments: []whisperSegment{segment(0, tailEnd, "Рад знакомству. Взаимно, взаимно.")}})
+				case 4, 5:
+					if !isolated || request.FormValue("token_timestamps") != "true" {
+						t.Error("unexpected isolated tail request")
+						return
+					}
+					tailText := "Тихий ответ."
+					if scenario == "isolated duplicate" {
+						tailText = "Рад знакомству."
+					}
+					start, middle, end := 0.28, 0.52, 0.77
+					words := strings.SplitN(tailText, " ", 2)
+					recovered := segment(start, end, tailText)
+					recovered.Words = []whisperWord{{Word: words[0], Start: &start, End: &middle}, {Word: " " + words[1], Start: &middle, End: &end}}
+					duration := wavPCM16MonoDuration(request.MultipartForm.File["file"][0].Size)
+					_ = json.NewEncoder(w).Encode(whisperResponse{Duration: duration, Text: tailText, Segments: []whisperSegment{recovered}})
 				default:
 					t.Error("more than one recovery attempt")
 				}
 			}))
 			defer server.Close()
-			runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
+			runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperSpeechGate: WhisperSpeechGateOptions{Command: vad}, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
 			text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 795.359)
 			if scenario == "recovered" {
 				if err != nil || text != "Основная часть.\nВыберем время.\nХорошо.\nДо свидания.\nРад знакомству.\nВзаимно, взаимно." {
@@ -427,11 +455,17 @@ head -c "$bytes" /dev/zero > "$last"
 				if diagnostics == nil || !diagnostics.TailRecoveryApplied || !diagnostics.CoverageValidated || diagnostics.TailRecoveryOffsetSeconds != 791.86 || math.Abs(diagnostics.InitialTrailingCoverageGapSeconds-2.179) > 0.001 || diagnostics.LastSegmentEndSeconds < 795.359 {
 					t.Fatalf("recovery evidence: %+v", diagnostics)
 				}
+			} else if scenario == "isolated" {
+				if err != nil || text != full.Text+"\nТихий ответ." || diagnostics == nil || !diagnostics.IsolatedTailRecovery || !diagnostics.CoverageValidated || requests != 5 {
+					t.Fatalf("isolated recovery: text=%q diagnostics=%+v requests=%d err=%v", text, diagnostics, requests, err)
+				}
 			} else if err == nil {
 				t.Fatal("unsafe or still incomplete transcript was accepted")
+			} else if scenario == "isolated duplicate" && !strings.Contains(err.Error(), "changes during repetition cleanup") {
+				t.Fatalf("expected isolated repetition cleanup refusal, got %v", err)
 			}
 			wantRecovery := 0
-			if scenario == "recovered" || scenario == "still uncovered" {
+			if scenario == "recovered" || scenario == "still uncovered" || isolated {
 				wantRecovery = 1
 			}
 			if recoveryRequests != wantRecovery {

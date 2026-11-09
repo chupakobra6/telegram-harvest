@@ -54,19 +54,27 @@ type WhisperServerRunner struct {
 }
 
 type whisperResponse struct {
-	Text     string           `json:"text"`
-	Error    string           `json:"error"`
-	Language string           `json:"language,omitempty"`
-	Duration float64          `json:"duration,omitempty"`
-	Segments []whisperSegment `json:"segments,omitempty"`
+	Text                  string           `json:"text"`
+	Error                 string           `json:"error"`
+	Language              string           `json:"language,omitempty"`
+	Duration              float64          `json:"duration,omitempty"`
+	Segments              []whisperSegment `json:"segments,omitempty"`
+	isolatedTailRecovered bool
 }
 
 type whisperSegment struct {
-	Text                  string   `json:"text,omitempty"`
-	Start                 *float64 `json:"start,omitempty"`
-	End                   *float64 `json:"end,omitempty"`
-	AverageLogProbability float64  `json:"avg_logprob"`
-	NoSpeechProbability   float64  `json:"no_speech_prob"`
+	Text                  string        `json:"text,omitempty"`
+	Start                 *float64      `json:"start,omitempty"`
+	End                   *float64      `json:"end,omitempty"`
+	AverageLogProbability float64       `json:"avg_logprob"`
+	NoSpeechProbability   float64       `json:"no_speech_prob"`
+	Words                 []whisperWord `json:"words,omitempty"`
+}
+
+type whisperWord struct {
+	Word  string   `json:"word"`
+	Start *float64 `json:"start"`
+	End   *float64 `json:"end"`
 }
 
 type whisperRequestOptions struct {
@@ -75,6 +83,7 @@ type whisperRequestOptions struct {
 	InitialPrompt      string
 	CarryInitialPrompt bool
 	DetectLanguage     bool
+	TokenTimestamps    bool
 }
 
 func (r *WhisperServerRunner) Run(ctx context.Context, inputPath string, outputPath string) (string, error) {
@@ -293,6 +302,7 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	diagnostics.TrailingCoverageToleranceSeconds = settings.TrailingCoverageToleranceSeconds
 	diagnostics.CoverageValidated = true
 	diagnostics.TailRecoveryApplied = recovered
+	diagnostics.IsolatedTailRecovery = decoded.isolatedTailRecovered
 	if recovered {
 		diagnostics.TailRecoveryOffsetSeconds = recoveryOffset
 		diagnostics.InitialTrailingCoverageGapSeconds = initialCoverageGap
@@ -301,6 +311,16 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	diagnostics.LanguageDetectionSeconds = languageDetectionDuration.Seconds()
 	diagnostics.InitialPromptApplied = decodeRequest.InitialPrompt != ""
 	text, repeated := collapseWhisperLongFormExactRepetitions(decoded.Text, settings)
+	if decoded.isolatedTailRecovered && len(repeated) > 0 {
+		// A cleanup that changes the isolated append would leave coverage
+		// diagnostics referring to speech absent from the published text.
+		tail := decoded.Segments[len(decoded.Segments)-1].Text
+		prefix := strings.TrimSuffix(decoded.Text, "\n"+tail)
+		cleanedPrefix, _ := collapseWhisperLongFormExactRepetitions(prefix, settings)
+		if text != cleanedPrefix+"\n"+tail {
+			return "", nil, fmt.Errorf("whisper.cpp isolated tail changes during repetition cleanup")
+		}
+	}
 	diagnostics.RemovedTerminalHallucinations = append(diagnostics.RemovedTerminalHallucinations, repeated...)
 	repetition := analyzeWhisperRepetition(text, settings)
 	diagnostics.ExtremeRepetitionDetected = repetition.Extreme
@@ -314,9 +334,9 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	return text, diagnostics, nil
 }
 
-// Retry only a bounded terminal interval on the already loaded model. Replace
-// complete terminal segments instead of appending overlapping text. Structural
-// failures never reach this path, and the retry must pass the same coverage gate.
+// Retry a bounded terminal interval on the already loaded model. A contextual
+// retry replaces whole segments. Isolated speech can be appended after the
+// original text only when two decodes agree and the same coverage gate passes.
 func (r *WhisperServerRunner) recoverLongFormTailLocked(ctx context.Context, wavPath string, decoded whisperResponse, lastSpeech float64, request whisperRequestOptions, settings WhisperAdaptiveDescriptor) (whisperResponse, float64, error) {
 	fail := func(err error) (whisperResponse, float64, error) {
 		return whisperResponse{}, 0, fmt.Errorf("whisper.cpp long-form tail recovery: %w", err)
@@ -364,8 +384,23 @@ func (r *WhisperServerRunner) recoverLongFormTailLocked(ctx context.Context, wav
 		return fail(err)
 	}
 	tailDuration := wavPCM16MonoDuration(fileSize(tailPath))
-	if _, err := validateTimestampedLongFormResponse(tail, tailDuration, lastSpeech-offset, settings.TrailingCoverageToleranceSeconds); err != nil {
-		return fail(err)
+	gap, tailErr := validateTimestampedLongFormResponse(tail, tailDuration, lastSpeech-offset, settings.TrailingCoverageToleranceSeconds)
+	if tailErr != nil {
+		if gap <= settings.TrailingCoverageToleranceSeconds {
+			return fail(tailErr)
+		}
+		segment, err := r.recoverIsolatedTailLocked(ctx, tailPath, lastEnd-offset, lastSpeech-offset, request, settings)
+		if err != nil {
+			return fail(fmt.Errorf("%w; isolated speech: %w", tailErr, err))
+		}
+		start := offset + *segment.Start
+		end := offset + *segment.End
+		segment.Start = &start
+		segment.End = &end
+		decoded.Text = strings.TrimSpace(decoded.Text) + "\n" + segment.Text
+		decoded.Segments = append(decoded.Segments, segment)
+		decoded.isolatedTailRecovered = true
+		return decoded, offset, nil
 	}
 	for i := range tail.Segments {
 		segment := &tail.Segments[i]
@@ -961,7 +996,7 @@ func streamWhisperRequest(
 		"entropy_thold":    strconv.FormatFloat(settings.EntropyThreshold, 'f', -1, 64),
 		"suppress_nst":     strconv.FormatBool(settings.SuppressNonSpeechTokens),
 		"no_timestamps":    strconv.FormatBool(!requestOptions.SegmentTimestamps),
-		"token_timestamps": "false",
+		"token_timestamps": strconv.FormatBool(requestOptions.TokenTimestamps),
 	}
 	if requestOptions.DetectLanguage {
 		fields["detect_language"] = "true"
