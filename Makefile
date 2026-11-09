@@ -41,7 +41,7 @@ help:
 	@printf "  make sync PROFILE=study # exhaustive incremental; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
 	@printf "  make account-sync PROFILE=<account-name> # full account history after login; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
 	@printf "  make account-folders PROFILE=<account-name> # read sanitized folder filters\\n"
-	@printf "  make account-organize PROFILE=<account-name> MANIFEST=/private/review.json [APPLY=1] # dry-run; Отработка + archive only\\n"
+	@printf "  make account-organize PROFILE=<account-name> MANIFEST=/private/review.json [APPLY=1] # dry-run; Отработка + archive or restore\\n"
 	@printf "  make interview-topic-update PROFILE=main MANIFEST=/private/review.json [APPLY=1] # own edits and two backed-up ZIP removals in fixed topic\\n"
 	@printf "  make print-shop-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; text/PDF in fixed print-shop group\\n"
 	@printf "  make interview-topic-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; new posts in fixed interview topic\\n"

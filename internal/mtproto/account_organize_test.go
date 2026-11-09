@@ -52,7 +52,7 @@ type organizationFake struct {
 }
 
 func organizationFixture() (AccountOrganizeManifest, *organizationFake) {
-	m := AccountOrganizeManifest{Profile: "work", AccountID: 99, FolderName: CompletedWorkFolder,
+	m := AccountOrganizeManifest{Action: "close", Profile: "work", AccountID: 99, FolderName: CompletedWorkFolder,
 		Peers: []AccountOrganizePeer{{UserID: 11, LastMessageID: 10}, {UserID: 22, LastMessageID: 20}}}
 	f := &organizationFake{selfID: 99, dialogs: map[int64]*tg.Dialog{}, dialogReads: map[int64]int{}}
 	for _, p := range m.Peers {
@@ -153,13 +153,13 @@ func TestAccountOrganizeReadbackRejectsLostPreservedFields(t *testing.T) {
 		})
 	}
 }
-func (f *organizationFake) organizationArchive(_ context.Context, peer *tg.InputPeerUser) error {
+func (f *organizationFake) organizationMove(_ context.Context, peer *tg.InputPeerUser, folderID int) error {
 	f.archiveWrites = append(f.archiveWrites, peer.UserID)
 	if peer.UserID == f.failArchive {
 		return errors.New("archive transport failure")
 	}
 	if !f.ignoreArchive {
-		f.dialogs[peer.UserID].FolderID = 1
+		f.dialogs[peer.UserID].FolderID = folderID
 	}
 	if f.loseMembership {
 		f.filters = nil
@@ -168,10 +168,12 @@ func (f *organizationFake) organizationArchive(_ context.Context, peer *tg.Input
 }
 
 func TestAccountOrganizeManifestPolicy(t *testing.T) {
-	for _, change := range []string{"profile", "account", "folder", "empty", "duplicate", "self", "negative", "missing-head"} {
+	for _, change := range []string{"action", "profile", "account", "folder", "empty", "duplicate", "self", "negative", "missing-head"} {
 		t.Run(change, func(t *testing.T) {
 			m, _ := organizationFixture()
 			switch change {
+			case "action":
+				m.Action = "invalid"
 			case "profile":
 				m.Profile = "other"
 			case "account":
@@ -206,7 +208,7 @@ func TestAccountOrganizeFolderMergePreservesEveryExistingField(t *testing.T) {
 	existing.SetColor(3)
 	before := *existing
 	before.IncludePeers = append([]tg.InputPeerClass(nil), existing.IncludePeers...)
-	merged, changed, err := mergeCompletedWorkFolder([]tg.DialogFilterClass{existing}, m.Peers, users)
+	merged, changed, err := mergeCompletedWorkFolder([]tg.DialogFilterClass{existing}, m.Peers, users, m.Action)
 	if err != nil || !changed || len(merged.IncludePeers) != 2 || !containsUser(merged.IncludePeers, 22) || containsUser(merged.IncludePeers, 11) {
 		t.Fatal("merge lost existing includes or duplicated a pinned user", merged, changed, err)
 	}
@@ -227,7 +229,7 @@ func TestAccountOrganizeRejectsAmbiguousSharedAndExcludedFolder(t *testing.T) {
 		{&tg.DialogFilter{ID: 2, Title: tg.TextWithEntities{Text: CompletedWorkFolder}}, &tg.DialogFilter{ID: 3, Title: tg.TextWithEntities{Text: CompletedWorkFolder}}},
 		{&tg.DialogFilter{ID: 2, Title: tg.TextWithEntities{Text: CompletedWorkFolder}, ExcludePeers: []tg.InputPeerClass{users[11]}}},
 	} {
-		if _, _, err := mergeCompletedWorkFolder(filters, m.Peers, users); err == nil {
+		if _, _, err := mergeCompletedWorkFolder(filters, m.Peers, users, m.Action); err == nil {
 			t.Fatal("unsafe folder accepted", filters)
 		}
 	}
@@ -328,5 +330,88 @@ func TestAccountOrganizeRequiresBothServerReadbacks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAccountOrganizeRestorePreservesOtherMetadataAndResumes(t *testing.T) {
+	m, f := organizationFixture()
+	m.Action = "restore"
+	f.filters = []tg.DialogFilterClass{&tg.DialogFilter{ID: 2, Title: tg.TextWithEntities{Text: CompletedWorkFolder}, Groups: true, ExcludeMuted: true, IncludePeers: []tg.InputPeerClass{&tg.InputPeerUser{UserID: 11, AccessHash: 1100}, &tg.InputPeerChat{ChatID: 4}, &tg.InputPeerUser{UserID: 22, AccessHash: 2200}}, ExcludePeers: []tg.InputPeerClass{&tg.InputPeerUser{UserID: 88, AccessHash: 9}}}}
+	for _, d := range f.dialogs {
+		d.FolderID = 1
+	}
+	before := *f.dialogs[11]
+	result, err := organizeAccount(context.Background(), f, m, false)
+	if err != nil || !result.Ready || f.filterWrites != 0 || len(f.archiveWrites) != 0 {
+		t.Fatal("restore dry run", result, err)
+	}
+	f.failArchive = 22
+	result, err = organizeAccount(context.Background(), f, m, true)
+	if err == nil || result.Complete || !result.Peers[0].Verified || result.Peers[1].Verified {
+		t.Fatal("restore partial result", result, err)
+	}
+	folder := f.filters[0].(*tg.DialogFilter)
+	if len(folder.IncludePeers) != 1 || !folder.Groups || !folder.ExcludeMuted || !containsUser(folder.ExcludePeers, 88) {
+		t.Fatal("restore changed unrelated filter", folder)
+	}
+	after := *f.dialogs[11]
+	after.FolderID = before.FolderID
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("restore changed read state", before, after)
+	}
+	f.failArchive = 0
+	result, err = organizeAccount(context.Background(), f, m, true)
+	if err != nil || !result.Complete || f.filterWrites != 1 || !reflect.DeepEqual(f.archiveWrites, []int64{11, 22, 22}) {
+		t.Fatal("restore retry", result, err, f.archiveWrites)
+	}
+	for _, row := range result.Peers {
+		if !row.Verified || row.Archived || row.InFolder {
+			t.Fatal("restore readback", row)
+		}
+	}
+}
+
+func TestAccountOrganizeRestoreRejectsAmbiguousAndStaleState(t *testing.T) {
+	for _, scenario := range []string{"missing", "contacts", "noncontacts", "bots", "folder-pin", "dialog-pin", "stale", "bad-folder"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, f := organizationFixture()
+			m.Action = "restore"
+			folder := &tg.DialogFilter{ID: 2, Title: tg.TextWithEntities{Text: CompletedWorkFolder}, IncludePeers: []tg.InputPeerClass{&tg.InputPeerUser{UserID: 11, AccessHash: 1100}}}
+			f.filters = []tg.DialogFilterClass{folder}
+			for _, d := range f.dialogs {
+				d.FolderID = 1
+			}
+			switch scenario {
+			case "missing":
+				f.filters = nil
+			case "contacts":
+				folder.Contacts = true
+			case "noncontacts":
+				folder.NonContacts = true
+			case "bots":
+				folder.Bots = true
+			case "folder-pin":
+				folder.PinnedPeers = []tg.InputPeerClass{&tg.InputPeerUser{UserID: 11, AccessHash: 1100}}
+			case "dialog-pin":
+				f.dialogs[11].Pinned = true
+			case "stale":
+				f.staleUser, f.staleRead = 11, 1
+			case "bad-folder":
+				f.dialogs[11].FolderID = 3
+			}
+			result, err := organizeAccount(context.Background(), f, m, true)
+			if err == nil || result.Complete || f.filterWrites != 0 || len(f.archiveWrites) != 0 {
+				t.Fatal("unsafe restore", result, err)
+			}
+		})
+	}
+}
+
+func TestAccountOrganizeOmittedActionRemainsClose(t *testing.T) {
+	m, f := organizationFixture()
+	m.Action = ""
+	result, err := organizeAccount(context.Background(), f, m, true)
+	if err != nil || !result.Complete || !result.Peers[0].Archived || !result.Peers[0].InFolder {
+		t.Fatal("legacy close manifest", result, err)
 	}
 }

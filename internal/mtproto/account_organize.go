@@ -20,6 +20,7 @@ type AccountOrganizePeer struct {
 }
 
 type AccountOrganizeManifest struct {
+	Action     string                `json:"action"`
 	Profile    string                `json:"profile"`
 	AccountID  int64                 `json:"account_id"`
 	FolderName string                `json:"folder_name"`
@@ -36,6 +37,7 @@ type AccountOrganizePeerResult struct {
 }
 
 type AccountOrganizeResult struct {
+	Action     string                      `json:"action"`
 	Profile    string                      `json:"profile"`
 	AccountID  int64                       `json:"account_id"`
 	FolderName string                      `json:"folder_name"`
@@ -122,6 +124,9 @@ func ValidateAccountOrganizeManifest(m AccountOrganizeManifest, profile string, 
 	if profile == "" || m.Profile != profile || boundID <= 0 || m.AccountID != boundID {
 		return fmt.Errorf("manifest profile/account_id must match the selected bound account")
 	}
+	if m.Action != "" && m.Action != "close" && m.Action != "restore" {
+		return fmt.Errorf("action must be close or restore")
+	}
 	if m.FolderName != CompletedWorkFolder {
 		return fmt.Errorf("account-organize supports only folder %q", CompletedWorkFolder)
 	}
@@ -144,7 +149,7 @@ type accountOrganizationSource interface {
 	organizationUsers(context.Context, []AccountOrganizePeer) (map[int64]*tg.InputPeerUser, error)
 	organizationDialog(context.Context, *tg.InputPeerUser) (*tg.Dialog, error)
 	organizationUpdateFilter(context.Context, *tg.DialogFilter) error
-	organizationArchive(context.Context, *tg.InputPeerUser) error
+	organizationMove(context.Context, *tg.InputPeerUser, int) error
 }
 
 func (s *Session) AccountFolders(ctx context.Context, expectedAccountID int64) (AccountFoldersResult, error) {
@@ -164,7 +169,10 @@ func (s *Session) OrganizeAccount(ctx context.Context, m AccountOrganizeManifest
 }
 
 func organizeAccount(ctx context.Context, source accountOrganizationSource, m AccountOrganizeManifest, apply bool) (AccountOrganizeResult, error) {
-	result := AccountOrganizeResult{Profile: m.Profile, AccountID: m.AccountID, FolderName: m.FolderName, DryRun: !apply}
+	if m.Action == "" {
+		m.Action = "close"
+	}
+	result := AccountOrganizeResult{Action: m.Action, Profile: m.Profile, AccountID: m.AccountID, FolderName: m.FolderName, DryRun: !apply}
 	if err := ValidateAccountOrganizeManifest(m, m.Profile, m.AccountID); err != nil {
 		return result, err
 	}
@@ -186,7 +194,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	if err != nil {
 		return result, err
 	}
-	folder, _, err := mergeCompletedWorkFolder(filters, m.Peers, users)
+	folder, _, err := mergeCompletedWorkFolder(filters, m.Peers, users, m.Action)
 	if err != nil {
 		return result, err
 	}
@@ -195,7 +203,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	for i, p := range m.Peers {
 		dialog, err := source.organizationDialog(ctx, users[p.UserID])
 		if err == nil {
-			err = organizationHeadCheck(dialog, p)
+			err = organizationHeadCheck(dialog, p, m.Action)
 		}
 		if err != nil {
 			result.Peers[i].Error = err.Error()
@@ -213,7 +221,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	if err != nil {
 		return result, err
 	}
-	folder, changed, err := mergeCompletedWorkFolder(filters, m.Peers, users)
+	folder, changed, err := mergeCompletedWorkFolder(filters, m.Peers, users, m.Action)
 	if err != nil {
 		return result, err
 	}
@@ -233,8 +241,8 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	}
 	for i, p := range m.Peers {
 		result.Peers[i].InFolder = completedWorkMembership(filters, folder.ID, p.UserID)
-		if !result.Peers[i].InFolder {
-			result.Peers[i].Error = "folder membership not confirmed by server"
+		if result.Peers[i].InFolder != (m.Action == "close") {
+			result.Peers[i].Error = "folder membership differs from requested action"
 			return result, errors.New(result.Peers[i].Error)
 		}
 	}
@@ -243,29 +251,33 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 		// A reply may arrive while another peer is being organized.
 		dialog, err := source.organizationDialog(ctx, users[p.UserID])
 		if err == nil {
-			err = organizationHeadCheck(dialog, p)
+			err = organizationHeadCheck(dialog, p, m.Action)
 		}
 		if err != nil {
 			row.Error = err.Error()
 			return result, err
 		}
-		if dialog.FolderID != 1 {
-			if err := source.organizationArchive(ctx, users[p.UserID]); err != nil {
-				row.Error = "archive not confirmed; inspect before retry: " + err.Error()
+		targetFolder := 1
+		if m.Action == "restore" {
+			targetFolder = 0
+		}
+		if dialog.FolderID != targetFolder {
+			if err := source.organizationMove(ctx, users[p.UserID], targetFolder); err != nil {
+				row.Error = "folder move not confirmed; inspect before retry: " + err.Error()
 				return result, errors.New(row.Error)
 			}
 		}
 		dialog, err = source.organizationDialog(ctx, users[p.UserID])
 		if err == nil {
-			err = organizationHeadCheck(dialog, p)
+			err = organizationHeadCheck(dialog, p, m.Action)
 		}
 		if err != nil {
 			row.Error = err.Error()
 			return result, err
 		}
 		row.Archived = dialog.FolderID == 1
-		if !row.Archived {
-			row.Error = "archive not confirmed by server"
+		if row.Archived != (m.Action == "close") {
+			row.Error = "folder move not confirmed by server"
 			return result, errors.New(row.Error)
 		}
 		filters, err = source.organizationFilters(ctx)
@@ -278,8 +290,8 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 			row.Error = err.Error()
 			return result, err
 		}
-		if !row.InFolder {
-			row.Error = "folder membership absent after archive"
+		if row.InFolder != (m.Action == "close") {
+			row.Error = "folder membership differs after move"
 			return result, errors.New(row.Error)
 		}
 		row.Verified = true
@@ -288,7 +300,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	return result, nil
 }
 
-func organizationHeadCheck(d *tg.Dialog, p AccountOrganizePeer) error {
+func organizationHeadCheck(d *tg.Dialog, p AccountOrganizePeer, action string) error {
 	if d == nil {
 		return fmt.Errorf("user:%d dialog missing", p.UserID)
 	}
@@ -296,8 +308,15 @@ func organizationHeadCheck(d *tg.Dialog, p AccountOrganizePeer) error {
 	if !ok || peer.UserID != p.UserID || d.TopMessage != p.LastMessageID {
 		return fmt.Errorf("user:%d last message changed or peer identity differs; review again", p.UserID)
 	}
-	if d.Pinned && d.FolderID != 1 {
-		return fmt.Errorf("user:%d is pinned; automatic archive cannot preserve pin metadata", p.UserID)
+	if d.FolderID != 0 && d.FolderID != 1 {
+		return fmt.Errorf("user:%d has an unsupported archive folder", p.UserID)
+	}
+	target := 1
+	if action == "restore" {
+		target = 0
+	}
+	if d.Pinned && d.FolderID != target {
+		return fmt.Errorf("user:%d is pinned; moving cannot preserve pin metadata", p.UserID)
 	}
 	return nil
 }
@@ -355,7 +374,7 @@ func verifyCompletedWorkFilter(filters []tg.DialogFilterClass, expected *tg.Dial
 	return fmt.Errorf("expected ordinary folder absent from server readback")
 }
 
-func mergeCompletedWorkFolder(filters []tg.DialogFilterClass, peers []AccountOrganizePeer, users map[int64]*tg.InputPeerUser) (*tg.DialogFilter, bool, error) {
+func mergeCompletedWorkFolder(filters []tg.DialogFilterClass, peers []AccountOrganizePeer, users map[int64]*tg.InputPeerUser, action string) (*tg.DialogFilter, bool, error) {
 	var folder *tg.DialogFilter
 	used := map[int]bool{0: true, 1: true}
 	for _, filter := range filters {
@@ -374,6 +393,9 @@ func mergeCompletedWorkFolder(filters []tg.DialogFilterClass, peers []AccountOrg
 	}
 	changed := folder == nil
 	if folder == nil {
+		if action == "restore" {
+			return nil, false, fmt.Errorf("folder %q absent; inspect before restore", CompletedWorkFolder)
+		}
 		id := 2
 		for used[id] && id <= 255 {
 			id++
@@ -387,6 +409,21 @@ func mergeCompletedWorkFolder(filters []tg.DialogFilterClass, peers []AccountOrg
 		user := users[p.UserID]
 		if user == nil || user.UserID != p.UserID {
 			return nil, false, fmt.Errorf("exact user:%d is not resolved in this account", p.UserID)
+		}
+		if action == "restore" {
+			if folder.Contacts || folder.NonContacts || folder.Bots || containsUser(folder.PinnedPeers, p.UserID) {
+				return nil, false, fmt.Errorf("user:%d folder defaults or pin make removal ambiguous", p.UserID)
+			}
+			kept := make([]tg.InputPeerClass, 0, len(folder.IncludePeers))
+			for _, entry := range folder.IncludePeers {
+				if u, ok := entry.(*tg.InputPeerUser); ok && u.UserID == p.UserID {
+					changed = true
+					continue
+				}
+				kept = append(kept, entry)
+			}
+			folder.IncludePeers = kept
+			continue
 		}
 		if containsUser(folder.ExcludePeers, p.UserID) {
 			return nil, false, fmt.Errorf("user:%d is explicitly excluded from the folder; preserve existing filter", p.UserID)
@@ -461,9 +498,9 @@ func (s *Session) organizationUpdateFilter(ctx context.Context, filter *tg.Dialo
 	})
 }
 
-func (s *Session) organizationArchive(ctx context.Context, user *tg.InputPeerUser) error {
-	return s.performRPC(ctx, "archive_completed_work_peer", func(ctx context.Context) error {
-		_, err := s.raw.FoldersEditPeerFolders(ctx, []tg.InputFolderPeer{{Peer: user, FolderID: 1}})
+func (s *Session) organizationMove(ctx context.Context, user *tg.InputPeerUser, folderID int) error {
+	return s.performRPC(ctx, "move_completed_work_peer", func(ctx context.Context) error {
+		_, err := s.raw.FoldersEditPeerFolders(ctx, []tg.InputFolderPeer{{Peer: user, FolderID: folderID}})
 		return err
 	})
 }

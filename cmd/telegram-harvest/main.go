@@ -338,7 +338,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  account-sync  # registered accounts only; resume/update all available dialogs")
 	fmt.Fprintln(out, "  account-folders  # registered bound account; read existing folder filters as private JSON")
-	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; only Отработка membership + archive")
+	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; Отработка membership + archive or restore")
 	fmt.Fprintln(out, "  interview-topic-replace-video --manifest <private.json> [--apply]  # audio 2362/2365 -> video, same message IDs")
 	fmt.Fprintln(out, "  print-shop-publish --manifest <private.json> [--apply]  # main only; text/PDF in fixed Igor-Arina print-shop group")
 	fmt.Fprintln(out, "  interview-topic-publish --manifest <private.json> [--apply]  # main only; new text/media in fixed interview topic")
