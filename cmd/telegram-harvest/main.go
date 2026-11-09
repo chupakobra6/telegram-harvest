@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -349,7 +350,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Low-level agent primitives:")
 	fmt.Fprintln(out, "  Relative input/output paths below are resolved inside the selected profile state directory")
-	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media] [--transcribe --asr-log asr.jsonl]")
+	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media --media-sender-id ID] [--transcribe --retain-transcription-media --asr-log asr.jsonl]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
@@ -721,7 +722,17 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in output metadata")
 	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while exporting")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
-	transcribeMedia := fs.Bool("transcribe", false, "transcribe voice/audio/video media; cached transcripts skip media download")
+	var mediaSenderID int64
+	fs.Func("media-sender-id", "process attachments only from this sender ID while exporting all messages", func(value string) error {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			return fmt.Errorf("sender ID must be positive")
+		}
+		mediaSenderID = id
+		return nil
+	})
+	transcribeMedia := fs.Bool("transcribe", false, "transcribe voice/audio/video media and reuse cached transcripts")
+	retainTranscriptionMedia := fs.Bool("retain-transcription-media", false, "keep the original transcription media in media-dir")
 	transcribeVideo := fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off")
 	whisperCommand := fs.String("whisper-command", defaults.WhisperCommand, "whisper.cpp Metal server command")
 	whisperModelPath := fs.String("whisper-model", defaults.WhisperModelPath, "whisper.cpp large-v3-turbo q5_0 model file")
@@ -752,22 +763,30 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if *transcribeMedia && cfg.Mode != config.ModeMain {
 		return fmt.Errorf("dump --transcribe is supported only for profile main")
 	}
+	if *retainTranscriptionMedia && (!*downloadMedia || !*transcribeMedia) {
+		return fmt.Errorf("--retain-transcription-media requires --download-media and --transcribe")
+	}
+	if mediaSenderID > 0 && !*downloadMedia {
+		return fmt.Errorf("--media-sender-id requires --download-media")
+	}
 	outputPath := resolveOutputPath(cfg.StateDir, *output)
 	history := harvest.HistoryOptions{
-		Limit:               *limit,
-		BatchSize:           config.DefaultBatchSize,
-		MinID:               *sinceID,
-		Start:               start,
-		End:                 end,
-		All:                 *all,
-		TopicID:             *topicID,
-		TopicTitle:          *topicTitle,
-		TranscribeMedia:     *transcribeMedia,
-		VideoTranscribeMode: *transcribeVideo,
-		WhisperCommand:      *whisperCommand,
-		WhisperModelPath:    *whisperModelPath,
-		WhisperGateFilePath: *whisperGateFilePath,
-		FFmpegCommand:       *ffmpegCommand,
+		Limit:                *limit,
+		BatchSize:            config.DefaultBatchSize,
+		MinID:                *sinceID,
+		Start:                start,
+		End:                  end,
+		All:                  *all,
+		TopicID:              *topicID,
+		TopicTitle:           *topicTitle,
+		TranscribeMedia:      *transcribeMedia,
+		KeepTranscribedMedia: *retainTranscriptionMedia,
+		MediaSenderID:        mediaSenderID,
+		VideoTranscribeMode:  *transcribeVideo,
+		WhisperCommand:       *whisperCommand,
+		WhisperModelPath:     *whisperModelPath,
+		WhisperGateFilePath:  *whisperGateFilePath,
+		FFmpegCommand:        *ffmpegCommand,
 	}
 	if *downloadMedia {
 		history.DownloadMedia = true

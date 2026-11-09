@@ -154,6 +154,7 @@ type HistoryOptions struct {
 	TopicTitle            string
 	DownloadMedia         bool
 	MediaDir              string
+	MediaSenderID         int64
 	MaxPhotoBytes         int64
 	MaxDocumentBytes      int64
 	MaxAudioBytes         int64
@@ -161,6 +162,7 @@ type HistoryOptions struct {
 	MaxGenericVideoBytes  int64
 	ManualDownloadCommand string
 	TranscribeMedia       bool
+	KeepTranscribedMedia  bool
 	VideoTranscribeMode   string
 	TranscriptDir         string
 	WhisperCommand        string

@@ -537,6 +537,32 @@ func TestRunDumpKeepsStudyTranscriptionDisabled(t *testing.T) {
 	}
 }
 
+func TestRunDumpValidatesArchiveOptionsBeforeRuntimeAccess(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions", "main.json")
+	env := map[string]string{
+		"TG_HARVEST_DAILY_STATE_DIR":    filepath.Join(dir, "state"),
+		"TG_HARVEST_DAILY_SESSION_PATH": sessionPath,
+	}
+	for _, test := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"--retain-transcription-media", "--download-media"}, "requires --download-media and --transcribe"},
+		{[]string{"--retain-transcription-media", "--transcribe"}, "requires --download-media and --transcribe"},
+		{[]string{"--media-sender-id", "1"}, "--media-sender-id requires --download-media"},
+		{[]string{"--media-sender-id", "0", "--download-media"}, "sender ID must be positive"},
+	} {
+		code, stdout, stderr := runCommand(t, append([]string{"--profile", "main", "dump", "--chat", "12345", "--out", "x.jsonl"}, test.flags...), env)
+		if code != 1 || !strings.Contains(stdout+stderr, test.want) {
+			t.Fatalf("flags=%v code=%d stdout=%s stderr=%s", test.flags, code, stdout, stderr)
+		}
+	}
+	if _, err := os.Stat(sessionPath + ".runtime.lock"); !os.IsNotExist(err) {
+		t.Fatalf("dump should not acquire runtime lock: %v", err)
+	}
+}
+
 func TestParseDailyDateSupportsRelativeDays(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	date, start, end, err := parseDailyDate("yesterday", now)

@@ -481,6 +481,9 @@ func (p *mediaPipeline) applyResults(records []harvest.MessageRecord) {
 			if !ok {
 				continue
 			}
+			if p.opts.KeepTranscribedMedia && result.Job.Attachment.LocalPath != "" {
+				attachment.LocalPath = result.Job.Attachment.LocalPath
+			}
 			if result.Err != nil {
 				attachment.TranscriptError = transcriptErrorMessage(result.Err)
 				continue
