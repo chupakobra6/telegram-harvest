@@ -91,12 +91,16 @@ func (f *printShopFake) printShopSend(_ context.Context, p PrintShopPost, _ int6
 		if f.normalizeFilename {
 			name = strings.ReplaceAll(name, " ", "_")
 		}
-		msg.Media = &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(id), MimeType: v.MIME, Size: v.Size, Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: name}}}}
+		attrs := []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: name}}
+		if v.MIME == "video/mp4" {
+			attrs = append(attrs, &tg.DocumentAttributeVideo{Duration: v.Duration, W: v.Width, H: v.Height, SupportsStreaming: true, Nosound: !v.HasAudio})
+		}
+		msg.Media = &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(id), MimeType: v.MIME, Size: v.Size, Attributes: attrs}}
 	}
 	f.messages[id] = msg
 	return id, nil
 }
-func (f *printShopFake) printShopDownloadPDF(ctx context.Context, document *tg.Document, output io.Writer) error {
+func (f *printShopFake) printShopDownloadFile(ctx context.Context, document *tg.Document, output io.Writer) error {
 	f.downloadCalls++
 	f.downloadedDocuments = append(f.downloadedDocuments, document)
 	if err := ctx.Err(); err != nil {
@@ -305,6 +309,7 @@ type printShopWire struct {
 	sends, uploads    int
 	participantsCalls int
 	allowUpload       bool
+	video             bool
 	uploaded          []byte
 	afterUpload       func()
 	messageEntities   []tg.MessageEntityClass
@@ -357,6 +362,16 @@ func (f *printShopWire) Invoke(_ context.Context, input bin.Encoder, output bin.
 		f.sends++
 		peer, ok := req.Peer.(*tg.InputPeerChannel)
 		media, mediaOK := req.Media.(*tg.InputMediaUploadedDocument)
+		if f.video {
+			if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.SendAs != nil || req.RandomID != printShopRandomID("video-v1") || !mediaOK || media.MimeType != "video/mp4" || len(media.Attributes) != 2 {
+				f.t.Fatal("video send escaped scope", req)
+			}
+			attr, valid := media.Attributes[1].(*tg.DocumentAttributeVideo)
+			if !valid || attr.W != 64 || attr.H != 64 || attr.Duration != 1 || !attr.SupportsStreaming || attr.Nosound || media.NosoundVideo {
+				f.t.Fatal("video attributes differ", req)
+			}
+			return errors.New("FLOOD_WAIT_1")
+		}
 		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.SendAs != nil || req.RandomID != printShopRandomID("sheet-v1") || !mediaOK || media.MimeType != "application/pdf" || len(media.Attributes) != 1 {
 			f.t.Fatal("media send escaped scope", req)
 		}
@@ -750,5 +765,64 @@ func TestPrintShopPublishPending319FilenameAndContinuation(t *testing.T) {
 				t.Fatal(r, err, journal, f.sentKeys)
 			}
 		})
+	}
+}
+
+func TestPrintShopNativeVideoReadbackAndRepeat(t *testing.T) {
+	v := localReplacementVideo(t)
+	m, f := printShopFixture(t)
+	m.Posts = []PrintShopPost{{Key: "video-v1", Text: "Видео", File: &PrintShopPDF{Path: v.Path, Filename: v.Filename, MIME: v.MIME, SHA256: v.SHA256, Size: v.Size, Duration: v.Duration, Width: v.Width, Height: v.Height, HasAudio: v.HasAudio}}}
+	ctx := context.Background()
+	j := topicPublishJournal{}
+	save := func() error { return nil }
+	preview, err := publishPrintShop(ctx, f, m, j, save, false)
+	if err != nil || !preview.Ready || preview.Complete || f.sends != 0 {
+		t.Fatal(preview, err)
+	}
+	result, err := publishPrintShop(ctx, f, m, j, save, true)
+	if err != nil || !result.Complete || f.sends != 1 || !result.Rows[0].ServerVerified {
+		t.Fatal(result, err)
+	}
+	result, err = publishPrintShop(ctx, f, m, j, save, true)
+	if err != nil || !result.Complete || f.sends != 1 {
+		t.Fatal(result, err)
+	}
+	bytes := f.serverBytes[1]
+	bytes[len(bytes)-1] ^= 1
+	if _, err = publishPrintShop(ctx, f, m, j, save, true); err == nil || f.sends != 1 {
+		t.Fatal("changed server bytes accepted", err)
+	}
+	bytes[len(bytes)-1] ^= 1
+	doc := f.messages[1].Media.(*tg.MessageMediaDocument).Document.(*tg.Document)
+	doc.Attributes[1].(*tg.DocumentAttributeVideo).W++
+	if _, err = publishPrintShop(ctx, f, m, j, save, true); err == nil || f.sends != 1 {
+		t.Fatal("changed video attributes accepted", err)
+	}
+}
+
+func TestPrintShopVideoRejectsBadInputs(t *testing.T) {
+	v := localReplacementVideo(t)
+	m, f := printShopFixture(t)
+	m.Posts = []PrintShopPost{{Key: "video-v1", Text: "Видео", File: &PrintShopPDF{Path: v.Path, Filename: v.Filename, MIME: v.MIME, SHA256: v.SHA256, Size: v.Size, Duration: v.Duration, Width: v.Width, Height: v.Height, HasAudio: v.HasAudio}}}
+	for _, mutate := range []func(*PrintShopPDF){func(f *PrintShopPDF) { f.MIME = "application/pdf" }, func(f *PrintShopPDF) { f.Width = 0 }, func(f *PrintShopPDF) { f.Duration = 2 }, func(f *PrintShopPDF) { f.SHA256 = strings.Repeat("0", 64) }} {
+		original := *m.Posts[0].File
+		mutate(m.Posts[0].File)
+		if _, err := publishPrintShop(context.Background(), f, m, topicPublishJournal{}, func() error { return nil }, true); err == nil || f.sends != 0 {
+			t.Fatal("invalid input accepted", err)
+		}
+		*m.Posts[0].File = original
+	}
+}
+
+func TestPrintShopVideoWireUpload(t *testing.T) {
+	v := localReplacementVideo(t)
+	p := PrintShopPost{Key: "video-v1", Text: "Видео", File: &PrintShopPDF{Path: v.Path, Filename: v.Filename, MIME: v.MIME, SHA256: v.SHA256, Size: v.Size, Duration: v.Duration, Width: v.Width, Height: v.Height, HasAudio: v.HasAudio}}
+	w := &printShopWire{t: t, allowUpload: true, video: true}
+	target := resolvedTarget{Chat: harvest.Chat{ID: PrintShopChannelID, Type: "supergroup", Title: PrintShopTitle}, InputPeer: &tg.InputPeerChannel{ChannelID: PrintShopChannelID, AccessHash: 123}}
+	session := &printShopSession{Session: &Session{raw: tg.NewClient(w), dialogCache: map[string]resolvedTarget{"supergroup:4415343946": target}}}
+	_, err := session.printShopSend(context.Background(), p, printShopRandomID(p.Key))
+	original, readErr := os.ReadFile(v.Path)
+	if err == nil || readErr != nil || w.sends != 1 || w.uploads != 1 || !reflect.DeepEqual(w.uploaded, original) {
+		t.Fatal(err, readErr, w.sends, w.uploads)
 	}
 }

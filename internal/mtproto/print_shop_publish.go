@@ -44,11 +44,15 @@ type PrintShopPost struct {
 	File     *PrintShopPDF          `json:"file,omitempty"`
 }
 type PrintShopPDF struct {
-	Path     string `json:"path"`
-	SHA256   string `json:"sha256"`
-	Filename string `json:"filename"`
-	MIME     string `json:"mime"`
-	Size     int64  `json:"size"`
+	Duration float64 `json:"duration,omitempty"`
+	Width    int     `json:"width,omitempty"`
+	Height   int     `json:"height,omitempty"`
+	HasAudio bool    `json:"has_audio,omitempty"`
+	Path     string  `json:"path"`
+	SHA256   string  `json:"sha256"`
+	Filename string  `json:"filename"`
+	MIME     string  `json:"mime"`
+	Size     int64   `json:"size"`
 }
 type PrintShopPublishRow struct {
 	Post               PrintShopPost          `json:"post"`
@@ -76,7 +80,11 @@ func (p PrintShopPost) publicationPost() InterviewTopicPost {
 	post := InterviewTopicPost{Key: p.Key, Text: p.Text, Entities: p.Entities}
 	if p.File != nil {
 		f := p.File
-		post.File = &InterviewTopicFile{Path: f.Path, SHA256: f.SHA256, Filename: f.Filename, MIME: f.MIME, Size: f.Size, Kind: "document"}
+		kind := "document"
+		if f.MIME == "video/mp4" {
+			kind = "video"
+		}
+		post.File = &InterviewTopicFile{Path: f.Path, SHA256: f.SHA256, Filename: f.Filename, MIME: f.MIME, Size: f.Size, Kind: kind, Duration: f.Duration, Width: f.Width, Height: f.Height, HasAudio: f.HasAudio}
 	}
 	return post
 }
@@ -146,8 +154,15 @@ func ValidatePrintShopPublishManifest(m PrintShopPublishManifest) error {
 			return err
 		}
 		if f := p.File; f != nil {
-			if !filepath.IsAbs(f.Path) || !validSHA256(f.SHA256) || f.Size <= 0 || f.Filename != filepath.Base(f.Path) || f.Filename != filepath.Base(f.Filename) || strings.ToLower(filepath.Ext(f.Filename)) != ".pdf" || f.MIME != "application/pdf" {
-				return fmt.Errorf("print-shop file requires absolute PDF path, exact filename, application/pdf, size and SHA-256")
+			if !filepath.IsAbs(f.Path) || !validSHA256(f.SHA256) || f.Size <= 0 || f.Filename != filepath.Base(f.Path) || f.Filename != filepath.Base(f.Filename) {
+				return fmt.Errorf("print-shop file requires absolute path, exact filename, size and SHA-256")
+			}
+			ext := strings.ToLower(filepath.Ext(f.Filename))
+			switch {
+			case f.MIME == "application/pdf" && ext == ".pdf" && f.Duration == 0 && f.Width == 0 && f.Height == 0 && !f.HasAudio:
+			case f.MIME == "video/mp4" && ext == ".mp4" && f.Duration > 0 && !math.IsInf(f.Duration, 0) && f.Width > 0 && f.Height > 0:
+			default:
+				return fmt.Errorf("print-shop file must be PDF or MP4 with exact video metadata")
 			}
 		}
 	}
@@ -160,7 +175,7 @@ type printShopPublishSource interface {
 	printShopRead(context.Context, int) (*tg.Message, error)
 	printShopExisting(context.Context, PrintShopPost) (bool, error)
 	printShopSend(context.Context, PrintShopPost, int64) (int, error)
-	printShopDownloadPDF(context.Context, *tg.Document, io.Writer) error
+	printShopDownloadFile(context.Context, *tg.Document, io.Writer) error
 }
 
 func checkPrintShopIdentity(ctx context.Context, s printShopPublishSource) ([]int64, error) {
@@ -253,7 +268,7 @@ type boundedPrintShopWriter struct {
 
 func (w *boundedPrintShopWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > w.remaining {
-		return 0, fmt.Errorf("print-shop PDF exceeds reviewed size")
+		return 0, fmt.Errorf("print-shop file exceeds reviewed size")
 	}
 	n, err := w.writer.Write(p)
 	w.remaining -= int64(n)
@@ -273,21 +288,21 @@ func verifyPrintShopReadback(ctx context.Context, s printShopPublishSource, m *t
 		return err
 	}
 	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
-	path := filepath.Join(dir, "verified.pdf")
+	path := filepath.Join(dir, p.File.Filename)
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
 	writer := &boundedPrintShopWriter{writer: file, remaining: p.File.Size}
-	downloadErr := s.printShopDownloadPDF(ctx, document, writer)
+	downloadErr := s.printShopDownloadFile(ctx, document, writer)
 	closeErr := file.Close()
 	if err = errors.Join(downloadErr, closeErr); err != nil {
-		return fmt.Errorf("verify print-shop PDF download: %w", err)
+		return fmt.Errorf("verify print-shop file download: %w", err)
 	}
 	expected := p.publicationPost().File
 	expected.Path = path
 	if err = verifyPublishFile(ctx, expected); err != nil {
-		return fmt.Errorf("server PDF bytes differ from reviewed local file: %w", err)
+		return fmt.Errorf("server file bytes differ from reviewed local file: %w", err)
 	}
 	return nil
 }
@@ -592,13 +607,13 @@ func (s *printShopSession) printShopSend(ctx context.Context, p PrintShopPost, r
 	return unpack.MessageID(updates, nil)
 }
 
-func (s *printShopSession) printShopDownloadPDF(ctx context.Context, document *tg.Document, output io.Writer) error {
+func (s *printShopSession) printShopDownloadFile(ctx context.Context, document *tg.Document, output io.Writer) error {
 	if s.client == nil {
-		return fmt.Errorf("print-shop PDF downloader is unavailable")
+		return fmt.Errorf("print-shop file downloader is unavailable")
 	}
 	// The CLI owns the session/runtime lock and runs no concurrent history. Reuse the
 	// normal media coordinator reservation and client downloader (including DC handling).
-	coordinator := newDownloadCoordinator(nil, func(ctx context.Context) error { return s.beforeRPC(ctx, "download_print_shop_pdf_readback") })
+	coordinator := newDownloadCoordinator(nil, func(ctx context.Context) error { return s.beforeRPC(ctx, "download_print_shop_file_readback") })
 	defer coordinator.finish()
 	var downloadErr error
 	task := &mediaDownloadTask{Slots: 1,
@@ -607,7 +622,7 @@ func (s *printShopSession) printShopDownloadPDF(ctx context.Context, document *t
 			defer cancel()
 			_, downloadErr = s.client.Download(document.AsInputDocumentFileLocation("")).WithThreads(1).
 				WithRetryHandler(func(event downloader.RetryEvent) {
-					s.observeDownloadError("download_print_shop_pdf_retry", event.Err, nil, nil)
+					s.observeDownloadError("download_print_shop_file_retry", event.Err, nil, nil)
 				}).
 				Stream(downloadCtx, output)
 		},
