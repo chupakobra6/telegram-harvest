@@ -182,6 +182,9 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 		return fmt.Errorf("local SHA-256 mismatch")
 	}
 	if f.Kind == "document" {
+		if f.MIME == xlsxMIME {
+			return verifyXLSXPackage(file, info.Size())
+		}
 		if f.MIME == "application/pdf" {
 			b := make([]byte, 5)
 			if _, err = file.ReadAt(b, 0); err != nil || string(b) != "%PDF-" {
@@ -311,17 +314,21 @@ func verifyPublishedContentWithSilentVideoNormalization(m *tg.Message, p Intervi
 		}
 		return nil
 	}
-	media, ok := m.Media.(*tg.MessageMediaDocument)
+	_, err = verifyPublishedDocument(m.Media, p.File, allowClearedNosound)
+	return err
+}
+
+func verifyPublishedDocument(mediaClass tg.MessageMediaClass, f *InterviewTopicFile, allowClearedNosound bool) (*tg.Document, error) {
+	media, ok := mediaClass.(*tg.MessageMediaDocument)
 	if !ok {
-		return fmt.Errorf("document media missing")
+		return nil, fmt.Errorf("document media missing")
 	}
 	d, ok := media.Document.(*tg.Document)
 	if !ok {
-		return fmt.Errorf("document missing")
+		return nil, fmt.Errorf("document missing")
 	}
-	f := p.File
 	if d.MimeType != f.MIME || d.Size != f.Size || documentFileName(d) != f.Filename {
-		return fmt.Errorf("filename/MIME/size mismatch")
+		return nil, fmt.Errorf("filename/MIME/size mismatch")
 	}
 	audio, video := false, false
 	for _, a := range d.Attributes {
@@ -329,19 +336,19 @@ func verifyPublishedContentWithSilentVideoNormalization(m *tg.Message, p Intervi
 		case *tg.DocumentAttributeAudio:
 			audio = true
 			if f.Kind != "audio" || a.Voice || float64(a.Duration) != f.Duration {
-				return fmt.Errorf("audio attributes mismatch")
+				return nil, fmt.Errorf("audio attributes mismatch")
 			}
 		case *tg.DocumentAttributeVideo:
 			video = true
 			if f.Kind != "video" || a.RoundMessage || !a.SupportsStreaming || (a.Nosound == f.HasAudio && !(allowClearedNosound && !f.HasAudio && !a.Nosound)) || math.Abs(a.Duration-f.Duration) > 0.1 || a.W != f.Width || a.H != f.Height {
-				return fmt.Errorf("video attributes mismatch: server round=%t streaming=%t nosound=%t duration=%v width=%d height=%d; expected audio=%t duration=%v width=%d height=%d", a.RoundMessage, a.SupportsStreaming, a.Nosound, a.Duration, a.W, a.H, f.HasAudio, f.Duration, f.Width, f.Height)
+				return nil, fmt.Errorf("video attributes mismatch: server round=%t streaming=%t nosound=%t duration=%v width=%d height=%d; expected audio=%t duration=%v width=%d height=%d", a.RoundMessage, a.SupportsStreaming, a.Nosound, a.Duration, a.W, a.H, f.HasAudio, f.Duration, f.Width, f.Height)
 			}
 		}
 	}
 	if audio != (f.Kind == "audio") || video != (f.Kind == "video") {
-		return fmt.Errorf("playable media kind mismatch")
+		return nil, fmt.Errorf("playable media kind mismatch")
 	}
-	return nil
+	return d, nil
 }
 func checkPublishIdentity(ctx context.Context, s topicPublishSource) error {
 	self, err := s.SelfProfile(ctx)
@@ -695,7 +702,7 @@ func (s *interviewTopicSession) uploadInterviewFile(ctx context.Context, f *Inte
 }
 
 // Upload only a verified private snapshot; keep checking the source descriptor and path.
-func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) (tg.InputMediaClass, error) {
+func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) (*tg.InputMediaUploadedDocument, error) {
 	file, e := os.Open(f.Path)
 	if e != nil {
 		return nil, e

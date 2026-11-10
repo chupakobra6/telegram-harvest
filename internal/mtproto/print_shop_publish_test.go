@@ -547,7 +547,7 @@ func TestPrintShopPublishFailedDownloadRemainsPending(t *testing.T) {
 }
 func TestPrintShopPublishDownloadWriterHardBound(t *testing.T) {
 	var out strings.Builder
-	w := &boundedPrintShopWriter{writer: &out, remaining: 3}
+	w := &boundedPublicationWriter{writer: &out, remaining: 3}
 	if n, err := w.Write([]byte("ab")); err != nil || n != 2 {
 		t.Fatal(n, err)
 	}

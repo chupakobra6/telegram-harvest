@@ -298,7 +298,7 @@ func (s *Session) sendSaved(ctx context.Context, opts SendSavedOptions, fileMeta
 		if uploadErr != nil {
 			return SendSavedResult{}, fmt.Errorf("upload local video preview: %w", uploadErr)
 		}
-		media.(*tg.InputMediaUploadedDocument).Thumb = thumb
+		media.Thumb = thumb
 		if err := verifyPublishFile(ctx, localVideo); err != nil {
 			return SendSavedResult{}, fmt.Errorf("local video changed before sending: %w", err)
 		}

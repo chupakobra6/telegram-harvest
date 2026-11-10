@@ -19,7 +19,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
-	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/message/unpack"
 	"github.com/gotd/td/tg"
 )
@@ -262,20 +261,6 @@ func printShopEntityShapes(entities []tg.MessageEntityClass) string {
 	return "[" + strings.Join(shapes, ", ") + "]"
 }
 
-// Stream uses one worker; never permit server bytes beyond the reviewed file size.
-type boundedPrintShopWriter struct {
-	writer    io.Writer
-	remaining int64
-}
-
-func (w *boundedPrintShopWriter) Write(p []byte) (int, error) {
-	if int64(len(p)) > w.remaining {
-		return 0, fmt.Errorf("print-shop file exceeds reviewed size")
-	}
-	n, err := w.writer.Write(p)
-	w.remaining -= int64(n)
-	return n, err
-}
 func verifyPrintShopReadback(ctx context.Context, s printShopPublishSource, m *tg.Message, p PrintShopPost) (err error) {
 	if err = verifyPrintShopPost(m, p); err != nil {
 		return err
@@ -295,7 +280,7 @@ func verifyPrintShopReadback(ctx context.Context, s printShopPublishSource, m *t
 	if err != nil {
 		return err
 	}
-	writer := &boundedPrintShopWriter{writer: file, remaining: p.File.Size}
+	writer := &boundedPublicationWriter{writer: file, remaining: p.File.Size}
 	downloadErr := s.printShopDownloadFile(ctx, document, writer)
 	closeErr := file.Close()
 	if err = errors.Join(downloadErr, closeErr); err != nil {
@@ -610,26 +595,5 @@ func (s *printShopSession) printShopSend(ctx context.Context, p PrintShopPost, r
 }
 
 func (s *printShopSession) printShopDownloadFile(ctx context.Context, document *tg.Document, output io.Writer) error {
-	if s.client == nil {
-		return fmt.Errorf("print-shop file downloader is unavailable")
-	}
-	// The CLI owns the session/runtime lock and runs no concurrent history. Reuse the
-	// normal media coordinator reservation and client downloader (including DC handling).
-	coordinator := newDownloadCoordinator(nil, func(ctx context.Context) error { return s.beforeRPC(ctx, "download_print_shop_file_readback") })
-	defer coordinator.finish()
-	var downloadErr error
-	task := &mediaDownloadTask{Slots: 1,
-		Transfer: func(ctx context.Context) {
-			downloadCtx, cancel := context.WithTimeout(ctx, defaultDownloadTimeout)
-			defer cancel()
-			_, downloadErr = s.client.Download(document.AsInputDocumentFileLocation("")).WithThreads(1).
-				WithRetryHandler(func(event downloader.RetryEvent) {
-					s.observeDownloadError("download_print_shop_file_retry", event.Err, nil, nil)
-				}).
-				Stream(downloadCtx, output)
-		},
-		Fail: func(err error) { downloadErr = err }, Cancel: func(err error) { downloadErr = err },
-	}
-	runErr := coordinator.runBatch(ctx, []*mediaDownloadTask{task}, nil)
-	return errors.Join(runErr, downloadErr)
+	return s.downloadPublishedDocument(ctx, document, output, "print_shop")
 }
