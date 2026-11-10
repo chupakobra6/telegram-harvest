@@ -21,7 +21,7 @@ const (
 	ProductionThreads                  = 4
 	ProductionModelFile                = "ggml-large-v3-turbo-q5_0.bin"
 	ProductionSpeechGateFile           = "ggml-silero-v6.2.0.bin"
-	whisperShortFormStrategy           = "auto-language-no-timestamps-v2"
+	whisperShortFormStrategy           = "auto-language-no-timestamps-loop-recovery-v3"
 	whisperLongFormStrategy            = "native-timestamped-tail-recovery-v6"
 	whisperAdaptiveRoutingPolicy       = "duration-or-leading-silence-v1"
 	whisperAdaptiveLanguagePolicy      = "auto-short-detect-russian-punctuation-long-v2"

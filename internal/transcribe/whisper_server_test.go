@@ -295,7 +295,7 @@ head -c 960044 /dev/zero > "$last"
 		baseURL: "http://" + listener.Addr().String(),
 		client:  &http.Client{},
 	}
-	text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 239.5)
+	text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 239.5, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ head -c "$bytes" /dev/zero > "$last"
 			}))
 			defer server.Close()
 			runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperSpeechGate: WhisperSpeechGateOptions{Command: vad}, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
-			text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 795.359)
+			text, diagnostics, err := runner.inferLongFormLocked(t.Context(), wavPath, 795.359, false)
 			if scenario == "recovered" {
 				if err != nil || text != "Основная часть.\nВыберем время.\nХорошо.\nДо свидания.\nРад знакомству.\nВзаимно, взаимно." {
 					t.Fatalf("recovered transcript: %q, %v", text, err)
@@ -539,7 +539,7 @@ head -c "$bytes" /dev/zero > "$last"
 	}))
 	defer server.Close()
 	runner := &WhisperServerRunner{opts: Options{FFmpegCommand: ffmpeg, WhisperAdaptive: ProductionWhisperAdaptive()}, baseURL: server.URL, client: server.Client()}
-	text, diag, err := runner.inferLongFormLocked(t.Context(), wavPath, 66)
+	text, diag, err := runner.inferLongFormLocked(t.Context(), wavPath, 66, false)
 	if err != nil {
 		t.Fatal(err)
 	}

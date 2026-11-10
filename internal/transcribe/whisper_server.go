@@ -30,6 +30,7 @@ const whisperTerminalHallucinationProfile = "terminal-exact-v1"
 
 const (
 	adaptiveRouteShortMedia     = "short-media"
+	adaptiveRouteShortLoop      = "short-repetition-recovery"
 	adaptiveRouteDuration       = "duration-threshold"
 	adaptiveRouteLeadingSilence = "leading-silence-threshold"
 	adaptiveRouteNoSpeech       = "no-speech"
@@ -122,6 +123,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	var longFormPreparationDuration time.Duration
 	var leadingSpeechOffset float64
 	var lastDetectedSpeechEnd float64
+	var firstDetectedSpeechStart float64
 	speechDetected := true
 	strategy := whisperShortFormStrategy
 	routeReason := adaptiveRoutePolicyDisabled
@@ -138,6 +140,7 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 		longFormPreparationDuration = prepared.longFormPreparationDuration
 		leadingSpeechOffset = prepared.leadingSpeechOffset
 		lastDetectedSpeechEnd = prepared.lastSpeechEnd
+		firstDetectedSpeechStart = prepared.firstSpeechStart
 		wavPath = prepared.path
 		wavBytes = fileSize(wavPath)
 		gatePassed := speechDetected
@@ -195,9 +198,14 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	var text string
 	var inferenceDiagnostics *Diagnostics
 	if strategy == whisperLongFormStrategy {
-		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath, lastDetectedSpeechEnd)
+		text, inferenceDiagnostics, err = r.inferLongFormLocked(ctx, wavPath, lastDetectedSpeechEnd, false)
 	} else {
-		text, inferenceDiagnostics, err = r.inferLocked(ctx, wavPath)
+		var recovered bool
+		text, inferenceDiagnostics, recovered, err = r.inferShortWithLoopRecoveryLocked(ctx, wavPath, firstDetectedSpeechStart, lastDetectedSpeechEnd)
+		if recovered {
+			strategy, routeReason = whisperLongFormStrategy, adaptiveRouteShortLoop
+			diagnostics.Strategy, diagnostics.RouteReason = strategy, routeReason
+		}
 	}
 	inferenceDuration := time.Since(inferenceStart)
 	observeASRStage(r.opts, inferenceDuration)
@@ -244,13 +252,33 @@ func (r *WhisperServerRunner) RunDetailed(ctx context.Context, inputPath string,
 	}, nil
 }
 
+// A short decode with a confirmed extreme loop may have dropped meaningful
+// speech. Do not publish it: retry once using the existing timestamped path.
+func (r *WhisperServerRunner) inferShortWithLoopRecoveryLocked(ctx context.Context, wavPath string, firstSpeechStart, lastSpeechEnd float64) (string, *Diagnostics, bool, error) {
+	text, diagnostics, err := r.inferLocked(ctx, wavPath)
+	if err != nil || !analyzeWhisperRepetition(text, r.opts.WhisperAdaptive.normalized()).Extreme {
+		return text, diagnostics, false, err
+	}
+	if lastSpeechEnd <= 0 || firstSpeechStart < 0 || firstSpeechStart >= lastSpeechEnd {
+		return "", nil, false, fmt.Errorf("whisper.cpp short-form returned an extreme repetition loop; speech bounds unavailable for recovery")
+	}
+	text, diagnostics, err = r.inferLongFormLocked(ctx, wavPath, lastSpeechEnd, true)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("whisper.cpp short-form repetition recovery failed: %w", err)
+	}
+	if diagnostics.FirstSegmentStartSeconds > firstSpeechStart+r.opts.WhisperAdaptive.normalized().TrailingCoverageToleranceSeconds {
+		return "", nil, false, fmt.Errorf("whisper.cpp short-form recovery missed the start of detected speech")
+	}
+	return text, diagnostics, true, nil
+}
+
 func observeASRStage(opts Options, duration time.Duration) {
 	if duration > 0 && opts.StageTiming != nil {
 		opts.StageTiming(stages.ASR, duration)
 	}
 }
 
-func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath string, lastDetectedSpeechEnd float64) (string, *Diagnostics, error) {
+func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath string, lastDetectedSpeechEnd float64, strictRecovery bool) (string, *Diagnostics, error) {
 	duration := wavPCM16MonoDuration(fileSize(wavPath))
 	if duration <= 0 {
 		return "", nil, fmt.Errorf("adaptive long-form inference received empty audio")
@@ -310,7 +338,33 @@ func (r *WhisperServerRunner) inferLongFormLocked(ctx context.Context, wavPath s
 	diagnostics.DetectedLanguage = strings.ToLower(strings.TrimSpace(detected.Language))
 	diagnostics.LanguageDetectionSeconds = languageDetectionDuration.Seconds()
 	diagnostics.InitialPromptApplied = decodeRequest.InitialPrompt != ""
+	terminal := strings.TrimSpace(decoded.Segments[len(decoded.Segments)-1].Text)
+	if strictRecovery {
+		raw := strings.TrimSpace(decoded.Text)
+		if terminal == "" || !strings.HasSuffix(raw, terminal) {
+			return "", nil, fmt.Errorf("whisper.cpp short-form recovery lacks a verifiable terminal segment")
+		}
+		prefix := strings.TrimSpace(strings.TrimSuffix(raw, terminal))
+		if analyzeWhisperRepetition(raw, settings).Extreme && !analyzeWhisperRepetition(prefix, settings).Extreme {
+			return "", nil, fmt.Errorf("whisper.cpp short-form recovery loop reaches the terminal segment")
+		}
+	}
 	text, repeated := collapseWhisperLongFormExactRepetitions(decoded.Text, settings)
+	if strictRecovery {
+		first := strings.TrimSpace(decoded.Segments[0].Text)
+		filtered, stripped := stripWhisperTerminalHallucinations(text)
+		if first == "" || analyzeWhisperRepetition(first, settings).Extreme || !strings.HasPrefix(strings.TrimSpace(filtered), first) {
+			return "", nil, fmt.Errorf("whisper.cpp short-form recovery lost its first segment during cleanup")
+		}
+		if !strings.HasSuffix(strings.TrimSpace(filtered), terminal) {
+			return "", nil, fmt.Errorf("whisper.cpp short-form recovery lost its terminal segment during cleanup")
+		}
+		for _, removed := range append(repeated, stripped...) {
+			if strings.Contains(removed, terminal) {
+				return "", nil, fmt.Errorf("whisper.cpp short-form recovery removed the terminal segment")
+			}
+		}
+	}
 	if decoded.isolatedTailRecovered && len(repeated) > 0 {
 		// A cleanup that changes the isolated append would leave coverage
 		// diagnostics referring to speech absent from the published text.
@@ -521,6 +575,7 @@ type adaptiveAudioPreparation struct {
 	routeReason                 string
 	leadingSpeechOffset         float64
 	lastSpeechEnd               float64
+	firstSpeechStart            float64
 	speechGateDuration          time.Duration
 	longFormPreparationDuration time.Duration
 	cleanup                     func()
@@ -582,6 +637,8 @@ func prepareAdaptiveWAV(ctx context.Context, opts Options, wavPath, tempDir stri
 	lastSpeech := segments[len(segments)-1].end
 	base.strategy, base.routeReason = selectAdaptiveRoute(settings, duration, firstSpeech, true)
 	if base.strategy == whisperShortFormStrategy {
+		base.firstSpeechStart = firstSpeech
+		base.lastSpeechEnd = lastSpeech
 		return base, nil
 	}
 	started := time.Now()
