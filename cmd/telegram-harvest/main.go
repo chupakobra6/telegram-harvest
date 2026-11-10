@@ -197,6 +197,11 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 			return printError(stderr, 1, err)
 		}
 		return 0
+	case "direct-reply":
+		if err := runDirectReply(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
 	case "print-shop-publish":
 		if err := runPrintShopPublish(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
@@ -232,7 +237,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 func knownCommand(command string) bool {
 	switch command {
 	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
-		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "account-folders", "account-organize", "interview-topic-update", "interview-topic-publish", "print-shop-publish", "interview-topic-replace-video", "compact", "agent-view", "transcribe-file", "send-saved":
+		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "account-folders", "account-organize", "interview-topic-update", "interview-topic-publish", "print-shop-publish", "direct-reply", "interview-topic-replace-video", "compact", "agent-view", "transcribe-file", "send-saved":
 		return true
 	default:
 		return false
@@ -318,9 +323,9 @@ func loadProfileConfig(profile string) (config.Config, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-harvest account add --name <name> --api-profile main|study")
 	fmt.Fprintln(out, "       telegram-harvest account list")
-	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|account-folders|account-organize|interview-topic-update|interview-topic-publish|print-shop-publish|interview-topic-replace-video|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
+	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|account-folders|account-organize|interview-topic-update|interview-topic-publish|print-shop-publish|direct-reply|interview-topic-replace-video|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Harvesting operations are read-only; writes are limited to send-saved, account-organize --apply metadata, interview-topic-update --apply, interview-topic-publish --apply, print-shop-publish --apply, and interview-topic-replace-video --apply")
+	fmt.Fprintln(out, "Harvesting operations are read-only; writes are limited to send-saved, account-organize --apply metadata, interview-topic-update --apply, interview-topic-publish --apply, print-shop-publish --apply, direct-reply --apply, and interview-topic-replace-video --apply")
 	fmt.Fprintln(out, "  --profile main|study|<account-name>  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
@@ -341,6 +346,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  account-folders  # registered bound account; read existing folder filters as private JSON")
 	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; Отработка membership + archive or restore")
 	fmt.Fprintln(out, "  interview-topic-replace-video --manifest <private.json> [--apply]  # audio 2362/2365 -> video, same message IDs")
+	fmt.Fprintln(out, "  direct-reply --manifest /absolute/private.json [--apply]  # main only; authorized text reply to exact user message")
 	fmt.Fprintln(out, "  print-shop-publish --manifest <private.json> [--apply]  # main only; text/PDF/MP4 in fixed Igor-Arina print-shop group")
 	fmt.Fprintln(out, "  interview-topic-publish --manifest <private.json> [--apply]  # main only; new text/media in fixed interview topic")
 	fmt.Fprintln(out, "  interview-topic-update --manifest <private.json> [--apply]  # main only; own edits and backed-up ZIP removal in fixed interview topic")
