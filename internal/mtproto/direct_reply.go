@@ -64,8 +64,12 @@ func ValidateDirectReplyManifest(m DirectReplyManifest) error {
 	if m.File != nil {
 		f := m.File
 		if !filepath.IsAbs(f.Path) || f.Filename != filepath.Base(f.Path) ||
-			!strings.EqualFold(filepath.Ext(f.Filename), ".xlsx") || f.MIME != xlsxMIME || f.Size <= 0 || !validSHA256(f.SHA256) {
-			return fmt.Errorf("file requires an absolute XLSX path, exact basename, size, SHA-256 and XLSX MIME type")
+			f.Size <= 0 || !validSHA256(f.SHA256) {
+			return fmt.Errorf("file requires an absolute path, exact basename, positive size and SHA-256")
+		}
+		ext := strings.ToLower(filepath.Ext(f.Filename))
+		if !(ext == ".xlsx" && f.MIME == xlsxMIME || ext == ".zip" && f.MIME == zipMIME) {
+			return fmt.Errorf("file extension and MIME must match XLSX or ZIP (application/zip)")
 		}
 		if !utf8.ValidString(m.Text) || (m.Text != "" && strings.TrimSpace(m.Text) == "") || len(utf16.Encode([]rune(m.Text))) > 1024 {
 			return fmt.Errorf("provide an empty caption or nonblank UTF-8 caption of at most 1024 UTF-16 units")
@@ -76,7 +80,7 @@ func ValidateDirectReplyManifest(m DirectReplyManifest) error {
 	return nil
 }
 
-// SendDirectReply sends one authorized text or XLSX reply in an exact private dialog.
+// SendDirectReply sends one authorized text, XLSX or ZIP reply in an exact private dialog.
 // The caller holds the account runtime lock across receipt access and Telegram RPCs.
 func (s *Session) SendDirectReply(ctx context.Context, m DirectReplyManifest, journalPath string, apply bool) (DirectReplyResult, error) {
 	r := DirectReplyResult{DryRun: !apply, PeerID: m.PeerID, ReplyTo: m.ReplyTo, Text: m.Text, File: m.File}
@@ -210,13 +214,34 @@ func (s *Session) checkDirectReplyTarget(ctx context.Context, m DirectReplyManif
 	}
 	incoming, ok := parent.(*tg.Message)
 	user, haveUser := entities.User(m.PeerID)
-	if !haveUser || user.Bot || user.Deleted || user.Self ||
-		!ok || incoming.ID != m.ReplyTo || incoming.Out || !directReplyPeerIs(incoming.PeerID, m.PeerID) ||
-		incoming.FromID != nil && !directReplyPeerIs(incoming.FromID, m.PeerID) ||
-		strings.TrimSpace(incoming.Message) == "" || topicTextHash(incoming.Message) != m.ReplyToTextSHA256 {
-		return resolvedTarget{}, fmt.Errorf("incoming message does not match the reviewed private reply target")
+	if !haveUser {
+		return resolvedTarget{}, fmt.Errorf("incoming message does not match the reviewed private reply target: recipient missing from message entities")
 	}
-	r.IncomingText = incoming.Message
+	if user.Bot || user.Deleted || user.Self {
+		return resolvedTarget{}, fmt.Errorf("incoming message does not match the reviewed private reply target: recipient must be an active human user")
+	}
+	if !ok || incoming.ID != m.ReplyTo || incoming.Out || !directReplyPeerIs(incoming.PeerID, m.PeerID) ||
+		incoming.FromID != nil && !directReplyPeerIs(incoming.FromID, m.PeerID) {
+		return resolvedTarget{}, fmt.Errorf("incoming message does not match the reviewed private reply target: message identity differs")
+	}
+	text := incoming.Message
+	if _, rich := incoming.GetRichMessage(); rich {
+		if err := s.prepareRichMessage(ctx, target, incoming); err != nil {
+			return resolvedTarget{}, fmt.Errorf("read full rich text for the reviewed private reply target: %w", err)
+		}
+		full, _ := incoming.GetRichMessage()
+		text, _, err = richMessageBody(incoming.Message, full)
+		if err != nil {
+			return resolvedTarget{}, fmt.Errorf("render rich text for the reviewed private reply target: %w", err)
+		}
+	}
+	r.IncomingText = text
+	if strings.TrimSpace(text) == "" {
+		return resolvedTarget{}, fmt.Errorf("incoming message does not match the reviewed private reply target: text is empty")
+	}
+	if hash := topicTextHash(text); hash != m.ReplyToTextSHA256 {
+		return resolvedTarget{}, fmt.Errorf("incoming text SHA-256 differs from the reviewed private reply target: observed %s", hash)
+	}
 	return target, nil
 }
 

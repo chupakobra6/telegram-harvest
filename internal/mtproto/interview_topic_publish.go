@@ -182,10 +182,12 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 		return fmt.Errorf("local SHA-256 mismatch")
 	}
 	if f.Kind == "document" {
-		if f.MIME == xlsxMIME {
+		switch f.MIME {
+		case xlsxMIME:
 			return verifyXLSXPackage(file, info.Size())
-		}
-		if f.MIME == "application/pdf" {
+		case zipMIME:
+			return verifyZIPPackage(file, info.Size())
+		case "application/pdf":
 			b := make([]byte, 5)
 			if _, err = file.ReadAt(b, 0); err != nil || string(b) != "%PDF-" {
 				return fmt.Errorf("invalid PDF header")

@@ -33,6 +33,8 @@ type directReplyWire struct {
 	onUpload   func() error
 	alterDoc   func(*tg.Message, *tg.Document)
 	serverData []byte
+	fullRich   *tg.RichMessage
+	richReads  int
 }
 
 func (w *directReplyWire) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
@@ -64,6 +66,15 @@ func (w *directReplyWire) Invoke(_ context.Context, input bin.Encoder, output bi
 			Messages: []tg.MessageClass{msg},
 			Users:    []tg.UserClass{w.recipient},
 		}
+	case *tg.MessagesGetRichMessageRequest:
+		peer, ok := req.Peer.(*tg.InputPeerUser)
+		if w.fullRich == nil || !ok || peer.UserID != w.manifest.PeerID || req.ID != w.manifest.ReplyTo {
+			w.t.Fatal("unexpected full rich message lookup")
+		}
+		w.richReads++
+		full := w.incoming
+		full.SetRichMessage(*w.fullRich)
+		response = &tg.MessagesMessages{Messages: []tg.MessageClass{&full}, Users: []tg.UserClass{w.recipient}}
 	case *tg.MessagesSendMessageRequest:
 		w.sends++
 		user, userOK := req.Peer.(*tg.InputPeerUser)
@@ -95,7 +106,7 @@ func (w *directReplyWire) Invoke(_ context.Context, input bin.Encoder, output bi
 	case *tg.UploadSaveFilePartRequest:
 		w.uploads++
 		if req.FilePart != 0 || !bytes.Equal(req.Bytes, w.fileData) {
-			w.t.Fatalf("uploaded bytes differ from the reviewed XLSX")
+			w.t.Fatalf("uploaded bytes differ from the reviewed document")
 		}
 		w.fileID = req.FileID
 		if w.onUpload != nil {
@@ -235,15 +246,14 @@ func TestDirectReplyUnknownOutcomeNeverSendsAgain(t *testing.T) {
 	}
 }
 
-func directReplyXLSXFixture(t *testing.T, caption string, contentTypeEntry string) (*Session, *directReplyWire, string) {
+type directReplyArchiveEntry struct{ name, text string }
+
+func directReplyArchiveFixture(t *testing.T, caption, name, mime string, entries []directReplyArchiveEntry) (*Session, *directReplyWire, string) {
 	t.Helper()
 	s, w, journal := directReplyFixture(t)
 	var data bytes.Buffer
 	archive := zip.NewWriter(&data)
-	for _, entry := range []struct{ name, text string }{
-		{"[Content_Types].xml", `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` + contentTypeEntry + `</Types>`},
-		{"xl/workbook.xml", `<workbook/>`},
-	} {
+	for _, entry := range entries {
 		part, err := archive.Create(entry.name)
 		if err != nil {
 			t.Fatal(err)
@@ -256,27 +266,52 @@ func directReplyXLSXFixture(t *testing.T, caption string, contentTypeEntry strin
 		t.Fatal(err)
 	}
 	w.fileData, w.serverData = data.Bytes(), data.Bytes()
-	const name = "Таблица_2026.xlsx"
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, w.fileData, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	w.manifest.Text = caption
-	w.manifest.File = &DirectReplyFile{Path: path, Filename: name, Size: int64(len(w.fileData)), SHA256: topicTextHash(string(w.fileData)), MIME: xlsxMIME}
+	w.manifest.File = &DirectReplyFile{Path: path, Filename: name, Size: int64(len(w.fileData)), SHA256: topicTextHash(string(w.fileData)), MIME: mime}
 	transport := telegram.MiddlewareFunc(func(tg.Invoker) telegram.InvokeFunc { return w.Invoke })
 	s.client = telegram.NewClient(1, "fixture", telegram.Options{Middlewares: []telegram.Middleware{transport}})
 	return s, w, journal
 }
 
+func directReplyXLSXFixture(t *testing.T, caption, contentTypeEntry string) (*Session, *directReplyWire, string) {
+	t.Helper()
+	return directReplyArchiveFixture(t, caption, "Таблица_2026.xlsx", xlsxMIME, []directReplyArchiveEntry{
+		{"[Content_Types].xml", `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` + contentTypeEntry + `</Types>`},
+		{"xl/workbook.xml", `<workbook/>`},
+	})
+}
+
+func directReplyZIPFixture(t *testing.T, caption string) (*Session, *directReplyWire, string) {
+	t.Helper()
+	return directReplyArchiveFixture(t, caption, "Комплект.zip", zipMIME, []directReplyArchiveEntry{
+		{"source/README.md", "Test package"},
+	})
+}
+
 const xlsxFixtureOverride = `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`
 
-func TestDirectReplyXLSXPreviewsSendsAndRechecksBytes(t *testing.T) {
-	for _, tc := range []struct{ name, caption, contentTypeEntry string }{
-		{"default_no_caption", "", `<Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`},
-		{"override_with_caption", "Готовая таблица\nСпасибо!", xlsxFixtureOverride},
+func TestDirectReplyDocumentPreviewsSendsAndRechecksBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name, caption, contentTypeEntry string
+		zip                             bool
+	}{
+		{"default_no_caption", "", `<Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`, false},
+		{"override_with_caption", "Готовая таблица\nСпасибо!", xlsxFixtureOverride, false},
+		{"zip_with_caption", "Готовый комплект", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, w, journal := directReplyXLSXFixture(t, tc.caption, tc.contentTypeEntry)
+			var s *Session
+			var w *directReplyWire
+			var journal string
+			if tc.zip {
+				s, w, journal = directReplyZIPFixture(t, tc.caption)
+			} else {
+				s, w, journal = directReplyXLSXFixture(t, tc.caption, tc.contentTypeEntry)
+			}
 			r, err := s.SendDirectReply(t.Context(), w.manifest, journal, false)
 			if err != nil || r.Status != "ready" || r.File == nil || *r.File != *w.manifest.File || r.Text != tc.caption || w.uploads+w.sends+w.downloads != 0 {
 				t.Fatalf("unexpected preview: %+v, %v", r, err)
@@ -291,8 +326,18 @@ func TestDirectReplyXLSXPreviewsSendsAndRechecksBytes(t *testing.T) {
 			if err := os.Remove(w.manifest.File.Path); err != nil {
 				t.Fatal(err)
 			}
+			if tc.zip {
+				w.serverData = bytes.Clone(w.fileData)
+				w.serverData[0]++
+				r, err = s.SendDirectReply(t.Context(), w.manifest, journal, true)
+				if err == nil || !strings.Contains(err.Error(), "size or SHA-256") || r.Status != "reconcile_required" || w.uploads != 1 || w.sends != 1 {
+					t.Fatalf("accepted corrupted server ZIP: %+v, %v", r, err)
+				}
+				w.serverData = w.fileData
+			}
+			downloadsBeforeRecheck := w.downloads
 			r, err = s.SendDirectReply(t.Context(), w.manifest, journal, true)
-			if err != nil || r.Status != "already_sent" || !r.ServerVerified || w.uploads != 1 || w.sends != 1 || w.downloads != 2 {
+			if err != nil || r.Status != "already_sent" || !r.ServerVerified || w.uploads != 1 || w.sends != 1 || w.downloads != downloadsBeforeRecheck+1 {
 				t.Fatalf("unexpected recheck: %+v, %v", r, err)
 			}
 		})
@@ -306,8 +351,8 @@ func TestDirectReplyXLSXRejectsUnreviewedFilesAndChangedTargets(t *testing.T) {
 		want    string
 		uploads int
 	}{
-		{"invalid MIME", func(w *directReplyWire) { w.manifest.File.MIME = "application/zip" }, "XLSX MIME", 0},
-		{"relative path", func(w *directReplyWire) { w.manifest.File.Path = w.manifest.File.Filename }, "absolute XLSX path", 0},
+		{"invalid MIME", func(w *directReplyWire) { w.manifest.File.MIME = zipMIME }, "extension and MIME", 0},
+		{"relative path", func(w *directReplyWire) { w.manifest.File.Path = w.manifest.File.Filename }, "absolute path", 0},
 		{"different filename", func(w *directReplyWire) { w.manifest.File.Filename = "Other.xlsx" }, "exact basename", 0},
 		{"caption limit", func(w *directReplyWire) { w.manifest.Text = strings.Repeat("🌟", 513) }, "1024 UTF-16", 0},
 		{"file hash", func(w *directReplyWire) { w.manifest.File.SHA256 = strings.Repeat("a", 64) }, "SHA-256 mismatch", 0},
@@ -342,6 +387,107 @@ func TestDirectReplyXLSXRejectsUnreviewedFilesAndChangedTargets(t *testing.T) {
 				t.Fatalf("pre-send failure changed journal: %v", err)
 			}
 		})
+	}
+}
+
+func TestDirectReplyZIPRejectsMismatchedTypeAndMalformedArchive(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		mutate     func(*testing.T, *DirectReplyFile)
+	}{
+		{"MIME", "extension and MIME", func(_ *testing.T, file *DirectReplyFile) { file.MIME = "application/x-zip-compressed" }},
+		{"extension", "extension and MIME", func(_ *testing.T, file *DirectReplyFile) {
+			file.Filename += ".txt"
+			file.Path += ".txt"
+		}},
+		{"bytes", "invalid ZIP archive", func(t *testing.T, file *DirectReplyFile) {
+			data := []byte("invalid ZIP, with its own size and SHA-256")
+			if err := os.WriteFile(file.Path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file.Size, file.SHA256 = int64(len(data)), topicTextHash(string(data))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, w, journal := directReplyZIPFixture(t, "")
+			tc.mutate(t, w.manifest.File)
+			for _, apply := range []bool{false, true} {
+				r, err := s.SendDirectReply(t.Context(), w.manifest, journal, apply)
+				if err == nil || !strings.Contains(err.Error(), tc.want) || r.Status == "ready" || w.uploads+w.sends+w.downloads != 0 {
+					t.Fatalf("unsafe document validation with apply=%v: %+v, %v", apply, r, err)
+				}
+			}
+			if _, err := os.Stat(journal); !os.IsNotExist(err) {
+				t.Fatalf("pre-send failure changed journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestDirectReplyRichTextWithoutPlainBodySendsZIP(t *testing.T) {
+	s, w, journal := directReplyZIPFixture(t, "Комплект")
+	w.incoming.Message = ""
+	w.incoming.SetRichMessage(tg.RichMessage{Part: true, Blocks: []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Предпросмотр"}},
+	}})
+	const reviewed = "Полный запрос без обычного текста"
+	w.fullRich = &tg.RichMessage{Blocks: []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: reviewed}},
+	}}
+	w.manifest.ReplyToTextSHA256 = topicTextHash(reviewed)
+	r, err := s.SendDirectReply(t.Context(), w.manifest, journal, true)
+	if err != nil || r.Status != "sent" || !r.ServerVerified || r.IncomingText != reviewed ||
+		w.richReads != 2 || w.uploads != 1 || w.sends != 1 || w.downloads != 1 {
+		t.Fatalf("unexpected ZIP reply to full rich input: %+v, %v", r, err)
+	}
+}
+
+func TestDirectReplyRichTextUsesFullHistoryTextAndRechecksAfterUpload(t *testing.T) {
+	s, w, journal := directReplyZIPFixture(t, "Комплект")
+	w.incoming.Message = "  Вступление  "
+	w.incoming.SetRichMessage(tg.RichMessage{Part: true, Blocks: []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Предпросмотр"}},
+	}})
+	w.fullRich = &tg.RichMessage{Blocks: []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Полный запрос"}},
+	}}
+	const reviewed = "Вступление\n\nПолный запрос"
+	w.manifest.ReplyToTextSHA256 = topicTextHash(reviewed)
+	r, err := s.SendDirectReply(t.Context(), w.manifest, journal, false)
+	if err != nil || r.Status != "ready" || r.IncomingText != reviewed || w.richReads != 1 || w.uploads+w.sends != 0 {
+		t.Fatalf("unexpected rich preview: %+v, %v", r, err)
+	}
+	w.fullRich.Part = true
+	r, err = s.SendDirectReply(t.Context(), w.manifest, journal, true)
+	if err == nil || !strings.Contains(err.Error(), "remains partial") || r.Status == "ready" || w.uploads+w.sends != 0 {
+		t.Fatalf("accepted incomplete rich content: %+v, %v", r, err)
+	}
+	w.fullRich.Part = false
+	w.onUpload = func() error {
+		w.fullRich.Blocks[0] = &tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Изменённый запрос"}}
+		return nil
+	}
+	r, err = s.SendDirectReply(t.Context(), w.manifest, journal, true)
+	if err == nil || !strings.Contains(err.Error(), "SHA-256") || r.ServerVerified || w.richReads != 4 || w.uploads != 1 || w.sends != 0 {
+		t.Fatalf("accepted changed rich content after upload: %+v, %v", r, err)
+	}
+	if _, err := os.Stat(journal); !os.IsNotExist(err) {
+		t.Fatalf("pre-send failure changed journal: %v", err)
+	}
+}
+
+func TestDirectReplyPlainIncomingHashUsesExactBytes(t *testing.T) {
+	s, w, journal := directReplyFixture(t)
+	w.incoming.Message += "\n"
+	hash := topicTextHash(w.incoming.Message)
+	r, err := s.SendDirectReply(t.Context(), w.manifest, journal, false)
+	if err == nil || !strings.Contains(err.Error(), hash) || r.IncomingText != w.incoming.Message || r.Status == "ready" || w.sends != 0 {
+		t.Fatalf("plain input was normalized or its diagnostic was lost: %+v, %v", r, err)
+	}
+	w.manifest.ReplyToTextSHA256 = hash
+	r, err = s.SendDirectReply(t.Context(), w.manifest, journal, false)
+	if err != nil || r.Status != "ready" || w.sends != 0 {
+		t.Fatalf("exact plain hash was rejected: %+v, %v", r, err)
 	}
 }
 

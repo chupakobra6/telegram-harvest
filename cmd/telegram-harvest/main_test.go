@@ -122,7 +122,7 @@ func TestRunHelpPrintsCommands(t *testing.T) {
 		"account-organize --manifest <private.json> [--apply]",
 		"interview-topic-update --manifest <private.json> [--apply]",
 		"print-shop-publish --manifest <private.json> [--apply]",
-		"direct-reply --manifest /absolute/private.json [--apply]  # main only; authorized text or XLSX reply",
+		"direct-reply --manifest /absolute/private.json [--apply]  # main only; authorized text, XLSX or ZIP reply",
 		"@Pheik13 main session -> InputPeerSelf only",
 		"--profile main|study",
 		"required account profile",

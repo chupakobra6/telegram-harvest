@@ -2202,14 +2202,11 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 		attachments := extractAttachments(msg.Media)
 		links := mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media))
 		if rich, present := msg.GetRichMessage(); present {
-			text, richLinks, err := richMessageContent(rich)
+			text, richLinks, err := richMessageBody(msg.Message, rich)
 			if err != nil {
 				return harvest.MessageRecord{}, false
 			}
-			if body != "" && !strings.Contains(text, body) {
-				text = body + "\n\n" + text
-			}
-			body = strings.TrimSpace(text)
+			body = text
 			links = mergeLinks(links, richLinks)
 			media, err := richMessageMedia(rich)
 			if err != nil {

@@ -52,6 +52,17 @@ func (s *Session) prepareRichMessage(ctx context.Context, target resolvedTarget,
 	return nil
 }
 
+func richMessageBody(plain string, rich tg.RichMessage) (string, []string, error) {
+	text, links, err := richMessageContent(rich)
+	if err != nil {
+		return "", nil, err
+	}
+	if plain = strings.TrimSpace(plain); plain != "" && !strings.Contains(text, plain) {
+		text = plain + "\n\n" + text
+	}
+	return strings.TrimSpace(text), links, nil
+}
+
 func richMessageContent(rich tg.RichMessage) (string, []string, error) {
 	if rich.Part {
 		return "", nil, fmt.Errorf("partial rich message needs resolution")

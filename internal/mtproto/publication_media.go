@@ -14,7 +14,17 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-const xlsxMIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+const (
+	xlsxMIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	zipMIME  = "application/zip"
+)
+
+func verifyZIPPackage(file io.ReaderAt, size int64) error {
+	if _, err := zip.NewReader(file, size); err != nil {
+		return fmt.Errorf("invalid ZIP archive: %w", err)
+	}
+	return nil
+}
 
 func verifyXLSXPackage(file io.ReaderAt, size int64) error {
 	archive, err := zip.NewReader(file, size)

@@ -346,7 +346,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  account-folders  # registered bound account; read existing folder filters as private JSON")
 	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; Отработка membership + archive or restore")
 	fmt.Fprintln(out, "  interview-topic-replace-video --manifest <private.json> [--apply]  # audio 2362/2365 -> video, same message IDs")
-	fmt.Fprintln(out, "  direct-reply --manifest /absolute/private.json [--apply]  # main only; authorized text or XLSX reply to exact user message")
+	fmt.Fprintln(out, "  direct-reply --manifest /absolute/private.json [--apply]  # main only; authorized text, XLSX or ZIP reply to exact user message")
 	fmt.Fprintln(out, "  print-shop-publish --manifest <private.json> [--apply]  # main only; text/PDF/MP4 in fixed Igor-Arina print-shop group")
 	fmt.Fprintln(out, "  interview-topic-publish --manifest <private.json> [--apply]  # main only; new text/media in fixed interview topic")
 	fmt.Fprintln(out, "  interview-topic-update --manifest <private.json> [--apply]  # main only; own edits and backed-up ZIP removal in fixed interview topic")
