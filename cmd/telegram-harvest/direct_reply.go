@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +24,7 @@ func runDirectReply(cfg config.Config, client *mtproto.Client, args []string, ou
 	fs.SetOutput(out)
 	path := fs.String("manifest", "", "absolute path to private reviewed reply manifest")
 	apply := fs.Bool("apply", false, "send the explicitly authorized reply")
+	details := fs.Bool("details", false, "include full reviewed content in apply result")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -58,9 +58,7 @@ func runDirectReply(cfg config.Config, client *mtproto.Client, args []string, ou
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
 			result, runErr := session.SendDirectReply(ctx, manifest, journal, *apply)
-			encoder := json.NewEncoder(out)
-			encoder.SetIndent("", "  ")
-			return errors.Join(runErr, encoder.Encode(result))
+			return errors.Join(runErr, writeDeliveryResult(out, result, *apply && !*details))
 		})
 	})
 }

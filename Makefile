@@ -11,8 +11,15 @@ MEDIA_LIMIT_FLAGS = \
 	$(if $(strip $(MAX_DOCUMENT_BYTES)),--max-document-bytes "$(MAX_DOCUMENT_BYTES)",) \
 	$(if $(strip $(MAX_AUDIO_BYTES)),--max-audio-bytes "$(MAX_AUDIO_BYTES)",) \
 	$(if $(strip $(MAX_VIDEO_BYTES)),--max-video-bytes "$(MAX_VIDEO_BYTES)",)
+TRANSCRIPTION_FLAGS = \
+	$(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) \
+	$(if $(strip $(RETAIN_TRANSCRIPTION_MEDIA)),--retain-transcription-media="$(RETAIN_TRANSCRIPTION_MEDIA)",) \
+	$(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) \
+	$(if $(strip $(TRANSCRIPT_DIR)),--transcript-dir "$(TRANSCRIPT_DIR)",)
 
 .DEFAULT_GOAL := help
+
+.PHONY: message-prepare message-show message-send message-draft
 
 .PHONY: help setup build build-source-changed fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish print-shop-publish direct-reply interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
 
@@ -39,12 +46,17 @@ help:
 	@printf "  make topics PROFILE=study # list topics for CHAT=<allowed forum id>\\n"
 	@printf "  make dump PROFILE=study # dump allowed study chat; CHAT=... OUT=...\\n"
 	@printf "  make sync PROFILE=study # exhaustive incremental; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
+	@printf "  make sync PROFILE=main DOWNLOAD_MEDIA=1 TRANSCRIBE=1 [RETAIN_TRANSCRIPTION_MEDIA=1] [TRANSCRIBE_VIDEO=...] [TRANSCRIPT_DIR=...]\\n"
 	@printf "  make account-sync PROFILE=<account-name> # full account history after login; REFRESH_FROM=YYYY-MM-DD rechecks edits\\n"
 	@printf "  make account-folders PROFILE=<account-name> # read sanitized folder filters\\n"
 	@printf "  make account-organize PROFILE=<account-name> MANIFEST=/private/review.json [APPLY=1] # dry-run; Отработка + archive or restore\\n"
 	@printf "  make interview-topic-update PROFILE=main MANIFEST=/private/review.json [APPLY=1] # own edits and two backed-up ZIP removals in fixed topic\\n"
-	@printf "  make direct-reply PROFILE=main MANIFEST=/absolute/private.json [APPLY=1] # dry-run; authorized text, XLSX or ZIP reply\\n"
-	@printf "  make print-shop-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; text/PDF/MP4 in fixed print-shop group\\n"
+	@printf "  make direct-reply PROFILE=main MANIFEST=/absolute/private.json [APPLY=1] [DETAILS=1] # dry-run; authorized text, XLSX or ZIP reply\\n"
+	@printf "  make message-prepare PROFILE=main TO=@username MANIFEST=/absolute/private.json [TEXT_FILE=...] [FILE=...] [TOPIC=ID] [REPLY_TO=ID] [DRAFT=1 | INTENT=KEY] [SHOW=1]\\n"
+	@printf "  make message-show PROFILE=main MANIFEST=/absolute/private.json # exact offline review\\n"
+	@printf "  make message-send PROFILE=main MANIFEST=/absolute/private.json [APPLY=1] # dry-run unless explicitly authorized\\n"
+	@printf "  make message-draft PROFILE=main MANIFEST=/absolute/private.json [APPLY=1] # dry-run; apply saves a native text draft\\n"
+	@printf "  make print-shop-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] [DETAILS=1] # dry-run; text/PDF/MP4 in fixed print-shop group\\n"
 	@printf "  make interview-topic-publish PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; new posts in fixed interview topic\\n"
 	@printf "  make interview-topic-replace-video PROFILE=main MANIFEST=/private/review.json [APPLY=1] # dry-run; replace audio 2362/2365 with video\\n"
 	@printf "  make download-media PROFILE=study # manual uncapped media fetch; CHAT=... MESSAGE_ID=...\\n"
@@ -138,11 +150,11 @@ topics:
 
 dump:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) dump --chat "$(CHAT)" --out "$(or $(OUT),chat.jsonl)" $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(TO)),--to "$(TO)",) $(if $(strip $(ALL)),--all,) $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(if $(strip $(MEDIA_SENDER_ID)),--media-sender-id "$(MEDIA_SENDER_ID)",) $(MEDIA_LIMIT_FLAGS) $(if $(strip $(TRANSCRIBE)),--transcribe="$(TRANSCRIBE)",) $(if $(strip $(RETAIN_TRANSCRIPTION_MEDIA)),--retain-transcription-media="$(RETAIN_TRANSCRIPTION_MEDIA)",) $(if $(strip $(TRANSCRIBE_VIDEO)),--transcribe-video="$(TRANSCRIBE_VIDEO)",) $(if $(strip $(TRANSCRIPT_DIR)),--transcript-dir "$(TRANSCRIPT_DIR)",) $(if $(strip $(ASR_LOG)),--asr-log "$(ASR_LOG)",)
+	$(CLI) $(PROFILE_ARG) dump --chat "$(CHAT)" --out "$(or $(OUT),chat.jsonl)" $(if $(strip $(FROM)),--from "$(FROM)",) $(if $(strip $(TO)),--to "$(TO)",) $(if $(strip $(ALL)),--all,) $(if $(strip $(LIMIT)),--limit "$(LIMIT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(if $(strip $(MEDIA_SENDER_ID)),--media-sender-id "$(MEDIA_SENDER_ID)",) $(MEDIA_LIMIT_FLAGS) $(TRANSCRIPTION_FLAGS) $(if $(strip $(ASR_LOG)),--asr-log "$(ASR_LOG)",)
 
 sync:
 	$(REQUIRE_PROFILE)
-	$(CLI) $(PROFILE_ARG) sync --chat "$(CHAT)" --name "$(NAME)" $(if $(strip $(ALL)),--all,) $(if $(strip $(RESET)),--reset,) $(if $(strip $(RESET_MERGED)),--reset-merged,) $(if $(strip $(REFRESH_FROM)),--refresh-from "$(REFRESH_FROM)",) $(if $(strip $(MERGED_OUT)),--merged-out "$(MERGED_OUT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS)
+	$(CLI) $(PROFILE_ARG) sync --chat "$(CHAT)" --name "$(NAME)" $(if $(strip $(ALL)),--all,) $(if $(strip $(RESET)),--reset,) $(if $(strip $(RESET_MERGED)),--reset-merged,) $(if $(strip $(REFRESH_FROM)),--refresh-from "$(REFRESH_FROM)",) $(if $(strip $(MERGED_OUT)),--merged-out "$(MERGED_OUT)",) $(if $(strip $(DOWNLOAD_MEDIA)),--download-media="$(DOWNLOAD_MEDIA)",) $(if $(strip $(MEDIA_DIR)),--media-dir "$(MEDIA_DIR)",) $(MEDIA_LIMIT_FLAGS) $(TRANSCRIPTION_FLAGS)
 
 account-sync:
 	$(REQUIRE_PROFILE)
@@ -170,12 +182,26 @@ interview-topic-publish:
 direct-reply:
 	$(REQUIRE_PROFILE)
 	@test -n "$(strip $(MANIFEST))" || { printf "MANIFEST is required\n"; exit 2; }
-	$(CLI) $(PROFILE_ARG) direct-reply --manifest "$(MANIFEST)" $(if $(filter 1,$(APPLY)),--apply,)
+	$(CLI) $(PROFILE_ARG) direct-reply --manifest "$(MANIFEST)" $(if $(filter 1,$(APPLY)),--apply,) $(if $(filter 1,$(DETAILS)),--details,)
+
+# Quote message paths and identifiers as shell literals, including embedded apostrophes.
+message-arg = '$(subst ','"'"',$(1))'
+
+message-prepare message-show message-send message-draft: $(CLI)
+
+message-prepare:
+	@$(CLI) --profile $(call message-arg,$(value PROFILE)) message prepare --to $(call message-arg,$(value TO)) --manifest $(call message-arg,$(value MANIFEST)) $(if $(value TEXT_FILE),--text-file $(call message-arg,$(value TEXT_FILE))) $(if $(value FILE),--file $(call message-arg,$(value FILE))) $(if $(value TOPIC),--topic $(call message-arg,$(value TOPIC))) $(if $(value REPLY_TO),--reply-to $(call message-arg,$(value REPLY_TO))) $(if $(filter 1,$(DRAFT)),--draft) $(if $(value INTENT),--intent $(call message-arg,$(value INTENT))) $(if $(filter 1,$(SHOW)),--show)
+
+message-show:
+	@$(CLI) --profile $(call message-arg,$(value PROFILE)) message show --manifest $(call message-arg,$(value MANIFEST))
+
+message-send message-draft:
+	@$(CLI) --profile $(call message-arg,$(value PROFILE)) message $(@:message-%=%) --manifest $(call message-arg,$(value MANIFEST)) $(if $(filter 1,$(APPLY)),--apply)
 
 print-shop-publish:
 	$(REQUIRE_PROFILE)
 	@test -n "$(strip $(MANIFEST))" || { printf "MANIFEST is required\n"; exit 2; }
-	$(CLI) $(PROFILE_ARG) print-shop-publish --manifest "$(MANIFEST)" $(if $(filter 1,$(APPLY)),--apply,)
+	$(CLI) $(PROFILE_ARG) print-shop-publish --manifest "$(MANIFEST)" $(if $(filter 1,$(APPLY)),--apply,) $(if $(filter 1,$(DETAILS)),--details,)
 
 interview-topic-replace-video:
 	$(REQUIRE_PROFILE)

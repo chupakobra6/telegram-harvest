@@ -15,6 +15,8 @@ import (
 )
 
 const (
+	docxMIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	pptxMIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 	xlsxMIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	zipMIME  = "application/zip"
 )
@@ -27,13 +29,25 @@ func verifyZIPPackage(file io.ReaderAt, size int64) error {
 }
 
 func verifyXLSXPackage(file io.ReaderAt, size int64) error {
+	return verifyOfficePackage(file, size, "XLSX", "xl/workbook.xml", xlsxMIME+".main+xml", "workbook")
+}
+
+func verifyDOCXPackage(file io.ReaderAt, size int64) error {
+	return verifyOfficePackage(file, size, "DOCX", "word/document.xml", docxMIME+".main+xml", "document")
+}
+
+func verifyPPTXPackage(file io.ReaderAt, size int64) error {
+	return verifyOfficePackage(file, size, "PPTX", "ppt/presentation.xml", pptxMIME+".main+xml", "presentation")
+}
+
+func verifyOfficePackage(file io.ReaderAt, size int64, format, partPath, partMIME, partName string) error {
 	archive, err := zip.NewReader(file, size)
 	if err != nil {
-		return fmt.Errorf("invalid XLSX archive: %w", err)
+		return fmt.Errorf("invalid %s archive: %w", format, err)
 	}
 	types, err := archive.Open("[Content_Types].xml")
 	if err != nil {
-		return fmt.Errorf("missing XLSX content types: %w", err)
+		return fmt.Errorf("missing %s content types: %w", format, err)
 	}
 	defer types.Close()
 	var content struct {
@@ -48,28 +62,26 @@ func verifyXLSXPackage(file io.ReaderAt, size int64) error {
 		} `xml:"Override"`
 	}
 	if err = xml.NewDecoder(io.LimitReader(types, 1<<20)).Decode(&content); err != nil {
-		return fmt.Errorf("invalid XLSX content types: %w", err)
+		return fmt.Errorf("invalid %s content types: %w", format, err)
 	}
-	const workbookPath = "xl/workbook.xml"
-	const workbookMIME = xlsxMIME + ".main+xml"
-	workbookOverride := false
+	partOverride := false
 	for _, part := range content.Override {
 		name, absolute := strings.CutPrefix(part.PartName, "/")
 		if absolute {
-			workbookOverride = workbookOverride || name == workbookPath
-			if part.ContentType == workbookMIME && nonemptyZipFile(archive, name) {
+			partOverride = partOverride || name == partPath
+			if part.ContentType == partMIME && nonemptyZipFile(archive, name) {
 				return nil
 			}
 		}
 	}
-	if !workbookOverride {
+	if !partOverride {
 		for _, entry := range content.Default {
-			if strings.EqualFold(entry.Extension, "xml") && entry.ContentType == workbookMIME && nonemptyZipFile(archive, workbookPath) {
+			if strings.EqualFold(entry.Extension, "xml") && entry.ContentType == partMIME && nonemptyZipFile(archive, partPath) {
 				return nil
 			}
 		}
 	}
-	return fmt.Errorf("XLSX workbook part missing")
+	return fmt.Errorf("%s %s part missing", format, partName)
 }
 
 func nonemptyZipFile(archive *zip.Reader, name string) bool {

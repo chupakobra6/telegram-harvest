@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +22,7 @@ func runPrintShopPublish(cfg config.Config, client *mtproto.Client, args []strin
 	fs.SetOutput(out)
 	path := fs.String("manifest", "", "private reviewed manifest for the fixed print-shop group")
 	apply := fs.Bool("apply", false, "publish reviewed posts in fixed print-shop group; no generic recipient")
+	details := fs.Bool("details", false, "include full reviewed content in apply result")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -42,9 +42,7 @@ func runPrintShopPublish(cfg config.Config, client *mtproto.Client, args []strin
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
 			result, runErr := session.PublishPrintShop(ctx, manifest, *path+".receipts.json", *apply)
-			encoder := json.NewEncoder(out)
-			encoder.SetIndent("", "  ")
-			return errors.Join(runErr, encoder.Encode(result))
+			return errors.Join(runErr, writeDeliveryResult(out, result, *apply && !*details))
 		})
 	})
 }

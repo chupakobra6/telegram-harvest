@@ -61,6 +61,15 @@ func organizationFixture() (AccountOrganizeManifest, *organizationFake) {
 	return m, f
 }
 
+func TestAccountOrganizeRejectsStudyIdentityEvenThroughAlias(t *testing.T) {
+	m, fake := organizationFixture()
+	m.AccountID, fake.selfID = 6889183661, 6889183661
+	if _, err := organizeAccount(t.Context(), fake, m, true); err == nil ||
+		fake.filterReads != 0 || fake.filterWrites != 0 || len(fake.archiveWrites) != 0 {
+		t.Fatalf("study account reached organization: %v", err)
+	}
+}
+
 func (f *organizationFake) SelfProfile(context.Context) (harvest.SelfProfile, error) {
 	return harvest.SelfProfile{ID: f.selfID}, nil
 }

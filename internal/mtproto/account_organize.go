@@ -121,6 +121,9 @@ func folderViews(filters []tg.DialogFilterClass) []AccountFolderView {
 }
 
 func ValidateAccountOrganizeManifest(m AccountOrganizeManifest, profile string, boundID int64) error {
+	if profile == "study" || boundID == readOnlyStudyAccountID {
+		return fmt.Errorf("the study account is read-only")
+	}
 	if profile == "" || m.Profile != profile || boundID <= 0 || m.AccountID != boundID {
 		return fmt.Errorf("manifest profile/account_id must match the selected bound account")
 	}
@@ -183,7 +186,7 @@ func organizeAccount(ctx context.Context, source accountOrganizationSource, m Ac
 	if err != nil {
 		return result, err
 	}
-	if self.ID != m.AccountID {
+	if self.ID != m.AccountID || readOnlyStudyIdentity(self.ID, self.Username) {
 		return result, fmt.Errorf("authorized account differs from manifest account_id")
 	}
 	users, err := source.organizationUsers(ctx, m.Peers)

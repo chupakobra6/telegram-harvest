@@ -182,23 +182,35 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 		return fmt.Errorf("local SHA-256 mismatch")
 	}
 	if f.Kind == "document" {
-		switch f.MIME {
-		case xlsxMIME:
-			return verifyXLSXPackage(file, info.Size())
-		case zipMIME:
-			return verifyZIPPackage(file, info.Size())
-		case "application/pdf":
-			b := make([]byte, 5)
-			if _, err = file.ReadAt(b, 0); err != nil || string(b) != "%PDF-" {
-				return fmt.Errorf("invalid PDF header")
-			}
-		}
-		return nil
+		return verifyLocalPublicationDocument(file, info.Size(), f.MIME)
 	}
 	probe, err := probeLocalPublishMedia(ctx, f.Path)
 	if err != nil {
 		return err
 	}
+	return verifyPublicationMediaProbe(f, probe)
+}
+
+func verifyLocalPublicationDocument(file io.ReaderAt, size int64, mime string) error {
+	switch mime {
+	case docxMIME:
+		return verifyDOCXPackage(file, size)
+	case pptxMIME:
+		return verifyPPTXPackage(file, size)
+	case xlsxMIME:
+		return verifyXLSXPackage(file, size)
+	case zipMIME:
+		return verifyZIPPackage(file, size)
+	case "application/pdf":
+		b := make([]byte, 5)
+		if _, err := file.ReadAt(b, 0); err != nil || string(b) != "%PDF-" {
+			return fmt.Errorf("invalid PDF header")
+		}
+	}
+	return nil
+}
+
+func verifyPublicationMediaProbe(f *InterviewTopicFile, probe localPublishMedia) error {
 	duration, hasAudio, w, hgt := probe.Duration, probe.HasAudio, probe.Width, probe.Height
 	expectedDuration := duration
 	if f.Kind == "audio" {
