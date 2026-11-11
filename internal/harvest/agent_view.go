@@ -17,13 +17,15 @@ import (
 )
 
 const (
-	defaultRecentLimit = 300
-	recentTextLimit    = 500
+	defaultRecentLimit     = 300
+	recentTextLimit        = 500
+	agentViewCommandPrefix = "bin/telegram-harvest --profile "
 )
 
 var moscowLocation = time.FixedZone("Europe/Moscow", 3*60*60)
 
 type AgentViewOptions struct {
+	ProfileName    string
 	InputPath      string
 	OutputDir      string
 	Since          time.Time
@@ -336,10 +338,10 @@ func writeAgentViewFiles(opts AgentViewOptions, records []MessageRecord, chats [
 	return files, nil
 }
 
-func renderAgentViewInstructions(opts AgentViewOptions) string {
+func agentViewInstructionsIntro(title string) string {
 	var b strings.Builder
 	b.WriteString("# AGENTS.md\n\n")
-	b.WriteString("## Telegram Study View Rules\n")
+	fmt.Fprintf(&b, "## %s\n", title)
 	b.WriteString("- This directory is generated from the Telegram JSONL dump. Do not edit files here by hand.\n")
 	b.WriteString("- Start with `README.md`; use `all-recent.md` only for a fast latest-message scan.\n")
 	b.WriteString("- For a concrete task, narrow context in this order: chat README, topic README, one date file.\n")
@@ -347,6 +349,81 @@ func renderAgentViewInstructions(opts AgentViewOptions) string {
 	b.WriteString("- Prefer `rg -n \"keyword\" .` inside this directory or inside one chat/topic directory before opening large files.\n")
 	b.WriteString("- Cite Telegram facts as `path/to/YYYY-MM-DD.md #message_id` or `all-recent.md #message_id`.\n")
 	b.WriteString("- When an attachment shows a `local_path`, open that local file if the message may contain an assignment, marks, schedule, or instructions.\n")
+	return b.String()
+}
+
+func renderAgentViewInstructions(opts AgentViewOptions) string {
+	var b strings.Builder
+	b.WriteString(agentViewInstructionsIntro("Telegram Agent View Rules"))
+	b.WriteString("- Reply IDs, thread IDs, views, raw Telegram URLs, and raw JSON keys are omitted from Markdown. Service messages appear when `--include-service` is enabled.\n")
+	b.WriteString("- If evidence is missing or ambiguous, use the collection owner's refresh route when the task permits it. Report any remaining gap.\n")
+	fmt.Fprintf(&b, "\n## Source\n- Raw JSONL source: `%s`\n", opts.InputPath)
+	if opts.ProfileName != "" {
+		b.WriteString("- After the source changes, update this local view from the Telegram Harvest project directory:\n\n```sh\n")
+		fmt.Fprintf(&b, agentViewCommandPrefix+"%s agent-view --in %s --out-dir %s --recent %d",
+			quoteAgentViewArg(opts.ProfileName), quoteAgentViewArg(opts.InputPath), quoteAgentViewArg(opts.OutputDir), opts.RecentLimit)
+		if !opts.Since.IsZero() {
+			fmt.Fprintf(&b, " --since %s", quoteAgentViewArg(opts.Since.UTC().Format(time.RFC3339Nano)))
+		}
+		if opts.IncludeService {
+			b.WriteString(" --include-service")
+		}
+		b.WriteString("\n```\n\n")
+	}
+	b.WriteString("- Use `--rebuild` only when forcing a full rewrite; normal runs use the stored source offset.\n")
+	return b.String()
+}
+
+func quoteAgentViewArg(arg string) string {
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+}
+
+func refreshAgentViewInstructions(opts AgentViewOptions) error {
+	if opts.ProfileName == "" {
+		return nil
+	}
+	path := filepath.Join(opts.OutputDir, "AGENTS.md")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect agent-view instructions: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read agent-view instructions: %w", err)
+	}
+	updated := renderAgentViewInstructions(opts)
+	if string(current) == updated || !isGeneratedAgentViewInstructions(string(current), opts) {
+		return nil
+	}
+	if err := writePrivateAtomic(path, []byte(updated)); err != nil {
+		return fmt.Errorf("refresh agent-view instructions: %w", err)
+	}
+	return nil
+}
+
+func isGeneratedAgentViewInstructions(current string, opts AgentViewOptions) bool {
+	if current == legacyAgentViewInstructions(opts) {
+		return true
+	}
+	_, command, ok := strings.Cut(current, "\n"+agentViewCommandPrefix+"'")
+	if !ok {
+		return false
+	}
+	profile, _, ok := strings.Cut(command, "' agent-view ")
+	if !ok {
+		return false
+	}
+	// A shared view can be opened with another profile. Rewrite only the exact generated text.
+	opts.ProfileName = profile
+	return current == renderAgentViewInstructions(opts)
+}
+
+func legacyAgentViewInstructions(opts AgentViewOptions) string {
+	var b strings.Builder
+	b.WriteString(agentViewInstructionsIntro("Telegram Study View Rules"))
 	b.WriteString("- Service messages, reply ids, thread ids, views, raw Telegram URLs, and raw JSON keys are intentionally omitted from Markdown.\n")
 	b.WriteString("- If the needed fact is absent or ambiguous, ask for a fresh sync/handoff instead of guessing.\n")
 	b.WriteString("\n")

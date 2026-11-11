@@ -2110,6 +2110,7 @@ func runAgentView(cfg config.Config, args []string, out io.Writer) error {
 	inputPath := resolveOutputPath(cfg.StateDir, *input)
 	outputPath := resolveOutputPath(cfg.StateDir, *outputDir)
 	opts := harvest.AgentViewOptions{
+		ProfileName:    cfg.ProfileName(),
 		InputPath:      inputPath,
 		OutputDir:      outputPath,
 		Since:          since,

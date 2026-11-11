@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,6 +426,16 @@ func TestRunCompactAndAgentViewUseStateDirRelativePaths(t *testing.T) {
 	index := readCLIFile(t, filepath.Join(stateDir, "agent-view", "README.md"))
 	if !strings.Contains(index, "Study") || !strings.Contains(index, "Total visible messages: `2`") {
 		t.Fatalf("agent-view index missing summary:\n%s", index)
+	}
+	canonicalStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewPath := filepath.Join(canonicalStateDir, "agent-view")
+	instructions := readCLIFile(t, filepath.Join(viewPath, "AGENTS.md"))
+	command := fmt.Sprintf("bin/telegram-harvest --profile 'study' agent-view --in '%s' --out-dir '%s' --recent 5", filepath.Join(canonicalStateDir, "messages.jsonl"), viewPath)
+	if !strings.Contains(instructions, command) {
+		t.Fatalf("agent-view instructions missing effective command:\n%s", instructions)
 	}
 
 	code, stdout, stderr = runCommand(t, []string{"--profile", "study", "agent-view", "--in", "messages.jsonl", "--out-dir", "agent-view", "--recent", "5"}, env)

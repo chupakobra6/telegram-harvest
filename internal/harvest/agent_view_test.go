@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentViewRebuildPreservesOutputAlias(t *testing.T) {
@@ -188,6 +189,80 @@ func TestUpdateAgentMarkdownViewAppendsOnlyNewTail(t *testing.T) {
 	day = readFile(t, dayPath)
 	if strings.Count(day, "second homework") != 1 {
 		t.Fatalf("noop duplicated appended message:\n%s", day)
+	}
+}
+
+func TestUpdateAgentMarkdownViewRefreshesOnlyGeneratedInstructions(t *testing.T) {
+	dir := t.TempDir()
+	opts := AgentViewOptions{
+		ProfileName:    "main",
+		InputPath:      filepath.Join(dir, "source's messages.jsonl"),
+		OutputDir:      filepath.Join(dir, "existing view"),
+		Since:          time.Date(2026, 5, 1, 0, 0, 0, 123456789, time.UTC),
+		IncludeService: true,
+	}
+	writeFile(t, opts.InputPath, `{"chat":{"id":1},"message_id":1,"date":"2026-05-11T08:00:00Z","kind":"text","text":"kept"}`+"\n")
+	opts, err := resolveAgentViewOptions(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateAgentMarkdownView(opts); err != nil {
+		t.Fatal(err)
+	}
+	agents := filepath.Join(opts.OutputDir, "AGENTS.md")
+	writeFile(t, agents, legacyAgentViewInstructions(opts))
+	untouched := []string{opts.InputPath, filepath.Join(opts.OutputDir, "README.md"), filepath.Join(opts.OutputDir, "all-recent.md"), filepath.Join(opts.OutputDir, agentViewManifestName)}
+	fixedTime := time.Unix(12345678, 0)
+	for _, path := range untouched {
+		if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := UpdateAgentMarkdownView(opts)
+	if err != nil || stats.Mode != "noop" || stats.Records != 1 {
+		t.Fatalf("cached view stats=%+v err=%v", stats, err)
+	}
+	updated := readFile(t, agents)
+	if !strings.Contains(updated, "--profile 'main' agent-view") || !strings.Contains(updated, `source'"'"'s messages.jsonl'`) || !strings.Contains(updated, "--since '2026-05-01T00:00:00.123456789Z' --include-service") || strings.Contains(updated, "ask for a fresh sync") {
+		t.Fatalf("unexpected refreshed instructions:\n%s", updated)
+	}
+	opts.ProfileName = "study"
+	if stats, err := UpdateAgentMarkdownView(opts); err != nil || stats.Mode != "noop" {
+		t.Fatalf("shared view stats=%+v err=%v", stats, err)
+	}
+	if got := readFile(t, agents); !strings.Contains(got, "--profile 'study' agent-view") {
+		t.Fatalf("shared view instructions did not follow the selected profile:\n%s", got)
+	}
+	for _, path := range untouched {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(fixedTime) {
+			t.Errorf("cached refresh rewrote %s", path)
+		}
+	}
+	custom := legacyAgentViewInstructions(opts) + "\nLocal custom note.\n"
+	writeFile(t, agents, custom)
+	if _, err := UpdateAgentMarkdownView(opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, agents); got != custom {
+		t.Fatalf("cached refresh modified custom instructions:\n%s", got)
+	}
+	linked := filepath.Join(dir, "linked-instructions.md")
+	writeFile(t, linked, legacyAgentViewInstructions(opts))
+	if err := os.Remove(agents); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linked, agents); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateAgentMarkdownView(opts); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(agents); err != nil || got != linked {
+		t.Fatalf("cached refresh replaced the custom symlink: target=%q err=%v", got, err)
 	}
 }
 

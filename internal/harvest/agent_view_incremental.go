@@ -98,6 +98,9 @@ func updateAgentMarkdownView(opts AgentViewOptions) (AgentViewStats, error) {
 		return writeAgentMarkdownView(opts)
 	}
 	if sourceInfo.Size() == manifest.SourceSize {
+		if err := refreshAgentViewInstructions(opts); err != nil {
+			return AgentViewStats{}, err
+		}
 		stats := agentViewStatsFromManifest(manifest)
 		stats.Mode = "noop"
 		return stats, nil
