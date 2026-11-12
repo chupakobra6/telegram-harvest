@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,57 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 )
+
+type exactDialogInvoker struct{ calls [][2]int }
+
+func (f *exactDialogInvoker) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+	req, ok := input.(*tg.MessagesGetDialogsRequest)
+	if !ok {
+		return fmt.Errorf("unexpected RPC %T", input)
+	}
+	folder, _ := req.GetFolderID()
+	f.calls = append(f.calls, [2]int{folder, req.OffsetID})
+	if folder == 1 {
+		return fmt.Errorf("RPC_CALL_FAIL")
+	}
+	output.(*tg.MessagesDialogsBox).Dialogs = &tg.MessagesDialogs{
+		Dialogs: []tg.DialogClass{
+			&tg.Dialog{Peer: &tg.PeerChat{ChatID: 123}},
+			&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 123}},
+		},
+		Chats: []tg.ChatClass{
+			&tg.Chat{ID: 123, Title: "basic"},
+			&tg.Channel{ID: 123, AccessHash: 321, Title: "exact", Megagroup: true},
+		},
+	}
+	return nil
+}
+
+func TestTypedDialogResolutionStopsBeforeArchiveFailure(t *testing.T) {
+	fake := &exactDialogInvoker{}
+	s := &Session{raw: tg.NewClient(fake), dialogCache: map[string]resolvedTarget{}}
+	target, err := s.resolveTarget(context.Background(), "supergroup:123")
+	if err != nil || target.Chat.Type != "supergroup" || target.Chat.ID != 123 {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	if fmt.Sprint(fake.calls) != "[[0 0]]" {
+		t.Fatalf("exact lookup visited extra pages or folders: %v", fake.calls)
+	}
+	fake.calls = nil
+	if _, err := s.ListAllDialogs(context.Background()); err == nil || !strings.Contains(err.Error(), "load folder 1 dialogs") {
+		t.Fatalf("full discovery must report archive failure: %v", err)
+	}
+	if fmt.Sprint(fake.calls) != "[[0 0] [1 0]]" {
+		t.Fatalf("full discovery did not visit both folders: %v", fake.calls)
+	}
+	for _, raw := range []string{"supergroup:456", "123"} {
+		fake := &exactDialogInvoker{}
+		s := &Session{raw: tg.NewClient(fake), dialogCache: map[string]resolvedTarget{}}
+		if _, err := s.resolveTarget(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "load folder 1 dialogs") {
+			t.Fatalf("%q must not hide archive failure: %v", raw, err)
+		}
+	}
+}
 
 type historyInvoker struct {
 	pages   map[int][]tg.MessageClass
