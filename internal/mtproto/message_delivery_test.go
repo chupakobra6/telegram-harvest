@@ -19,25 +19,28 @@ import (
 )
 
 type messageWire struct {
-	t           *testing.T
-	account     MessageAccount
-	peer        tg.PeerClass
-	user        *tg.User
-	group       *tg.Channel
-	topic       *tg.ForumTopic
-	parent      *tg.Message
-	draft       tg.DraftMessageClass
-	messages    map[int]*tg.Message
-	files       map[int64][]byte
-	uploads     map[int64][]byte
-	sent        []string
-	sendCount   int
-	draftWrites int
-	failAt      int
-	onUpload    func() error
-	beforeSend  func(int)
-	lastReply   tg.InputReplyToClass
-	sentMedia   []*tg.InputMediaUploadedDocument
+	t               *testing.T
+	account         MessageAccount
+	peer            tg.PeerClass
+	user            *tg.User
+	group           *tg.Channel
+	topic           *tg.ForumTopic
+	parent          *tg.Message
+	draft           tg.DraftMessageClass
+	messages        map[int]*tg.Message
+	files           map[int64][]byte
+	uploads         map[int64][]byte
+	sent            []string
+	sendCount       int
+	draftWrites     int
+	failAt          int
+	onUpload        func() error
+	beforeSend      func(int)
+	lastReply       tg.InputReplyToClass
+	sentMedia       []*tg.InputMediaUploadedDocument
+	registered      map[int64]*tg.InputMediaUploadedDocument
+	groupCalls      int
+	omitLastGroupID bool
 }
 
 func (w *messageWire) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
@@ -90,6 +93,31 @@ func (w *messageWire) Invoke(_ context.Context, input bin.Encoder, output bin.De
 		}
 		w.uploads[req.FileID] = bytes.Clone(req.Bytes)
 		result = &tg.BoolTrue{}
+	case *tg.MessagesUploadMediaRequest:
+		upload := req.Media.(*tg.InputMediaUploadedDocument)
+		id := int64(len(w.registered) + 1)
+		w.registered[id] = upload
+		result = &tg.MessageMediaDocument{Document: &tg.Document{ID: id, AccessHash: id, FileReference: []byte{1}}}
+	case *tg.MessagesSendMultiMediaRequest:
+		if req.ClearDraft || req.AllowPaidStars != 0 || len(req.MultiMedia) < 2 || len(req.MultiMedia) > 10 {
+			w.t.Fatalf("unexpected media group flags: %+v", req)
+		}
+		w.groupCalls++
+		var updates []tg.UpdateClass
+		for i, input := range req.MultiMedia {
+			doc := input.Media.(*tg.InputMediaDocument).ID.(*tg.InputDocument)
+			media := w.registered[doc.ID]
+			w.sentMedia = append(w.sentMedia, media)
+			var response tg.Updates
+			if err := w.send(&response, input.RandomID, req.ReplyTo, input.Message, input.Entities, media); err != nil {
+				return err
+			}
+			w.messages[w.sendCount+100].SetGroupedID(int64(w.groupCalls + 300))
+			if !w.omitLastGroupID || i != len(req.MultiMedia)-1 {
+				updates = append(updates, response.Updates...)
+			}
+		}
+		result = &tg.Updates{Updates: updates}
 	case *tg.MessagesSendMediaRequest:
 		if req.ClearDraft || req.AllowPaidStars != 0 || req.RandomID == 0 {
 			w.t.Fatalf("unexpected media send flags: %+v", req)
@@ -186,7 +214,7 @@ func newMessageWire(t *testing.T) (*Session, *messageWire, MessageAccount) {
 	account := MessageAccount{Profile: "work", ID: 17, Username: "worker"}
 	w := &messageWire{t: t, account: account, peer: &tg.PeerUser{UserID: 42},
 		user:     &tg.User{ID: 42, Username: "colleague", FirstName: "Colleague", AccessHash: 9},
-		messages: map[int]*tg.Message{}, files: map[int64][]byte{}, uploads: map[int64][]byte{}}
+		messages: map[int]*tg.Message{}, files: map[int64][]byte{}, uploads: map[int64][]byte{}, registered: map[int64]*tg.InputMediaUploadedDocument{}}
 	transport := telegram.MiddlewareFunc(func(tg.Invoker) telegram.InvokeFunc { return w.Invoke })
 	s := &Session{raw: tg.NewClient(w), dialogCache: map[string]resolvedTarget{},
 		client: telegram.NewClient(1, "fixture", telegram.Options{Middlewares: []telegram.Middleware{transport}})}
@@ -206,7 +234,7 @@ func TestMessageDeliveryOrderedOriginalFilesAndRestart(t *testing.T) {
 	s, w, account := newMessageWire(t)
 	audio := makeDeliveryFile(t, "audio.m4a", "fixture bytes for original audio document")
 	transcript := makeDeliveryFile(t, "transcript.md", "fixture transcript")
-	input := MessagePrepareInput{To: "@colleague", Text: "Готово", Files: []MessageFileInput{{Path: audio}, {Path: transcript}}}
+	input := MessagePrepareInput{To: "@colleague", Text: "Готово", Files: []MessageFileInput{{Path: audio}, {Path: transcript, Caption: "Расшифровка"}}}
 	m, err := s.PrepareMessage(t.Context(), input, account)
 	if err != nil || m.Destination.ID != 42 || m.ReplyTo != 0 || m.Files[0].MIME != "audio/mp4" ||
 		m.Files[1].SHA256 != topicTextHash("fixture transcript") || !validSHA256(m.Fingerprint) {
@@ -231,7 +259,9 @@ func TestMessageDeliveryOrderedOriginalFilesAndRestart(t *testing.T) {
 	r, err = s.DeliverMessage(t.Context(), m, account, journalDir, true)
 	if err != nil || !r.Complete || !reflect.DeepEqual(w.sent, []string{"Готово", "audio.m4a", "transcript.md"}) ||
 		r.Rows[2].MessageID != 103 || r.Rows[2].ServerFilename != "transcript.md" || !r.Rows[2].ServerVerified ||
-		len(w.sentMedia) != 2 || !w.sentMedia[0].ForceFile || !w.sentMedia[1].ForceFile {
+		len(w.sentMedia) != 2 || !w.sentMedia[0].ForceFile || !w.sentMedia[1].ForceFile ||
+		w.groupCalls != 1 || r.Rows[1].GroupedID == 0 || r.Rows[1].GroupedID != r.Rows[2].GroupedID ||
+		w.messages[103].Message != "Расшифровка" {
 		t.Fatalf("apply: %+v, %v, sent=%v", r, err, w.sent)
 	}
 	if err := os.Remove(audio); err != nil {
@@ -245,6 +275,50 @@ func TestMessageDeliveryOrderedOriginalFilesAndRestart(t *testing.T) {
 	r, err = s.DeliverMessage(t.Context(), m, account, journalDir, true)
 	if err == nil || r.Complete || r.Status != "outcome_unknown" || w.sendCount != 3 {
 		t.Fatalf("different server bytes were accepted: %+v, %v", r, err)
+	}
+}
+
+func TestMessageDeliveryGroupMissingMappingNeverResends(t *testing.T) {
+	s, w, account := newMessageWire(t)
+	w.omitLastGroupID = true
+	path := makeDeliveryFile(t, "same.toml", "enabled = true")
+	m, err := s.PrepareMessage(t.Context(), MessagePrepareInput{
+		To: "@colleague", Files: []MessageFileInput{{Path: path}, {Path: path}},
+	}, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	r, err := s.DeliverMessage(t.Context(), m, account, dir, true)
+	if err == nil || r.Complete || r.Rows[0].MessageID != 101 || r.Rows[1].MessageID != 0 {
+		t.Fatalf("partial acknowledgement: %+v, %v", r, err)
+	}
+	r, err = s.DeliverMessage(t.Context(), m, account, dir, true)
+	if err == nil || r.Complete || r.Status != "outcome_unknown" || w.groupCalls != 1 {
+		t.Fatalf("repeat after missing mapping: %+v, %v, group calls=%d", r, err, w.groupCalls)
+	}
+}
+
+func TestMessageDeliveryGroupCannotBypassExistingReceipts(t *testing.T) {
+	s, w, account := newMessageWire(t)
+	path := makeDeliveryFile(t, "same.txt", "same bytes")
+	m, err := s.PrepareMessage(t.Context(), MessagePrepareInput{
+		To: "@colleague", Files: []MessageFileInput{{Path: path}, {Path: path}},
+	}, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := m
+	old.GroupFiles = false
+	old.Fingerprint, _ = messageFingerprint(old)
+	dir := t.TempDir()
+	r, err := s.DeliverMessage(t.Context(), old, account, dir, true)
+	if err != nil || !r.Complete || w.sendCount != 2 || w.groupCalls != 0 {
+		t.Fatalf("old manifest: %+v, %v", r, err)
+	}
+	r, err = s.DeliverMessage(t.Context(), m, account, dir, true)
+	if err == nil || r.Complete || r.Status != "outcome_unknown" || w.sendCount != 2 || w.groupCalls != 0 {
+		t.Fatalf("reprepared manifest bypassed receipts: %+v, %v", r, err)
 	}
 }
 

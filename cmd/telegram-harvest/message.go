@@ -74,8 +74,8 @@ func runMessageCommand(cfg config.Config, args []string, out, errOut io.Writer, 
 
 func printMessageUsage(out io.Writer) {
 	fmt.Fprintln(out, "  message prepare --to user:ID|basic_group:ID|supergroup:ID|@username --manifest /absolute/private.json")
-	fmt.Fprintln(out, "    [--text-file PATH] [--file PATH]... [--audio PATH]... [--video PATH]... [--topic ID] [--reply-to ID] [--draft | --intent KEY] [--show]")
-	fmt.Fprintln(out, "    Resolve recipient and save a private manifest; text then attachments in flag order. No Telegram write.")
+	fmt.Fprintln(out, "    [--text-file PATH] [--file PATH | --audio PATH | --video PATH] [--caption-file PATH] ... [--topic ID] [--reply-to ID] [--draft | --intent KEY] [--show]")
+	fmt.Fprintln(out, "    Resolve recipient and save a private manifest; text then attachments in flag order, grouped by compatible kind. No Telegram write.")
 	fmt.Fprintln(out, "  message show --manifest /absolute/private.json  # exact offline review, including text and attachments")
 	fmt.Fprintln(out, "  message send --manifest /absolute/private.json [--apply]  # dry-run; apply only after explicit send authorization")
 	fmt.Fprintln(out, "  message draft --manifest /absolute/private.json [--apply]  # dry-run; apply saves a native text draft; never sends")
@@ -125,6 +125,20 @@ func runMessagePrepare(cfg config.Config, args []string, out, errOut io.Writer, 
 			return nil
 		})
 	}
+	fs.Func("caption-file", "UTF-8 caption for the preceding attachment", func(path string) error {
+		if len(input.Files) == 0 || input.Files[len(input.Files)-1].Caption != "" {
+			return fmt.Errorf("--caption-file must follow an attachment that does not yet have a caption")
+		}
+		caption, err := readMessageText(path)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(caption) == "" {
+			return fmt.Errorf("--caption-file must contain nonblank text")
+		}
+		input.Files[len(input.Files)-1].Caption = caption
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil

@@ -23,10 +23,19 @@ var messageFileMIMEs = map[string]string{
 	".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
 }
 
+const genericDocumentMIME = "application/octet-stream"
+
+func messageFileMIME(extension string) string {
+	if value, ok := messageFileMIMEs[extension]; ok {
+		return value
+	}
+	return genericDocumentMIME
+}
+
 func validateMessageFile(f InterviewTopicFile) error {
 	ext := strings.ToLower(filepath.Ext(f.Filename))
 	if !filepath.IsAbs(f.Path) || f.Filename != filepath.Base(f.Path) || strings.ContainsAny(f.Filename, "\x00\r\n") ||
-		f.Size <= 0 || !validSHA256(f.SHA256) || f.MIME == "" || messageFileMIMEs[ext] != f.MIME {
+		f.Size <= 0 || !validSHA256(f.SHA256) || messageFileMIME(ext) != f.MIME {
 		return fmt.Errorf("file requires an absolute path, exact filename, size, SHA-256 and supported MIME")
 	}
 	if math.IsNaN(f.Duration) || math.IsInf(f.Duration, 0) {
@@ -60,10 +69,7 @@ func prepareMessageFile(ctx context.Context, input MessageFileInput) (InterviewT
 	if f.Kind == "" {
 		f.Kind = "document"
 	}
-	f.MIME = messageFileMIMEs[strings.ToLower(filepath.Ext(f.Filename))]
-	if f.MIME == "" {
-		return f, fmt.Errorf("unsupported file extension: %s", filepath.Ext(f.Filename))
-	}
+	f.MIME = messageFileMIME(strings.ToLower(filepath.Ext(f.Filename)))
 	info, err := os.Stat(path)
 	if err != nil {
 		return f, err
@@ -117,6 +123,11 @@ func prepareMessageFile(ctx context.Context, input MessageFileInput) (InterviewT
 func verifyDeliveryDocument(media tg.MessageMediaClass, file InterviewTopicFile) (*tg.Document, error) {
 	if message, ok := media.(*tg.MessageMediaDocument); ok {
 		if doc, ok := message.Document.(*tg.Document); ok {
+			// Telegram can infer a MIME for a generic document. Its filename,
+			// length and SHA-256 are still checked against the reviewed file.
+			if file.MIME == genericDocumentMIME && doc.MimeType != "" {
+				file.MIME = doc.MimeType
+			}
 			name := documentFileName(doc)
 			// Reuse the observed Telegram filename transforms, with a mandatory byte check.
 			if name == strings.ReplaceAll(file.Filename, " ", "_") ||

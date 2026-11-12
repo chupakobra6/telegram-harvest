@@ -35,8 +35,9 @@ type MessagePrepareInput struct {
 }
 
 type MessageFileInput struct {
-	Path string
-	Kind string
+	Path    string
+	Kind    string
+	Caption string
 }
 
 type MessageDestination struct {
@@ -57,6 +58,8 @@ type MessageManifest struct {
 	Text          string                 `json:"text,omitempty"`
 	Entities      []InterviewTopicEntity `json:"entities,omitempty"`
 	Files         []InterviewTopicFile   `json:"files,omitempty"`
+	GroupFiles    bool                   `json:"group_files,omitempty"`
+	FileCaptions  []string               `json:"file_captions,omitempty"`
 	Draft         bool                   `json:"draft,omitempty"`
 	Intent        string                 `json:"intent,omitempty"`
 	Fingerprint   string                 `json:"fingerprint"`
@@ -79,6 +82,7 @@ type MessageDeliveryRow struct {
 	Index          int    `json:"index"`
 	Kind           string `json:"kind"`
 	MessageID      int    `json:"message_id,omitempty"`
+	GroupedID      int64  `json:"grouped_id,string,omitempty"`
 	Status         string `json:"status"`
 	ServerVerified bool   `json:"server_verified"`
 	ServerFilename string `json:"server_filename,omitempty"`
@@ -155,6 +159,17 @@ func ValidateMessageManifest(m MessageManifest, account MessageAccount) error {
 	if err := validateMessageIntent(m.Intent, m.Draft); err != nil {
 		return err
 	}
+	if m.GroupFiles && len(m.Files) < 2 {
+		return fmt.Errorf("grouped delivery requires multiple files")
+	}
+	if len(m.FileCaptions) != 0 && len(m.FileCaptions) != len(m.Files) {
+		return fmt.Errorf("file captions must match the attachment list")
+	}
+	for _, caption := range m.FileCaptions {
+		if err := validateMessageCaption(caption); err != nil {
+			return err
+		}
+	}
 	for _, file := range m.Files {
 		if err := validateMessageFile(file); err != nil {
 			return err
@@ -166,6 +181,13 @@ func ValidateMessageManifest(m MessageManifest, account MessageAccount) error {
 	}
 	if fingerprint != m.Fingerprint {
 		return fmt.Errorf("manifest fingerprint changed; prepare and review the current inputs")
+	}
+	return nil
+}
+
+func validateMessageCaption(text string) error {
+	if !utf8.ValidString(text) || (text != "" && strings.TrimSpace(text) == "") || len(utf16.Encode([]rune(text))) > 1024 {
+		return fmt.Errorf("file caption must be UTF-8, nonblank when supplied, and at most 1024 UTF-16 units")
 	}
 	return nil
 }
@@ -188,7 +210,16 @@ func (s *Session) PrepareMessage(ctx context.Context, input MessagePrepareInput,
 	if input.TopicID < 0 || input.ReplyTo < 0 {
 		return m, fmt.Errorf("topic and reply IDs must be positive when supplied")
 	}
-	for _, inputFile := range input.Files {
+	m.GroupFiles = len(input.Files) > 1
+	captions := make([]string, len(input.Files))
+	for i, inputFile := range input.Files {
+		if err := validateMessageCaption(inputFile.Caption); err != nil {
+			return m, err
+		}
+		captions[i] = inputFile.Caption
+		if inputFile.Caption != "" {
+			m.FileCaptions = captions
+		}
 		file, err := prepareMessageFile(ctx, inputFile)
 		if err != nil {
 			return m, err
@@ -222,6 +253,7 @@ type messageDeliveryItem struct {
 	text     string
 	entities []tg.MessageEntityClass
 	file     *InterviewTopicFile
+	grouped  bool
 }
 
 func messageItems(m MessageManifest) ([]messageDeliveryItem, error) {
@@ -234,7 +266,11 @@ func messageItems(m MessageManifest) ([]messageDeliveryItem, error) {
 		items = append(items, messageDeliveryItem{text: m.Text, entities: entities})
 	}
 	for i := range m.Files {
-		items = append(items, messageDeliveryItem{file: &m.Files[i]})
+		item := messageDeliveryItem{file: &m.Files[i]}
+		if len(m.FileCaptions) != 0 {
+			item.text = m.FileCaptions[i]
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -244,6 +280,8 @@ func messageIntent(m MessageManifest) (string, error) {
 	m.Account = MessageAccount{ID: m.Account.ID}
 	m.Destination = MessageDestination{Type: m.Destination.Type, ID: m.Destination.ID}
 	m.ReplyToSHA256 = ""
+	// Changing the transport alone must not bypass receipts from a previous delivery.
+	m.GroupFiles = false
 	m.Files = append([]InterviewTopicFile(nil), m.Files...)
 	for i := range m.Files {
 		m.Files[i].Path = ""
@@ -270,6 +308,7 @@ func (s *Session) DeliverMessage(ctx context.Context, m MessageManifest, account
 	if err != nil {
 		return result, err
 	}
+	batches := messageDeliveryBatches(items, m.GroupFiles)
 	intent, err := messageIntent(m)
 	if err != nil {
 		return result, err
@@ -298,7 +337,7 @@ func (s *Session) DeliverMessage(ctx context.Context, m MessageManifest, account
 				result.Status = row.Status
 				return result, fmt.Errorf("message item %s has an unresolved receipt; reconcile without repeating the send", key)
 			}
-			row.ServerFilename, err = s.readBackDeliveredMessage(ctx, target, m, item, receipt.ID)
+			row.ServerFilename, row.GroupedID, err = s.readBackDeliveredMessage(ctx, target, m, item, receipt.ID)
 			if err != nil {
 				row.Status = "outcome_unknown"
 				result.Rows = append(result.Rows, row)
@@ -318,6 +357,12 @@ func (s *Session) DeliverMessage(ctx context.Context, m MessageManifest, account
 		}
 		result.Rows = append(result.Rows, row)
 	}
+	for _, batch := range batches {
+		if err := verifyMessageDeliveryBatch(result.Rows[batch.start:batch.end]); err != nil {
+			result.Status = "outcome_unknown"
+			return result, err
+		}
+	}
 	result.Ready, result.Status = true, "ready"
 	if !apply {
 		return result, nil
@@ -325,26 +370,29 @@ func (s *Session) DeliverMessage(ctx context.Context, m MessageManifest, account
 	if err := os.MkdirAll(journalDir, 0700); err != nil {
 		return result, err
 	}
-	for i, item := range items {
-		row := &result.Rows[i]
-		if row.ServerVerified {
+	for _, batch := range batches {
+		rows := result.Rows[batch.start:batch.end]
+		if rows[0].ServerVerified {
 			continue
 		}
-		key := fmt.Sprint(i + 1)
 		target, err = s.refreshReviewedMessageTarget(ctx, target, m, account)
 		if err != nil {
 			result.Status = "blocked"
 			return result, err
 		}
-		var media tg.InputMediaClass
-		if item.file != nil {
-			doc, uploadErr := s.uploadPublishFile(ctx, item.file)
-			if uploadErr != nil {
-				result.Status = "blocked"
-				return result, fmt.Errorf("upload item %s: %w", key, uploadErr)
+		batchItems := items[batch.start:batch.end]
+		media := make([]tg.InputMediaClass, len(batchItems))
+		for i, item := range batchItems {
+			if item.file == nil {
+				continue
 			}
-			doc.ForceFile = item.file.Kind == "document"
-			media = doc
+			media[i], err = s.prepareDeliveryMedia(ctx, target, item)
+			if err != nil {
+				result.Status = "blocked"
+				return result, fmt.Errorf("upload item %d: %w", rows[i].Index, err)
+			}
+		}
+		if batchItems[0].file != nil {
 			target, err = s.refreshReviewedMessageTarget(ctx, target, m, account)
 			if err != nil {
 				result.Status = "blocked"
@@ -355,38 +403,53 @@ func (s *Session) DeliverMessage(ctx context.Context, m MessageManifest, account
 			result.Status = "blocked"
 			return result, err
 		}
-		journal[key] = topicPublishReceipt{Hash: intent, Pending: true}
+		for _, row := range rows {
+			journal[fmt.Sprint(row.Index)] = topicPublishReceipt{Hash: intent, Pending: true}
+		}
 		if err := save(); err != nil {
 			result.Status = "blocked"
 			return result, err
 		}
-		result.Status, row.Status = "outcome_unknown", "outcome_unknown"
-		randomID := messageRandomID(intent, i+1)
-		updates, sendErr := s.sendDeliveryRPC(ctx, target, m, item, media, randomID)
+		result.Status = "outcome_unknown"
+		for i := range rows {
+			rows[i].Status = result.Status
+		}
+		ids, sendErr := s.sendDeliveryBatch(ctx, target, m, batchItems, media, intent, rows[0].Index)
 		if sendErr != nil {
-			return result, fmt.Errorf("message item %s send outcome unknown; reconcile without retry: %w", key, sendErr)
+			return result, fmt.Errorf("message item %d send outcome unknown; reconcile without retry: %w", rows[0].Index, sendErr)
 		}
-		id := deliveryMessageID(updates, randomID, func(out *tg.Message) bool {
-			_, err := verifyDeliveredMessage(out, target, m, item)
-			return err == nil
-		})
-		row.MessageID = id
-		if id <= 0 {
-			return result, fmt.Errorf("message item %s returned no unambiguous ID; reconcile without retry", key)
+		for i, id := range ids {
+			rows[i].MessageID = id
+			journal[fmt.Sprint(rows[i].Index)] = topicPublishReceipt{Hash: intent, ID: id, Pending: true}
 		}
-		journal[key] = topicPublishReceipt{Hash: intent, ID: id, Pending: true}
 		if err := save(); err != nil {
 			return result, err
 		}
-		row.ServerFilename, err = s.readBackDeliveredMessage(ctx, target, m, item, id)
-		if err != nil {
-			return result, fmt.Errorf("message item %s readback unverified: %w", key, err)
+		for i := range rows {
+			row := &rows[i]
+			if row.MessageID <= 0 {
+				return result, fmt.Errorf("message item %d returned no unambiguous ID; reconcile without retry", row.Index)
+			}
+			row.ServerFilename, row.GroupedID, err = s.readBackDeliveredMessage(ctx, target, m, batchItems[i], row.MessageID)
+			if err != nil {
+				return result, fmt.Errorf("message item %d readback unverified: %w", row.Index, err)
+			}
 		}
-		journal[key] = topicPublishReceipt{Hash: intent, ID: id}
+		for i := range rows {
+			rows[i].Status, rows[i].ServerVerified = "sent_verified", true
+		}
+		if err := verifyMessageDeliveryBatch(rows); err != nil {
+			for i := range rows {
+				rows[i].Status, rows[i].ServerVerified = "outcome_unknown", false
+			}
+			return result, err
+		}
+		for _, row := range rows {
+			journal[fmt.Sprint(row.Index)] = topicPublishReceipt{Hash: intent, ID: row.MessageID}
+		}
 		if err := save(); err != nil {
 			return result, err
 		}
-		row.Status, row.ServerVerified = "sent_verified", true
 	}
 	result.Complete, result.Status = true, "sent_verified"
 	return result, nil
@@ -406,7 +469,7 @@ func (s *Session) sendDeliveryRPC(ctx context.Context, target resolvedTarget, m 
 		})
 	}
 	return s.raw.MessagesSendMedia(callCtx, &tg.MessagesSendMediaRequest{
-		Peer: target.InputPeer, ReplyTo: reply, Media: media, RandomID: randomID, SendAs: sender,
+		Peer: target.InputPeer, ReplyTo: reply, Media: media, Message: item.text, RandomID: randomID, SendAs: sender,
 	})
 }
 
@@ -453,29 +516,29 @@ func deliveryMessageID(updates tg.UpdatesClass, randomID int64, matches func(*tg
 	return exactID
 }
 
-func (s *Session) readBackDeliveredMessage(ctx context.Context, target resolvedTarget, m MessageManifest, item messageDeliveryItem, id int) (string, error) {
+func (s *Session) readBackDeliveredMessage(ctx context.Context, target resolvedTarget, m MessageManifest, item messageDeliveryItem, id int) (string, int64, error) {
 	message, _, err := s.fetchMessageByIDDirect(ctx, target, id)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	out, ok := message.(*tg.Message)
 	if !ok || out.ID != id {
-		return "", fmt.Errorf("server returned a different message")
+		return "", 0, fmt.Errorf("server returned a different message")
 	}
 	doc, err := verifyDeliveredMessage(out, target, m, item)
 	if err != nil || doc == nil {
-		return "", err
+		return "", 0, err
 	}
 	if err := s.verifyDeliveryFileBytes(ctx, doc, *item.file); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return documentFileName(doc), nil
+	return documentFileName(doc), out.GroupedID, nil
 }
 
 func verifyDeliveredMessage(out *tg.Message, target resolvedTarget, m MessageManifest, item messageDeliveryItem) (*tg.Document, error) {
 	if !out.Out || !matchesDeliveryPeer(out.PeerID, target.Chat) ||
 		(!directReplyPeerIs(out.FromID, m.Account.ID) && !(out.FromID == nil && target.Chat.Type == "user")) ||
-		out.GroupedID != 0 || !out.RichMessage.Zero() || out.Message != item.text {
+		(out.GroupedID != 0) != item.grouped || !out.RichMessage.Zero() || out.Message != item.text {
 		return nil, fmt.Errorf("server message sender, destination or content differs")
 	}
 	if !matchesDeliveryReply(out.ReplyTo, target.Chat, m.TopicID, m.ReplyTo) {
