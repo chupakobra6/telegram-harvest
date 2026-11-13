@@ -57,6 +57,8 @@ type PrintShopPublishRow struct {
 	Post               PrintShopPost          `json:"post"`
 	EffectiveEntities  []InterviewTopicEntity `json:"effective_entities"`
 	ID                 int                    `json:"id,omitempty"`
+	GroupStart         int                    `json:"group_start,omitempty"`
+	GroupedID          int64                  `json:"grouped_id,string,omitempty"`
 	Status             string                 `json:"status"`
 	ServerVerified     bool                   `json:"server_verified"`
 	OutcomeUnknown     bool                   `json:"outcome_unknown"`
@@ -174,6 +176,7 @@ type printShopPublishSource interface {
 	printShopRead(context.Context, int) (*tg.Message, error)
 	printShopExisting(context.Context, PrintShopPost) (bool, error)
 	printShopSend(context.Context, PrintShopPost, int64) (int, error)
+	printShopSendGroup(context.Context, []PrintShopPost, func() error) ([]int, error)
 	printShopDownloadFile(context.Context, *tg.Document, io.Writer) error
 }
 
@@ -203,7 +206,7 @@ func checkPrintShopIdentity(ctx context.Context, s printShopPublishSource) ([]in
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids, nil
 }
-func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
+func verifyPrintShopMessage(m *tg.Message, p PrintShopPost, grouped bool) error {
 	if m == nil || !m.Out {
 		return fmt.Errorf("own print-shop message missing")
 	}
@@ -215,8 +218,8 @@ func verifyPrintShopPost(m *tg.Message, p PrintShopPost) error {
 	if !ok || peer.ChannelID != PrintShopChannelID {
 		return fmt.Errorf("print-shop destination mismatch")
 	}
-	if m.ReplyTo != nil || m.GroupedID != 0 {
-		return fmt.Errorf("unexpected print-shop reply/topic")
+	if m.ReplyTo != nil || (m.GroupedID != 0) != grouped {
+		return fmt.Errorf("unexpected print-shop reply/topic or grouping")
 	}
 	expected := p.publicationPost()
 	expected.Entities = p.effectiveEntities()
@@ -261,8 +264,8 @@ func printShopEntityShapes(entities []tg.MessageEntityClass) string {
 	return "[" + strings.Join(shapes, ", ") + "]"
 }
 
-func verifyPrintShopReadback(ctx context.Context, s printShopPublishSource, m *tg.Message, p PrintShopPost) (err error) {
-	if err = verifyPrintShopPost(m, p); err != nil {
+func verifyPrintShopMessageAndBytes(ctx context.Context, s printShopPublishSource, m *tg.Message, p PrintShopPost, grouped bool) (err error) {
+	if err = verifyPrintShopMessage(m, p, grouped); err != nil {
 		return err
 	}
 	if p.File == nil {
@@ -314,130 +317,216 @@ func publishPrintShop(ctx context.Context, s printShopPublishSource, m PrintShop
 		}
 		return nil
 	}
-	// Keep readback metadata only after all checks, including the downloaded hash.
-	verifiedNames := map[string]string{}
-	// Reject every bad local input/receipt and pre-existing match before any upload.
-	for _, p := range m.Posts {
-		if err = verifyPublishFile(ctx, p.publicationPost().File); err != nil {
-			return r, fmt.Errorf("%s: %w", p.Key, err)
+	batches := orderedAttachmentBatches(len(m.Posts), func(i int) string {
+		p := m.Posts[i]
+		if receipt, known := j[p.Key]; known {
+			return receipt.Batch
 		}
-		receipt, known := j[p.Key]
-		if known {
+		if p.File == nil {
+			return ""
+		}
+		return p.File.MIME
+	})
+	rows := make([]PrintShopPublishRow, len(m.Posts))
+	for _, batch := range batches {
+		posts := m.Posts[batch.start:batch.end]
+		batchHash := printShopBatchHash(posts)
+		var readErr error
+		for i, p := range posts {
+			row := &rows[batch.start+i]
+			*row = PrintShopPublishRow{Post: p, EffectiveEntities: p.effectiveEntities(), Status: "would_send"}
+			if batchHash != "" {
+				row.GroupStart = batch.start + 1
+			}
+			if err = verifyPublishFile(ctx, p.publicationPost().File); err != nil {
+				return r, fmt.Errorf("%s: %w", p.Key, err)
+			}
+			receipt, known := j[p.Key]
+			if !known {
+				if err = checkPrintShopNotSent(ctx, s, p); err != nil {
+					return r, err
+				}
+				continue
+			}
 			if receipt.Hash != publishPostHash(p.publicationPost()) {
 				return r, fmt.Errorf("post key payload changed: %s", p.Key)
 			}
-			if receipt.ID == 0 {
-				r.Rows = append(r.Rows, PrintShopPublishRow{Post: p, EffectiveEntities: p.effectiveEntities(), Status: "outcome_unknown", OutcomeUnknown: true})
-				return r, fmt.Errorf("outcome_unknown for %s; reconcile server manually; do not retry", p.Key)
+			if receipt.Batch != batchHash {
+				return r, fmt.Errorf("print-shop group order or membership changed: %s", p.Key)
 			}
-			msg, e := s.printShopRead(ctx, receipt.ID)
-			if e != nil {
-				return r, e
-			}
-			if msg == nil || msg.ID != receipt.ID {
-				return r, fmt.Errorf("print-shop message ID mismatch")
-			}
-			if e = verifyPrintShopReadback(ctx, s, msg, p); e != nil {
-				return r, e
-			}
-			if p.File != nil {
-				verifiedNames[p.Key] = documentFileName(msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document))
-			}
-		} else {
-			exists, e := s.printShopExisting(ctx, p)
-			if e != nil {
-				return r, e
-			}
-			if exists {
-				return r, fmt.Errorf("matching server post exists for %s without receipt; reconcile before sending", p.Key)
-			}
+			row.ID = receipt.ID
+			readErr = errors.Join(readErr, readPrintShopRow(ctx, s, row))
+			row.Status = "already_applied"
+		}
+		group := rows[batch.start:batch.end]
+		if err = errors.Join(readErr, verifyPrintShopGroup(group)); err != nil {
+			markPrintShopOutcomeUnknown(group)
+			r.Rows = append(r.Rows, rows[:batch.end]...)
+			return r, err
 		}
 	}
-	for _, p := range m.Posts {
-		receipt, known := j[p.Key]
-		row := PrintShopPublishRow{Post: p, EffectiveEntities: p.effectiveEntities(), ID: receipt.ID, Status: "would_send"}
-		if known {
-			// Already read and byte-verified in the all-input preflight; do not download twice.
-			if apply && receipt.Pending {
-				receipt.Pending = false
-				j[p.Key] = receipt
-				if err = save(); err != nil {
-					return r, err
-				}
-			}
-			row.Status = "already_applied"
-			row.ServerVerified = true
-			if p.File != nil {
-				row.ServerFilename = verifiedNames[p.Key]
-				row.FilenameNormalized = row.ServerFilename != p.File.Filename
-			}
-			r.Rows = append(r.Rows, row)
-			continue
-		}
-		if !apply {
-			r.Rows = append(r.Rows, row)
-			continue
-		}
-		if err = checkIdentity(); err != nil {
-			return r, err
-		}
-		if err = verifyPublishFile(ctx, p.publicationPost().File); err != nil {
-			return r, err
-		}
-		exists, e := s.printShopExisting(ctx, p)
-		if e != nil {
-			return r, e
-		}
-		if exists {
-			return r, fmt.Errorf("matching server post exists without receipt; reconcile before sending")
-		}
-		j[p.Key] = topicPublishReceipt{Hash: publishPostHash(p.publicationPost()), Pending: true}
-		if err = save(); err != nil {
-			return r, err
-		}
-		id, sendErr := s.printShopSend(ctx, p, printShopRandomID(p.Key))
-		row.ID = id
-		row.Status = "outcome_unknown"
-		row.OutcomeUnknown = true
-		if id > 0 {
-			j[p.Key] = topicPublishReceipt{Hash: publishPostHash(p.publicationPost()), ID: id, Pending: true}
-			if err = save(); err != nil {
-				r.Rows = append(r.Rows, row)
+	for _, batch := range batches {
+		group := rows[batch.start:batch.end]
+		if apply && !group[0].ServerVerified {
+			if err = checkIdentity(); err != nil {
 				return r, err
 			}
-			msg, readErr := s.printShopRead(ctx, id)
-			if readErr == nil {
-				if msg == nil || msg.ID != id {
-					readErr = fmt.Errorf("print-shop message ID mismatch")
-				} else {
-					readErr = verifyPrintShopReadback(ctx, s, msg, p)
+			err = sendPrintShopBatch(ctx, s, group, j, save)
+		} else if apply {
+			for _, row := range group {
+				if receipt := j[row.Post.Key]; receipt.Pending {
+					receipt.Pending = false
+					j[row.Post.Key] = receipt
+					err = save()
+					if err != nil {
+						return r, err
+					}
 				}
-			}
-			if readErr == nil {
-				row.Status = "sent_verified"
-				row.ServerVerified = true
-				row.OutcomeUnknown = false
-				if p.File != nil {
-					row.ServerFilename = documentFileName(msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document))
-					row.FilenameNormalized = row.ServerFilename != p.File.Filename
-				}
-				j[p.Key] = topicPublishReceipt{Hash: publishPostHash(p.publicationPost()), ID: id}
-				if err = save(); err != nil {
-					r.Rows = append(r.Rows, row)
-					return r, err
-				}
-			} else {
-				sendErr = errors.Join(sendErr, readErr)
 			}
 		}
-		r.Rows = append(r.Rows, row)
-		if !row.ServerVerified {
-			return r, fmt.Errorf("outcome_unknown for %s; no retry: %w", p.Key, sendErr)
+		r.Rows = append(r.Rows, group...)
+		if err != nil {
+			return r, err
 		}
 	}
 	r.Ready = true
 	r.Complete = apply
 	return r, nil
+}
+
+func printShopBatchHash(posts []PrintShopPost) string {
+	if len(posts) == 1 {
+		return ""
+	}
+	keys := make([]string, len(posts))
+	for i, post := range posts {
+		keys[i] = post.Key
+	}
+	return topicTextHash(strings.Join(keys, "\n"))
+}
+
+func checkPrintShopNotSent(ctx context.Context, s printShopPublishSource, p PrintShopPost) error {
+	exists, err := s.printShopExisting(ctx, p)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("matching server post exists for %s without receipt; reconcile before sending", p.Key)
+	}
+	return nil
+}
+
+func readPrintShopRow(ctx context.Context, s printShopPublishSource, row *PrintShopPublishRow) error {
+	if row.ID == 0 {
+		return fmt.Errorf("outcome_unknown for %s: server message ID is missing", row.Post.Key)
+	}
+	msg, err := s.printShopRead(ctx, row.ID)
+	if err != nil {
+		return err
+	}
+	if msg == nil || msg.ID != row.ID {
+		return fmt.Errorf("print-shop message ID mismatch")
+	}
+	if err = verifyPrintShopMessageAndBytes(ctx, s, msg, row.Post, row.GroupStart != 0); err != nil {
+		return err
+	}
+	row.GroupedID = msg.GroupedID
+	row.ServerVerified = true
+	row.OutcomeUnknown = false
+	if row.Post.File != nil {
+		row.ServerFilename = documentFileName(msg.Media.(*tg.MessageMediaDocument).Document.(*tg.Document))
+		row.FilenameNormalized = row.ServerFilename != row.Post.File.Filename
+	}
+	return nil
+}
+
+func verifyPrintShopGroup(rows []PrintShopPublishRow) error {
+	evidence := make([]MessageDeliveryRow, len(rows))
+	for i, row := range rows {
+		evidence[i] = MessageDeliveryRow{
+			Index: row.GroupStart + i, GroupedID: row.GroupedID, MessageID: row.ID, ServerVerified: row.ServerVerified,
+		}
+	}
+	return verifyMessageDeliveryBatch(evidence)
+}
+
+func markPrintShopOutcomeUnknown(rows []PrintShopPublishRow) {
+	for i := range rows {
+		rows[i].Status = "outcome_unknown"
+		rows[i].ServerVerified = false
+		rows[i].OutcomeUnknown = true
+	}
+}
+
+func sendPrintShopBatch(ctx context.Context, s printShopPublishSource, rows []PrintShopPublishRow, j topicPublishJournal, save func() error) error {
+	posts := make([]PrintShopPost, len(rows))
+	for i, row := range rows {
+		p := row.Post
+		posts[i] = p
+		if err := verifyPublishFile(ctx, p.publicationPost().File); err != nil {
+			return err
+		}
+		if err := checkPrintShopNotSent(ctx, s, p); err != nil {
+			return err
+		}
+	}
+	batchHash := printShopBatchHash(posts)
+	started := false
+	recordIntent := func() error {
+		for _, p := range posts {
+			j[p.Key] = topicPublishReceipt{Hash: publishPostHash(p.publicationPost()), Pending: true, Batch: batchHash}
+		}
+		if err := save(); err != nil {
+			return err
+		}
+		started = true
+		for i := range rows {
+			rows[i].Status = "outcome_unknown"
+			rows[i].OutcomeUnknown = true
+		}
+		return nil
+	}
+	var ids []int
+	var sendErr error
+	if len(posts) == 1 {
+		if err := recordIntent(); err != nil {
+			return err
+		}
+		var id int
+		id, sendErr = s.printShopSend(ctx, posts[0], printShopRandomID(posts[0].Key))
+		ids = []int{id}
+	} else {
+		ids, sendErr = s.printShopSendGroup(ctx, posts, recordIntent)
+		if !started {
+			return sendErr
+		}
+	}
+	for i, id := range ids {
+		rows[i].ID = id
+		receipt := j[posts[i].Key]
+		receipt.ID = id
+		j[posts[i].Key] = receipt
+	}
+	if err := save(); err != nil {
+		return err
+	}
+	var readErr error
+	for i := range rows {
+		if err := readPrintShopRow(ctx, s, &rows[i]); err != nil {
+			readErr = errors.Join(readErr, err)
+		}
+	}
+	if err := errors.Join(readErr, verifyPrintShopGroup(rows)); err != nil {
+		markPrintShopOutcomeUnknown(rows)
+		return fmt.Errorf("outcome_unknown for %s; no retry: %w", posts[0].Key, errors.Join(sendErr, err))
+	}
+	for i, p := range posts {
+		receipt := j[p.Key]
+		receipt.Pending = false
+		j[p.Key] = receipt
+		rows[i].Status = "sent_verified"
+	}
+	return save()
 }
 
 type printShopSession struct {
@@ -541,7 +630,7 @@ func (s *printShopSession) printShopExisting(ctx context.Context, p PrintShopPos
 				if next == 0 || msg.ID < next {
 					next = msg.ID
 				}
-				if verifyPrintShopPost(msg, p) == nil {
+				if (msg.GroupedID == 0 || p.File != nil) && verifyPrintShopMessage(msg, p, msg.GroupedID != 0) == nil {
 					return true, nil
 				}
 			}
@@ -584,14 +673,61 @@ func (s *printShopSession) printShopSend(ctx context.Context, p PrintShopPost, r
 	defer cancel()
 	var updates tg.UpdatesClass
 	if media == nil {
-		updates, err = s.raw.MessagesSendMessage(callCtx, &tg.MessagesSendMessageRequest{Peer: s.target.InputPeer, Message: p.Text, Entities: entities, RandomID: randomID, NoWebpage: true})
+		updates, err = s.raw.MessagesSendMessage(callCtx, &tg.MessagesSendMessageRequest{Peer: s.target.InputPeer, SendAs: &tg.InputPeerSelf{}, Message: p.Text, Entities: entities, RandomID: randomID, NoWebpage: true})
 	} else {
-		updates, err = s.raw.MessagesSendMedia(callCtx, &tg.MessagesSendMediaRequest{Peer: s.target.InputPeer, Message: p.Text, Entities: entities, RandomID: randomID, Media: media})
+		updates, err = s.raw.MessagesSendMedia(callCtx, &tg.MessagesSendMediaRequest{Peer: s.target.InputPeer, SendAs: &tg.InputPeerSelf{}, Message: p.Text, Entities: entities, RandomID: randomID, Media: media})
 	}
 	if err != nil {
 		return 0, err
 	}
 	return unpack.MessageID(updates, nil)
+}
+
+func (s *printShopSession) printShopSendGroup(ctx context.Context, posts []PrintShopPost, recordIntent func() error) ([]int, error) {
+	req := &tg.MessagesSendMultiMediaRequest{SendAs: &tg.InputPeerSelf{}, MultiMedia: make([]tg.InputSingleMedia, len(posts))}
+	for i, p := range posts {
+		entities, err := topicEntities(p.Text, p.effectiveEntities())
+		if err != nil {
+			return nil, err
+		}
+		if _, err = checkPrintShopIdentity(ctx, s); err != nil {
+			return nil, err
+		}
+		upload, err := s.uploadPublishFile(ctx, p.publicationPost().File)
+		if err != nil {
+			return nil, err
+		}
+		upload.ForceFile = p.File.MIME == "application/pdf"
+		media, err := s.uploadGroupedDocument(ctx, s.target, upload)
+		if err != nil {
+			return nil, err
+		}
+		req.MultiMedia[i] = tg.InputSingleMedia{
+			Media: media, Message: p.Text, Entities: entities, RandomID: printShopRandomID(p.Key),
+		}
+	}
+	if _, err := checkPrintShopIdentity(ctx, s); err != nil {
+		return nil, err
+	}
+	for _, p := range posts {
+		if err := verifyPublishFile(ctx, p.publicationPost().File); err != nil {
+			return nil, err
+		}
+	}
+	req.Peer = s.target.InputPeer
+	if err := s.beforeRPC(ctx, "publish_print_shop_group"); err != nil {
+		return nil, err
+	}
+	if err := recordIntent(); err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, defaultRPCTimeout)
+	defer cancel()
+	updates, err := s.raw.MessagesSendMultiMedia(callCtx, req)
+	if err != nil {
+		return nil, err
+	}
+	return groupedDeliveryMessageIDs(updates, req.MultiMedia), nil
 }
 
 func (s *printShopSession) printShopDownloadFile(ctx context.Context, document *tg.Document, output io.Writer) error {

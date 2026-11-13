@@ -15,18 +15,28 @@ type messageDeliveryBatch struct {
 
 // Preserve attachment order and native playback by grouping consecutive files of the same kind.
 func messageDeliveryBatches(items []messageDeliveryItem, groupFiles bool) []messageDeliveryBatch {
+	batches := orderedAttachmentBatches(len(items), func(i int) string {
+		if groupFiles && items[i].file != nil {
+			return items[i].file.Kind
+		}
+		return ""
+	})
+	for _, batch := range batches {
+		for i := batch.start; i < batch.end; i++ {
+			items[i].grouped = batch.end-batch.start > 1
+		}
+	}
+	return batches
+}
+
+func orderedAttachmentBatches(count int, attachmentKind func(int) string) []messageDeliveryBatch {
 	var batches []messageDeliveryBatch
-	for start := 0; start < len(items); {
+	for start := 0; start < count; {
 		end := start + 1
-		first := items[start].file
-		if groupFiles && first != nil {
-			for end < len(items) && end-start < messageGroupLimit &&
-				items[end].file != nil && items[end].file.Kind == first.Kind {
+		if kind := attachmentKind(start); kind != "" {
+			for end < count && end-start < messageGroupLimit && attachmentKind(end) == kind {
 				end++
 			}
-		}
-		for i := start; i < end; i++ {
-			items[i].grouped = end-start > 1
 		}
 		batches = append(batches, messageDeliveryBatch{start, end})
 		start = end
@@ -57,6 +67,10 @@ func (s *Session) prepareDeliveryMedia(ctx context.Context, target resolvedTarge
 	if !item.grouped {
 		return upload, nil
 	}
+	return s.uploadGroupedDocument(ctx, target, upload)
+}
+
+func (s *Session) uploadGroupedDocument(ctx context.Context, target resolvedTarget, upload *tg.InputMediaUploadedDocument) (tg.InputMediaClass, error) {
 	if err := s.beforeRPC(ctx, "upload_message_delivery_media"); err != nil {
 		return nil, err
 	}
@@ -111,13 +125,17 @@ func (s *Session) sendDeliveryBatch(ctx context.Context, target resolvedTarget, 
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]int, len(items))
+	return groupedDeliveryMessageIDs(updates, req.MultiMedia), nil
+}
+
+func groupedDeliveryMessageIDs(updates tg.UpdatesClass, media []tg.InputSingleMedia) []int {
+	ids := make([]int, len(media))
 	switch updates.(type) {
 	case *tg.Updates, *tg.UpdatesCombined:
-		for i, input := range req.MultiMedia {
+		for i, input := range media {
 			// Identical documents can appear twice. Only the server random-ID mapping identifies a member.
 			ids[i] = deliveryMessageID(updates, input.RandomID, func(*tg.Message) bool { return false })
 		}
 	}
-	return ids, nil
+	return ids
 }

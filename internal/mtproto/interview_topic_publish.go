@@ -70,6 +70,7 @@ type topicPublishReceipt struct {
 	Hash    string `json:"hash"`
 	ID      int    `json:"id,omitempty"`
 	Pending bool   `json:"pending"`
+	Batch   string `json:"batch,omitempty"`
 }
 type topicPublishJournal map[string]topicPublishReceipt
 
@@ -587,7 +588,8 @@ func loadPublicationJournal(journalPath string, minimumID int) (topicPublishJour
 			return nil, fmt.Errorf("journal must contain one non-null object")
 		}
 		for _, receipt := range j {
-			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= minimumID {
+			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= minimumID ||
+				receipt.Batch != "" && (minimumID != 0 || !validSHA256(receipt.Batch)) {
 				return nil, fmt.Errorf("invalid receipt")
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -39,6 +40,9 @@ type printShopFake struct {
 	account             int64
 	username            string
 	sends, prepares     int
+	groupSends          int
+	groupIDsMissing     bool
+	groupIDsWrong       bool
 	sentKeys            []string
 	existing, wrongRead bool
 	normalizeFilename   bool
@@ -101,6 +105,29 @@ func (f *printShopFake) printShopSend(_ context.Context, p PrintShopPost, _ int6
 	}
 	f.messages[id] = msg
 	return id, nil
+}
+
+func (f *printShopFake) printShopSendGroup(ctx context.Context, posts []PrintShopPost, recordIntent func() error) ([]int, error) {
+	if err := recordIntent(); err != nil {
+		return nil, err
+	}
+	f.groupSends++
+	ids := make([]int, len(posts))
+	for i, p := range posts {
+		id, err := f.printShopSend(ctx, p, printShopRandomID(p.Key))
+		if err != nil {
+			return ids, err
+		}
+		f.messages[id].GroupedID = int64(f.groupSends)
+		ids[i] = id
+	}
+	if f.groupIDsMissing {
+		ids[len(ids)-1] = 0
+	}
+	if f.groupIDsWrong {
+		f.messages[ids[len(ids)-1]].GroupedID++
+	}
+	return ids, nil
 }
 func (f *printShopFake) printShopDownloadFile(ctx context.Context, document *tg.Document, output io.Writer) error {
 	f.downloadCalls++
@@ -177,6 +204,118 @@ func TestPrintShopPublishUnknownNeverRetries(t *testing.T) {
 				t.Fatal("unknown retried", err, f.sends)
 			}
 		})
+	}
+}
+
+func TestPrintShopPublishGroupedPDFs(t *testing.T) {
+	for _, scenario := range []string{"new", "legacy-prefix", "missing-id", "wrong-group"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, f := printShopFixture(t)
+			second := m.Posts[1]
+			second.Key, second.Text, second.Entities = "second-v1", "Второй лист", nil
+			m.Posts = append(m.Posts, second)
+			ctx := context.Background()
+			j := topicPublishJournal{}
+			path := filepath.Join(t.TempDir(), "receipts.json")
+			save := func() error { return savePublishJournal(path, j) }
+			if scenario == "legacy-prefix" {
+				old := m
+				old.Posts = old.Posts[:2]
+				if _, err := publishPrintShop(ctx, f, old, j, save, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.groupIDsMissing = scenario == "missing-id"
+			f.groupIDsWrong = scenario == "wrong-group"
+			preview, err := publishPrintShop(ctx, f, m, j, save, false)
+			wantStart := 2
+			if scenario == "legacy-prefix" {
+				wantStart = 0
+			}
+			if err != nil || !preview.Ready || preview.Complete || preview.Rows[1].GroupStart != wantStart ||
+				preview.Rows[2].GroupStart != wantStart || f.groupSends != 0 {
+				t.Fatal(preview, err)
+			}
+			result, err := publishPrintShop(ctx, f, m, j, save, true)
+			wantError := f.groupIDsMissing || f.groupIDsWrong
+			wantGroupSends := 1
+			if scenario == "legacy-prefix" {
+				wantGroupSends = 0
+			}
+			if (err != nil) != wantError || result.Complete == wantError || f.sends != 3 || f.groupSends != wantGroupSends {
+				t.Fatal(result, err, f.sends, f.groupSends)
+			}
+			if wantError {
+				if result.Rows[1].ServerVerified || result.Rows[2].ServerVerified || !j[second.Key].Pending {
+					t.Fatal("unverified group accepted", result, j)
+				}
+			} else if wantStart != 0 {
+				a, b := result.Rows[1], result.Rows[2]
+				if a.GroupedID == 0 || a.GroupedID != b.GroupedID || a.ID >= b.ID ||
+					f.messages[b.ID].Message != second.Text || len(f.messages[a.ID].Entities) != 1 {
+					t.Fatal("group lost order, identity or captions", result)
+				}
+			}
+			j, err = loadPublicationJournal(path, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay, err := publishPrintShop(ctx, f, m, j, save, true)
+			if (err != nil) != wantError || replay.Complete == wantError || f.sends != 3 || f.groupSends != wantGroupSends {
+				t.Fatal("replay changed delivery", replay, err)
+			}
+			if wantError && (len(replay.Rows) != 3 || !replay.Rows[0].ServerVerified ||
+				!replay.Rows[1].OutcomeUnknown || !replay.Rows[2].OutcomeUnknown || replay.Rows[1].ID == 0) {
+				t.Fatal("replay lost reconciliation evidence", replay)
+			}
+			if scenario == "new" {
+				m.Posts[1], m.Posts[2] = m.Posts[2], m.Posts[1]
+				if _, err := publishPrintShop(ctx, f, m, j, save, true); err == nil || f.sends != 3 {
+					t.Fatal("changed group order accepted", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPrintShopPublishGroupBoundaries(t *testing.T) {
+	m, f := printShopFixture(t)
+	notice, pdf := m.Posts[0], m.Posts[1]
+	video := localReplacementVideo(t)
+	clip := PrintShopPost{Text: "Видео", File: &PrintShopPDF{
+		Path: video.Path, Filename: video.Filename, MIME: video.MIME, SHA256: video.SHA256,
+		Size: video.Size, Duration: video.Duration, Width: video.Width, Height: video.Height, HasAudio: video.HasAudio,
+	}}
+	m.Posts = nil
+	appendPost := func(post PrintShopPost) {
+		post.Key = fmt.Sprintf("post-%d", len(m.Posts)+1)
+		m.Posts = append(m.Posts, post)
+	}
+	for range 11 {
+		appendPost(pdf)
+	}
+	appendPost(clip)
+	appendPost(clip)
+	appendPost(notice)
+	appendPost(pdf)
+	appendPost(pdf)
+	result, err := publishPrintShop(context.Background(), f, m, topicPublishJournal{}, func() error { return nil }, true)
+	if err != nil || !result.Complete || f.groupSends != 3 || f.sends != len(m.Posts) || f.downloadCalls != len(m.Posts)-1 {
+		t.Fatal(result, err, f.groupSends, f.sends)
+	}
+	for i, row := range result.Rows {
+		want := 1
+		switch i {
+		case 10, 13:
+			want = 0
+		case 11, 12:
+			want = 12
+		case 14, 15:
+			want = 15
+		}
+		if row.GroupStart != want || (row.GroupedID == 0) != (want == 0) || row.ID != i+1 {
+			t.Fatal("wrong group or order", i, row)
+		}
 	}
 }
 func TestPrintShopPublishAllInputsBeforeFirstSend(t *testing.T) {
@@ -297,7 +436,7 @@ func TestPrintShopPublishStrictReadback(t *testing.T) {
 			case "missing-media":
 				msg.Media = nil
 			}
-			err := verifyPrintShopPost(msg, p)
+			err := verifyPrintShopMessage(msg, p, false)
 			if (err == nil) != (bad == "valid") {
 				t.Fatal(bad, err)
 			}
@@ -315,6 +454,8 @@ type printShopWire struct {
 	uploaded          []byte
 	afterUpload       func()
 	messageEntities   []tg.MessageEntityClass
+	groupUploads      int
+	groupIntents      int
 	bad               string
 }
 
@@ -353,19 +494,25 @@ func (f *printShopWire) Invoke(_ context.Context, input bin.Encoder, output bin.
 		}
 		response = &tg.ChannelsChannelParticipants{Count: count, Participants: participants}
 	case *tg.MessagesSendMessageRequest:
+		if _, ok := req.SendAs.(*tg.InputPeerSelf); !ok {
+			f.t.Fatal("send must use the authenticated user")
+		}
 		f.messageEntities = req.Entities
 		f.sends++
 		peer, ok := req.Peer.(*tg.InputPeerChannel)
-		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.SendAs != nil || !req.NoWebpage || req.RandomID != printShopRandomID("notice-v1") {
+		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || !req.NoWebpage || req.RandomID != printShopRandomID("notice-v1") {
 			f.t.Fatal("send escaped scope", req)
 		}
 		return errors.New("FLOOD_WAIT_1") // A mutation must not be automatically retried.
 	case *tg.MessagesSendMediaRequest:
+		if _, ok := req.SendAs.(*tg.InputPeerSelf); !ok {
+			f.t.Fatal("send must use the authenticated user")
+		}
 		f.sends++
 		peer, ok := req.Peer.(*tg.InputPeerChannel)
 		media, mediaOK := req.Media.(*tg.InputMediaUploadedDocument)
 		if f.video {
-			if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.SendAs != nil || req.RandomID != printShopRandomID("video-v1") || !mediaOK || media.MimeType != "video/mp4" || len(media.Attributes) != 2 {
+			if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.RandomID != printShopRandomID("video-v1") || !mediaOK || media.MimeType != "video/mp4" || len(media.Attributes) != 2 {
 				f.t.Fatal("video send escaped scope", req)
 			}
 			attr, valid := media.Attributes[1].(*tg.DocumentAttributeVideo)
@@ -374,7 +521,7 @@ func (f *printShopWire) Invoke(_ context.Context, input bin.Encoder, output bin.
 			}
 			return errors.New("FLOOD_WAIT_1")
 		}
-		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.SendAs != nil || req.RandomID != printShopRandomID("sheet-v1") || !mediaOK || media.MimeType != "application/pdf" || len(media.Attributes) != 1 {
+		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ReplyMarkup != nil || req.ScheduleDate != 0 || req.RandomID != printShopRandomID("sheet-v1") || !mediaOK || media.MimeType != "application/pdf" || len(media.Attributes) != 1 {
 			f.t.Fatal("media send escaped scope", req)
 		}
 		filename, ok := media.Attributes[0].(*tg.DocumentAttributeFilename)
@@ -382,6 +529,33 @@ func (f *printShopWire) Invoke(_ context.Context, input bin.Encoder, output bin.
 			f.t.Fatal("media changed", req)
 		}
 		return errors.New("FLOOD_WAIT_1")
+	case *tg.MessagesUploadMediaRequest:
+		peer, ok := req.Peer.(*tg.InputPeerChannel)
+		media, mediaOK := req.Media.(*tg.InputMediaUploadedDocument)
+		if !ok || peer.ChannelID != PrintShopChannelID || !mediaOK || !media.ForceFile || media.MimeType != "application/pdf" {
+			f.t.Fatal("group upload changed scope or type", req)
+		}
+		f.groupUploads++
+		response = &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(100 + f.groupUploads), FileReference: []byte{byte(f.groupUploads)}}}
+	case *tg.MessagesSendMultiMediaRequest:
+		if _, ok := req.SendAs.(*tg.InputPeerSelf); !ok {
+			f.t.Fatal("send must use the authenticated user")
+		}
+		f.sends++
+		peer, ok := req.Peer.(*tg.InputPeerChannel)
+		if !ok || peer.ChannelID != PrintShopChannelID || req.ReplyTo != nil || req.ScheduleDate != 0 ||
+			len(req.MultiMedia) != 2 || f.groupUploads != 2 || f.groupIntents != 1 {
+			f.t.Fatal("group send escaped scope or preceded intent", req)
+		}
+		first, second := req.MultiMedia[0], req.MultiMedia[1]
+		if first.Message != "📄 Лист" || len(first.Entities) != 1 || first.RandomID != printShopRandomID("sheet-v1") ||
+			second.Message != "Второй лист" || len(second.Entities) != 0 || second.RandomID != printShopRandomID("second-v1") {
+			f.t.Fatal("group send changed captions", req)
+		}
+		response = &tg.Updates{Updates: []tg.UpdateClass{
+			&tg.UpdateMessageID{RandomID: second.RandomID, ID: 22},
+			&tg.UpdateMessageID{RandomID: first.RandomID, ID: 21},
+		}}
 	case *tg.UploadSaveFilePartRequest:
 		f.uploads++
 		if !f.allowUpload {
@@ -461,6 +635,31 @@ func TestPrintShopPublishWirePDFBytesAndRecheck(t *testing.T) {
 	}
 }
 
+func TestPrintShopPublishWireGroup(t *testing.T) {
+	for _, change := range []bool{false, true} {
+		m, _ := printShopFixture(t)
+		second := m.Posts[1]
+		second.Key, second.Text, second.Entities = "second-v1", "Второй лист", nil
+		w := &printShopWire{t: t, allowUpload: true}
+		if change {
+			w.afterUpload = func() { w.bad = "audience-change" }
+		}
+		target := resolvedTarget{Chat: harvest.Chat{ID: PrintShopChannelID, Type: "supergroup", Title: PrintShopTitle}, InputPeer: &tg.InputPeerChannel{ChannelID: PrintShopChannelID, AccessHash: 123}}
+		s := &printShopSession{Session: &Session{raw: tg.NewClient(w), dialogCache: map[string]resolvedTarget{"supergroup:4415343946": target}}}
+		ids, err := s.printShopSendGroup(context.Background(), []PrintShopPost{m.Posts[1], second}, func() error {
+			w.groupIntents++
+			return nil
+		})
+		if change {
+			if err == nil || w.sends != 0 || w.groupIntents != 0 {
+				t.Fatal("audience changed, but group was armed or sent", err, w.sends, w.groupIntents)
+			}
+		} else if err != nil || w.sends != 1 || w.uploads != 2 || !reflect.DeepEqual(ids, []int{21, 22}) {
+			t.Fatal(ids, err, w.sends, w.uploads)
+		}
+	}
+}
+
 func TestPrintShopPublishServerPDFBytesAndCleanup(t *testing.T) {
 	for _, bad := range []string{"valid", "same-size-wrong-bytes", "too-long", "short", "download-error", "cancel"} {
 		t.Run(bad, func(t *testing.T) {
@@ -490,7 +689,7 @@ func TestPrintShopPublishServerPDFBytesAndCleanup(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			err = verifyPrintShopReadback(ctx, f, msg, p)
+			err = verifyPrintShopMessageAndBytes(ctx, f, msg, p, false)
 			if (err == nil) != (bad == "valid") || f.downloadCalls != 1 || f.downloadedDocuments[0] != document {
 				t.Fatal(bad, err, f.downloadCalls)
 			}
