@@ -1,12 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 const (
@@ -118,7 +121,12 @@ func loadMode(mode Mode, defaultSessionPath string, defaultStateDir string) (Con
 	if err != nil {
 		return Config{}, err
 	}
-	allowedChats := splitList(firstEnv(envKeys(mode, "ALLOWED_CHATS")...))
+	allowedChatKeys := envKeys(mode, "ALLOWED_CHATS")
+	allowedChatsRaw := firstEnv(allowedChatKeys...)
+	allowedChats := splitList(allowedChatsRaw)
+	if allowedChatsRaw != "" && len(allowedChats) == 0 {
+		return Config{}, fmt.Errorf("%s must contain at least one chat", allowedChatKeys[0])
+	}
 	additionalSenders := []DailyAdditionalSender(nil)
 	if mode == ModeMain {
 		additionalSenders, err = parseDailyAdditionalSenders(firstEnv(envKeys(mode, "ADDITIONAL_SENDERS")...))
@@ -239,18 +247,30 @@ func (c Config) LoginCommand() string {
 	return "telegram-harvest --profile " + c.ProfileName() + " login"
 }
 
-func (c Config) RuntimeLockPath() string {
+func (c Config) RuntimeLockPath() (string, error) {
 	sessionPath := strings.TrimSpace(c.SessionPath)
 	if sessionPath == "" {
 		if c.Mode == ModeMain {
 			sessionPath = DefaultMainSessionPath
 		} else if c.Mode == ModeAccount {
-			return ""
+			return "", nil
 		} else {
 			sessionPath = DefaultSessionPath
 		}
 	}
-	return sessionPath + ".runtime.lock"
+	info, err := os.Lstat(sessionPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect session for runtime lock: %w", err)
+	}
+	// A symlink on the final component needs the target's sidecar. For a
+	// directory symlink the original sidecar already resolves to the same inode.
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		sessionPath, err = runlock.CanonicalPath(sessionPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve session for runtime lock: %w", err)
+		}
+	}
+	return sessionPath + ".runtime.lock", nil
 }
 
 func defaultString(value string, fallback string) string {

@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 // LoadDotEnv loads KEY=VALUE pairs from path into the process environment.
 // Existing environment variables win over values from the file.
+// Relative ASR paths from the file are resolved against its directory.
 // Missing files are ignored.
 func LoadDotEnv(path string) error {
 	file, err := os.Open(path)
@@ -21,6 +23,7 @@ func LoadDotEnv(path string) error {
 	}
 	defer file.Close()
 
+	dir := filepath.Dir(path)
 	scanner := bufio.NewScanner(file)
 	for lineNo := 1; scanner.Scan(); lineNo++ {
 		raw := strings.TrimSpace(scanner.Text())
@@ -45,7 +48,7 @@ func LoadDotEnv(path string) error {
 		if err != nil {
 			return fmt.Errorf("%s:%d: %w", path, lineNo, err)
 		}
-		if err := os.Setenv(key, parsed); err != nil {
+		if err := os.Setenv(key, resolveDotEnvValue(dir, key, parsed)); err != nil {
 			return fmt.Errorf("%s:%d: set %s: %w", path, lineNo, key, err)
 		}
 	}
@@ -53,6 +56,19 @@ func LoadDotEnv(path string) error {
 		return fmt.Errorf("scan %s: %w", path, err)
 	}
 	return nil
+}
+
+func resolveDotEnvValue(dir, key, value string) string {
+	switch key {
+	case "TG_HARVEST_DAILY_FFMPEG_COMMAND", "TG_HARVEST_DAILY_WHISPER_COMMAND":
+		if !strings.ContainsRune(value, filepath.Separator) {
+			return value
+		}
+	case "TG_HARVEST_DAILY_WHISPER_MODEL_PATH", "TG_HARVEST_DAILY_WHISPER_SPEECH_GATE_MODEL_PATH":
+	default:
+		return value
+	}
+	return resolvePath(dir, value)
 }
 
 func parseDotEnvValue(raw string) (string, error) {

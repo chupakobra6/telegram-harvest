@@ -46,7 +46,7 @@ func TestAccountOrganizationRejectsWrongModeAndManifestBeforeRuntime(t *testing.
 			if err := runAccountOrganize(cfg, nil, args, &output); err == nil {
 				t.Fatal("invalid organization input reached runtime")
 			}
-			if _, err := os.Stat(cfg.RuntimeLockPath()); !os.IsNotExist(err) {
+			if _, err := os.Stat(mustRuntimeLockPath(t, cfg)); !os.IsNotExist(err) {
 				t.Fatal("invalid organization input acquired session resources", err)
 			}
 		})

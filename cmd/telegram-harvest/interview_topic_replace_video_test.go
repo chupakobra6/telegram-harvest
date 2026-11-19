@@ -51,7 +51,7 @@ func TestInterviewTopicReplaceVideoCLIRejectsScopeBeforeSession(t *testing.T) {
 			if err := runInterviewTopicReplaceVideo(cfg, nil, args, &strings.Builder{}); err == nil {
 				t.Fatal("invalid topic update entered live runtime")
 			}
-			if _, err := os.Stat(cfg.RuntimeLockPath()); !os.IsNotExist(err) {
+			if _, err := os.Stat(mustRuntimeLockPath(t, cfg)); !os.IsNotExist(err) {
 				t.Fatal("rejected topic update acquired session resources", err)
 			}
 		})

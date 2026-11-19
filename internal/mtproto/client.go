@@ -311,12 +311,12 @@ func (s *Session) ListAllDialogs(ctx context.Context) ([]harvest.Chat, error) {
 }
 
 func (s *Session) loadAllDialogsFolder(ctx context.Context, folderID int) ([]harvest.Chat, error) {
-	return s.loadDialogsFolderUntil(ctx, folderID, "")
+	return s.loadDialogsFolderUntil(ctx, folderID, nil)
 }
 
 // An exact typed peer needs no evidence from later pages once it is found.
-// An empty target retains the full-folder completeness contract.
-func (s *Session) loadDialogsFolderUntil(ctx context.Context, folderID int, target string) ([]harvest.Chat, error) {
+// A nil match retains the full-folder completeness contract.
+func (s *Session) loadDialogsFolderUntil(ctx context.Context, folderID int, match func(harvest.Chat) bool) ([]harvest.Chat, error) {
 	const pageSize = defaultDialogBatchSize
 	all := make([]harvest.Chat, 0, pageSize)
 	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
@@ -369,7 +369,7 @@ func (s *Session) loadDialogsFolderUntil(ctx context.Context, folderID int, targ
 			}
 			all = append(all, chat)
 			s.cacheTarget(chat, inputPeer)
-			if target != "" && harvest.AccountChatKey(chat) == target {
+			if match != nil && match(chat) {
 				return all, nil
 			}
 		}
@@ -1001,6 +1001,7 @@ func (s *Session) dumpHistoryStreaming(
 ) (harvest.Chat, harvest.HistoryStats, error) {
 	offsetID := opts.StartOffsetID
 	stats := harvest.HistoryStats{}
+	includeContactNames := opts.IncludeContactNames && target.Chat.Type == "user"
 	for shouldContinueHistory(opts, stats.Records, stats.Batches) {
 		stats.Batches++
 		batchLimit := nextBatchLimit(opts, stats.Records)
@@ -1073,6 +1074,11 @@ func (s *Session) dumpHistoryStreaming(
 			record, ok := normalizeRecord(msgClass, target.Chat, entities)
 			if !ok {
 				continue
+			}
+			if msg, ok := msgClass.(*tg.Message); includeContactNames && ok {
+				if contact, ok := msg.Media.(*tg.MessageMediaContact); ok {
+					record.ContactName = strings.TrimSpace(strings.TrimSpace(contact.FirstName) + " " + strings.TrimSpace(contact.LastName))
+				}
 			}
 			annotateRecordTopic(&record, opts, topicByID)
 			batchRecords = append(batchRecords, record)
@@ -1671,7 +1677,9 @@ func (s *Session) resolveTarget(ctx context.Context, raw string) (resolvedTarget
 	if peerType, _, hasType := strings.Cut(raw, ":"); hasType &&
 		(peerType == "user" || peerType == "basic_group" || peerType == "supergroup" || peerType == "channel") {
 		for _, folderID := range []int{0, 1} {
-			if _, err := s.loadDialogsFolderUntil(ctx, folderID, raw); err != nil {
+			if _, err := s.loadDialogsFolderUntil(ctx, folderID, func(chat harvest.Chat) bool {
+				return harvest.AccountChatKey(chat) == raw
+			}); err != nil {
 				return resolvedTarget{}, err
 			}
 			if cached, ok := s.dialogCache[raw]; ok {

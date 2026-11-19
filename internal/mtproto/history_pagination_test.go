@@ -1,7 +1,9 @@
 package mtproto
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -119,6 +121,58 @@ func (f *historyInvoker) Invoke(_ context.Context, input bin.Encoder, output bin
 	f.offsets = append(f.offsets, req.OffsetID)
 	output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesMessages{Messages: f.pages[req.OffsetID]}
 	return nil
+}
+
+func TestDumpHistoryContactName(t *testing.T) {
+	contact := &tg.MessageMediaContact{
+		FirstName:   " Ada ",
+		LastName:    " Lovelace ",
+		PhoneNumber: "+15550101337",
+		Vcard:       "synthetic-vcard",
+		UserID:      22334455,
+	}
+	cases := []struct {
+		name     string
+		chatType string
+		peer     tg.InputPeerClass
+		include  bool
+		wantName string
+	}{
+		{"private dump", "user", &tg.InputPeerUser{UserID: 1}, true, "Ada Lovelace"},
+		{"private sync", "user", &tg.InputPeerUser{UserID: 1}, false, ""},
+		{"channel dump", "channel", &tg.InputPeerChannel{ChannelID: 1}, true, ""},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &historyInvoker{pages: map[int][]tg.MessageClass{
+				0: {&tg.Message{ID: 10, Date: 1000, Media: contact}},
+			}}
+			s := &Session{
+				raw:         tg.NewClient(fake),
+				dialogCache: map[string]resolvedTarget{"selected": {Chat: harvest.Chat{ID: 1, Type: test.chatType}, InputPeer: test.peer}},
+			}
+			var data bytes.Buffer
+			encoder := json.NewEncoder(&data)
+			_, stats, err := s.DumpHistory(context.Background(), "selected", harvest.HistoryOptions{All: true, IncludeContactNames: test.include}, func(record harvest.MessageRecord) error {
+				return encoder.Encode(record)
+			})
+			if err != nil || !stats.Complete || stats.Records != 1 {
+				t.Fatalf("dump stats=%+v err=%v", stats, err)
+			}
+			for _, forbidden := range []string{contact.PhoneNumber, contact.Vcard, "22334455"} {
+				if strings.Contains(data.String(), forbidden) {
+					t.Fatal("dump exposed a private contact field")
+				}
+			}
+			var record harvest.MessageRecord
+			if err := json.NewDecoder(&data).Decode(&record); err != nil {
+				t.Fatal(err)
+			}
+			if record.Kind != "contact" || record.ContactName != test.wantName {
+				t.Fatalf("contact kind=%q name=%q, want contact %q", record.Kind, record.ContactName, test.wantName)
+			}
+		})
+	}
 }
 
 func TestHistorySparsePageDoesNotProveCompletion(t *testing.T) {

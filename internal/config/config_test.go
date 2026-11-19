@@ -1,11 +1,14 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chupakobra6/telegram-harvest/internal/runlock"
 )
 
 func TestDefaultRPCSpacingUsesCalibratedStaticFloor(t *testing.T) {
@@ -35,6 +38,25 @@ func TestLoadUsesStudyEnv(t *testing.T) {
 	}
 	if cfg.RPCSpacing != time.Duration(DefaultRPCSpacingMS)*time.Millisecond {
 		t.Fatalf("RPCSpacing = %s", cfg.RPCSpacing)
+	}
+}
+
+func TestStudyAllowlistRejectsNonemptyConfigurationWithoutChats(t *testing.T) {
+	clearTelegramConfigEnv(t)
+	const variable = "TG_HARVEST_STUDY_ALLOWED_CHATS"
+	for _, value := range []string{",", " ;\n , ", "@"} {
+		t.Setenv(variable, value)
+		_, err := LoadStudy()
+		if err == nil || err.Error() != variable+" must contain at least one chat" {
+			t.Fatalf("expected a configuration error for an unusable allowlist, got %v", err)
+		}
+	}
+	for _, value := range []string{"", " \t\n "} {
+		t.Setenv(variable, value)
+		cfg, err := LoadStudy()
+		if err != nil || !cfg.ChatAllowed("12345") {
+			t.Fatalf("blank allowlist should preserve unrestricted access, err = %v", err)
+		}
 	}
 }
 
@@ -305,8 +327,8 @@ func TestWithRootAndRuntimeLockPath(t *testing.T) {
 	if cfg.StateDir != filepath.Join(root, ".state") {
 		t.Fatalf("unexpected state dir: %s", cfg.StateDir)
 	}
-	if got := cfg.RuntimeLockPath(); got != filepath.Join(root, ".sessions", "study.json.runtime.lock") {
-		t.Fatalf("runtime lock = %s", got)
+	if got, err := cfg.RuntimeLockPath(); err != nil || got != filepath.Join(root, ".sessions", "study.json.runtime.lock") {
+		t.Fatalf("runtime lock = %s, err = %v", got, err)
 	}
 }
 
@@ -315,14 +337,52 @@ func TestRuntimeLockPathIsPerSessionFile(t *testing.T) {
 	study := Config{SessionPath: filepath.Join(dir, "sessions", "study.json")}
 	main := Config{SessionPath: filepath.Join(dir, "sessions", "main.json")}
 
-	if study.RuntimeLockPath() == main.RuntimeLockPath() {
-		t.Fatalf("runtime locks should differ: %s", study.RuntimeLockPath())
+	if got, err := study.RuntimeLockPath(); err != nil || got != filepath.Join(dir, "sessions", "study.json.runtime.lock") {
+		t.Fatalf("study runtime lock = %s, err = %v", got, err)
 	}
-	if got := study.RuntimeLockPath(); got != filepath.Join(dir, "sessions", "study.json.runtime.lock") {
-		t.Fatalf("study runtime lock = %s", got)
+	if got, err := main.RuntimeLockPath(); err != nil || got != filepath.Join(dir, "sessions", "main.json.runtime.lock") {
+		t.Fatalf("main runtime lock = %s, err = %v", got, err)
 	}
-	if got := main.RuntimeLockPath(); got != filepath.Join(dir, "sessions", "main.json.runtime.lock") {
-		t.Fatalf("main runtime lock = %s", got)
+}
+
+func TestRuntimeLockPathUsesOneLockForSessionSymlink(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := Config{SessionPath: filepath.Join(dir, "real.json")}
+	alias := Config{SessionPath: filepath.Join(dir, "alias.json")}
+	if err := os.Symlink("real.json", alias.SessionPath); err != nil {
+		t.Fatal(err)
+	}
+	realPath, err := real.RuntimeLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := runlock.Acquire(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	for _, caseName := range []string{"session missing", "session created"} {
+		t.Run(caseName, func(t *testing.T) {
+			if caseName == "session created" {
+				if err := os.WriteFile(real.SessionPath, []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			aliasPath, err := alias.RuntimeLockPath()
+			if err != nil || aliasPath != realPath {
+				t.Fatalf("alias runtime lock = %s, want %s, err = %v", aliasPath, realPath, err)
+			}
+			other, err := runlock.Acquire(aliasPath)
+			if !errors.Is(err, runlock.ErrAlreadyLocked) {
+				if other != nil {
+					_ = other.Release()
+				}
+				t.Fatalf("alias failed to share runtime lock: %v", err)
+			}
+		})
 	}
 }
 

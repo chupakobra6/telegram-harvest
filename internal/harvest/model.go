@@ -99,6 +99,7 @@ type MessageRecord struct {
 	Forward            *ForwardInfo `json:"forward,omitempty"`
 	Kind               string       `json:"kind"`
 	Text               string       `json:"text,omitempty"`
+	ContactName        string       `json:"contact_name,omitempty"`
 	Topic              *Topic       `json:"topic,omitempty"`
 	ReplyToMessageID   int          `json:"reply_to_message_id,omitempty"`
 	ThreadTopMessageID int          `json:"thread_top_message_id,omitempty"`
@@ -150,6 +151,7 @@ type HistoryOptions struct {
 	Start                 time.Time
 	End                   time.Time
 	All                   bool
+	IncludeContactNames   bool
 	TopicID               int
 	TopicTitle            string
 	DownloadMedia         bool

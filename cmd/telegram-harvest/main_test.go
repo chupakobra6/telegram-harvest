@@ -57,6 +57,26 @@ func TestViewsOwnSharedPathsAcrossProfiles(t *testing.T) {
 	}
 }
 
+func TestDoctorRespectsSessionRuntimeLock(t *testing.T) {
+	dir := t.TempDir()
+	session := filepath.Join(dir, "session.json")
+	alias := filepath.Join(dir, "alias.json")
+	mustWriteCLIFile(t, session, "fixture")
+	if err := os.Symlink(session, alias); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{SessionPath: alias, AppID: 1, AppHash: "fixture"}
+	if err := withRuntimeLock(config.Config{SessionPath: session}, func() error {
+		status, detail := doctorAuthStatus(cfg, nil)
+		if status != "check_failed" || !strings.Contains(detail, runlock.ErrAlreadyLocked.Error()) {
+			t.Fatalf("doctor should report a busy session, got %q %q", status, detail)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRejectedDumpDoesNotTruncateASRLog(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Config{Mode: config.ModeMain, StateDir: dir, SessionPath: filepath.Join(dir, "main.session")}
@@ -268,7 +288,7 @@ func TestRunAccountSyncRejectsRepoStateBeforeTelegramAccess(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "must be outside") {
 		t.Fatalf("account-sync error=%v", err)
 	}
-	if _, err := os.Stat(cfg.RuntimeLockPath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(mustRuntimeLockPath(t, cfg)); !os.IsNotExist(err) {
 		t.Fatalf("account-sync should not acquire runtime lock: %v", err)
 	}
 }
@@ -1173,6 +1193,15 @@ func tempFile(t *testing.T, name string) *os.File {
 		t.Fatalf("create temp file: %v", err)
 	}
 	return file
+}
+
+func mustRuntimeLockPath(t *testing.T, cfg config.Config) string {
+	t.Helper()
+	path, err := cfg.RuntimeLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func readTempFile(t *testing.T, file *os.File) string {

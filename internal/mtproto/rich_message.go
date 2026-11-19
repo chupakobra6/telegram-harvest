@@ -28,7 +28,8 @@ func (s *Session) prepareRichMessage(ctx context.Context, target resolvedTarget,
 				return err
 			}
 			for _, candidate := range historyMessages(result) {
-				if candidate, ok := candidate.(*tg.Message); ok && candidate.ID == msg.ID {
+				if candidate, ok := candidate.(*tg.Message); ok && candidate.ID == msg.ID &&
+					peerClassID(candidate.PeerID) == peerClassID(msg.PeerID) && peerType(candidate.PeerID) == peerType(msg.PeerID) {
 					if value, present := candidate.GetRichMessage(); present {
 						full = &value
 					}

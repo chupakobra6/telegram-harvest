@@ -1,4 +1,5 @@
 CLI := bin/telegram-harvest
+BINDIR ?= $(HOME)/.local/bin
 GO_FILES := $(shell find cmd internal -type f -name '*.go' | sort)
 GO_SOURCE_SET := $(shell shasum -a 256 $(GO_FILES) go.mod go.sum | shasum -a 256 | awk '{print $$1}')
 GO_SOURCE_STAMP := bin/.go-sources-$(GO_SOURCE_SET)
@@ -21,12 +22,13 @@ TRANSCRIPTION_FLAGS = \
 
 .PHONY: message-prepare message-show message-send message-draft
 
-.PHONY: help setup build build-source-changed fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish print-shop-publish direct-reply interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
+.PHONY: help setup build build-source-changed install fmt fmt-check test race check audit verify account-add account-list doctor login daily daily-catchup daily-download-media transcribe-file chats topics dump sync account-sync account-folders account-organize interview-topic-update interview-topic-publish print-shop-publish direct-reply interview-topic-replace-video download-media compact agent-view refresh-agent-view clean
 
 help:
 	@printf "Available commands:\\n"
 	@printf "  make setup   # download pinned Go dependencies\\n"
 	@printf "  make build   # build the reusable local CLI binary\\n"
+	@printf "  make install # link the built CLI in BINDIR (default: ~/.local/bin)\\n"
 	@printf "  make fmt     # gofmt project files\\n"
 	@printf "  make test    # go test ./...\\n"
 	@printf "  make race    # run tests with the race detector\\n"
@@ -69,6 +71,13 @@ setup:
 	go mod download
 
 build: $(CLI)
+
+install: $(CLI)
+	@mkdir -p "$(BINDIR)"
+	@target="$(abspath $(CLI))"; \
+	if [ "$$(readlink "$(BINDIR)/telegram-harvest")" != "$$target" ]; then \
+		ln -s "$$target" "$(BINDIR)/"; \
+	fi
 
 build-source-changed:
 

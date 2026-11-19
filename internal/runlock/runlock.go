@@ -1,12 +1,14 @@
 package runlock
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"syscall"
+	"time"
 )
 
 var ErrAlreadyLocked = errors.New("another telegram-harvest operation owns this resource")
@@ -35,6 +37,26 @@ func Acquire(path string) (*Handle, error) {
 		return nil, fmt.Errorf("acquire runtime lock: %w", err)
 	}
 	return &Handle{file: file, path: path}, nil
+}
+
+// AcquireContext waits only for ownership, before the caller performs any work.
+func AcquireContext(ctx context.Context, path string) (*Handle, error) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lock, err := Acquire(path)
+		if !errors.Is(err, ErrAlreadyLocked) {
+			return lock, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(err, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (h *Handle) Release() error {

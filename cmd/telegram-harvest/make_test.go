@@ -14,7 +14,10 @@ func TestMakeBuildTracksContentWithPreservedModificationTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, dir := range []string{"cmd", "internal", "fake-bin"} {
 		if err := os.Mkdir(filepath.Join(root, dir), 0o700); err != nil {
 			t.Fatal(err)
@@ -48,15 +51,15 @@ exit 1
 	}
 	logPath := filepath.Join(root, "build.log")
 	failurePath := filepath.Join(root, "fail-build")
-	command := func() *exec.Cmd {
-		cmd := exec.Command("make", "build")
+	command := func(args ...string) *exec.Cmd {
+		cmd := exec.Command("make", args...)
 		cmd.Dir = root
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(fakeGo)+string(os.PathListSeparator)+os.Getenv("PATH"), "HARVEST_TEST_BUILD_LOG="+logPath, "HARVEST_TEST_BUILD_FAILURE="+failurePath)
 		return cmd
 	}
 	build := func(wantCalls int) {
 		t.Helper()
-		if output, err := command().CombinedOutput(); err != nil {
+		if output, err := command("build").CombinedOutput(); err != nil {
 			t.Fatalf("make build: %v\n%s", err, output)
 		}
 		log, err := os.ReadFile(logPath)
@@ -108,7 +111,7 @@ exit 1
 	build(7)
 	write("cmd/main.go", "another source change\n")
 	write("fail-build", "fail\n")
-	if output, err := command().CombinedOutput(); err == nil {
+	if output, err := command("build").CombinedOutput(); err == nil {
 		t.Fatalf("failed compiler was accepted: %s", output)
 	}
 	if err := os.Remove(failurePath); err != nil {
@@ -116,4 +119,39 @@ exit 1
 	}
 	build(9)
 	build(9)
+
+	t.Run("install preserves existing paths", func(t *testing.T) {
+		dir := filepath.Join(root, "installed bin")
+		link := filepath.Join(dir, "telegram-harvest")
+		for range 2 {
+			if output, err := command("install", "BINDIR="+dir).CombinedOutput(); err != nil {
+				t.Fatalf("make install: %v\n%s", err, output)
+			}
+		}
+		if target, err := os.Readlink(link); err != nil || target != filepath.Join(root, "bin", "telegram-harvest") {
+			t.Fatalf("installed target = %q, err = %v", target, err)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		write(filepath.Join("installed bin", "telegram-harvest"), "existing command\n")
+		if output, err := command("install", "BINDIR="+dir).CombinedOutput(); err == nil {
+			t.Fatalf("make install unexpectedly accepted an existing file:\n%s", output)
+		}
+		if got := readCLIFile(t, link); got != "existing command\n" {
+			t.Fatalf("existing file changed: %q", got)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(link, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if output, err := command("install", "BINDIR="+dir).CombinedOutput(); err == nil {
+			t.Fatalf("make install unexpectedly accepted an existing directory:\n%s", output)
+		}
+		if entries, err := os.ReadDir(link); err != nil || len(entries) != 0 {
+			t.Fatalf("existing directory changed: %v, err = %v", entries, err)
+		}
+	})
 }

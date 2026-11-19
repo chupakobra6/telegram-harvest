@@ -68,7 +68,7 @@ func TestPrintShopPublishCLIRejectsScopeBeforeSession(t *testing.T) {
 			if err := runPrintShopPublish(cfg, nil, args, &strings.Builder{}); err == nil {
 				t.Fatal("invalid print-shop publish entered live runtime")
 			}
-			if _, err := os.Stat(cfg.RuntimeLockPath()); !os.IsNotExist(err) {
+			if _, err := os.Stat(mustRuntimeLockPath(t, cfg)); !os.IsNotExist(err) {
 				t.Fatal("rejected print-shop publish acquired session resources", err)
 			}
 		})

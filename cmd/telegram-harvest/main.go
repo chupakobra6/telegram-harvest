@@ -93,10 +93,18 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 
 	switch command {
 	case "print-config":
-		printConfig(cfg, stdout, includeDailyRuntime)
+		lockPath, err := cfg.RuntimeLockPath()
+		if err != nil {
+			return printError(stderr, 1, err)
+		}
+		printConfig(cfg, lockPath, stdout, includeDailyRuntime)
 		return 0
 	case "doctor":
-		printDoctor(cfg, stdout, client, includeDailyRuntime)
+		lockPath, err := cfg.RuntimeLockPath()
+		if err != nil {
+			return printError(stderr, 1, err)
+		}
+		printDoctor(cfg, lockPath, stdout, client, includeDailyRuntime)
 		return 0
 	case "login":
 		if err := withRuntimeLock(cfg, func() error {
@@ -164,6 +172,11 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 		return 0
 	case "dump":
 		if err := runDump(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "read-post":
+		if err := runReadPost(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
 		}
 		return 0
@@ -242,7 +255,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 func knownCommand(command string) bool {
 	switch command {
 	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
-		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "account-folders", "account-organize", "interview-topic-update", "interview-topic-publish", "print-shop-publish", "direct-reply", "interview-topic-replace-video", "compact", "agent-view", "transcribe-file", "send-saved", "message":
+		"me", "chats", "topics", "dump", "read-post", "download-media", "sync", "account-sync", "account-folders", "account-organize", "interview-topic-update", "interview-topic-publish", "print-shop-publish", "direct-reply", "interview-topic-replace-video", "compact", "agent-view", "transcribe-file", "send-saved", "message":
 		return true
 	default:
 		return false
@@ -328,7 +341,7 @@ func loadProfileConfig(profile string) (config.Config, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-harvest account add --name <name> --api-profile main|study")
 	fmt.Fprintln(out, "       telegram-harvest account list")
-	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|account-folders|account-organize|interview-topic-update|interview-topic-publish|print-shop-publish|direct-reply|interview-topic-replace-video|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved|message> [options]")
+	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|read-post|sync|account-sync|account-folders|account-organize|interview-topic-update|interview-topic-publish|print-shop-publish|direct-reply|interview-topic-replace-video|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved|message> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Harvesting operations are read-only; writes are limited to send-saved, account-organize --apply metadata, interview-topic-update --apply, interview-topic-publish --apply, print-shop-publish --apply, direct-reply --apply, interview-topic-replace-video --apply, and message send/draft --apply")
 	fmt.Fprintln(out, "  --profile main|study|<account-name>  # required account profile")
@@ -363,6 +376,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Low-level agent primitives:")
 	fmt.Fprintln(out, "  Relative input/output paths below are resolved inside the selected profile state directory")
+	fmt.Fprintln(out, "  read-post [--json] <t.me-message-url>  # one channel or supergroup message with text/caption and media metadata")
 	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media --media-sender-id ID] [--transcribe --retain-transcription-media --asr-log asr.jsonl]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
@@ -378,13 +392,13 @@ func printError(stderr io.Writer, code int, err error) int {
 	return code
 }
 
-func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
+func printConfig(cfg config.Config, lockPath string, out io.Writer, includeDailyRuntime bool) {
 	fmt.Fprintf(out, "profile=%s\n", cfg.ProfileName())
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
 	fmt.Fprintf(out, "session=%s\n", cfg.SessionPath)
-	fmt.Fprintf(out, "runtime_lock=%s\n", cfg.RuntimeLockPath())
+	fmt.Fprintf(out, "runtime_lock=%s\n", lockPath)
 	fmt.Fprintf(out, "state_dir=%s\n", cfg.StateDir)
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
 	fmt.Fprintf(out, "daily_additional_senders=%d\n", cfg.DailyAdditionalSenderCount())
@@ -394,14 +408,14 @@ func printConfig(cfg config.Config, out io.Writer, includeDailyRuntime bool) {
 	}
 }
 
-func printDoctor(cfg config.Config, out io.Writer, client *mtproto.Client, includeDailyRuntime bool) {
+func printDoctor(cfg config.Config, lockPath string, out io.Writer, client *mtproto.Client, includeDailyRuntime bool) {
 	fmt.Fprintf(out, "profile=%s\n", cfg.ProfileName())
 	fmt.Fprintf(out, "app_id_set=%t\n", cfg.AppID != 0)
 	fmt.Fprintf(out, "app_hash_set=%t\n", strings.TrimSpace(cfg.AppHash) != "")
 	fmt.Fprintf(out, "phone_set=%t\n", strings.TrimSpace(cfg.Phone) != "")
 	fmt.Fprintf(out, "session_path=%s\n", cfg.SessionPath)
 	fmt.Fprintf(out, "session_exists=%t\n", fileExists(cfg.SessionPath))
-	fmt.Fprintf(out, "runtime_lock_path=%s\n", cfg.RuntimeLockPath())
+	fmt.Fprintf(out, "runtime_lock_path=%s\n", lockPath)
 	fmt.Fprintf(out, "state_dir=%s\n", cfg.StateDir)
 	fmt.Fprintf(out, "state_dir_exists=%t\n", fileExists(cfg.StateDir))
 	fmt.Fprintf(out, "allowed_chats=%d\n", cfg.AllowedChatCount())
@@ -464,9 +478,14 @@ func doctorAuthStatus(cfg config.Config, client *mtproto.Client) (string, string
 	if !fileExists(cfg.SessionPath) {
 		return "reauth_required", fmt.Sprintf("session file is missing; run `%s`", cfg.LoginCommand())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	status, err := client.AuthStatus(ctx)
+	var status mtproto.AuthStatus
+	err := withRuntimeLock(cfg, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		var err error
+		status, err = client.AuthStatus(ctx)
+		return err
+	})
 	if err != nil {
 		return "check_failed", oneLine(err.Error())
 	}
@@ -493,7 +512,7 @@ func runChats(cfg config.Config, client *mtproto.Client, args []string, out io.W
 			return fmt.Errorf("--all cannot be combined with --limit")
 		}
 	}
-	return withRuntimeLock(cfg, func() error {
+	return withReadRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
 			chats, err := collectChats(ctx, cfg, session, *all, *limit, *query)
 			if err != nil {
@@ -568,7 +587,7 @@ func runTopics(cfg config.Config, client *mtproto.Client, args []string, out io.
 	if err := ensureAllowedChat(cfg, *chat); err != nil {
 		return err
 	}
-	return withRuntimeLock(cfg, func() error {
+	return withReadRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
 			topics, err := session.ListTopics(ctx, *chat, *limit, *query)
 			if err != nil {
@@ -613,7 +632,7 @@ func runMe(cfg config.Config, client *mtproto.Client, args []string, out io.Writ
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return withRuntimeLock(cfg, func() error {
+	return withReadRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
 			profile, err := session.SelfProfile(ctx)
 			if err != nil {
@@ -790,6 +809,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		Start:                start,
 		End:                  end,
 		All:                  *all,
+		IncludeContactNames:  true,
 		TopicID:              *topicID,
 		TopicTitle:           *topicTitle,
 		TranscribeMedia:      *transcribeMedia,
@@ -835,7 +855,7 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			return fmt.Errorf("dump output and ASR log must differ")
 		}
 	}
-	return withRuntimeLock(cfg, func() error {
+	return withReadRuntimeLock(cfg, func() error {
 		return withOutputLocks([]string{outputPath, asrPath}, func() (err error) {
 			if asrPath != "" {
 				asrEncoder, file, openErr := harvest.OpenJSONL(asrPath, false)
@@ -2024,7 +2044,7 @@ func runDownloadMedia(cfg config.Config, client *mtproto.Client, args []string, 
 	}
 	mediaDir := resolveOutputPath(cfg.StateDir, *outDir)
 	var result mtproto.DownloadMediaResult
-	if err := withRuntimeLock(cfg, func() error {
+	if err := withReadRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
 			var err error
 			result, err = session.DownloadMessageMedia(ctx, *chat, *messageID, mtproto.DownloadMediaOptions{
@@ -2208,7 +2228,27 @@ func ensureAllowedChat(cfg config.Config, chat string) error {
 }
 
 func withRuntimeLock(cfg config.Config, fn func() error) (err error) {
-	lock, err := runlock.Acquire(cfg.RuntimeLockPath())
+	lockPath, err := cfg.RuntimeLockPath()
+	if err != nil {
+		return err
+	}
+	lock, err := runlock.Acquire(lockPath)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lock.Release()) }()
+	return fn()
+}
+
+// Short interactive reads often overlap a collector using the same account.
+func withReadRuntimeLock(cfg config.Config, fn func() error) (err error) {
+	lockPath, err := cfg.RuntimeLockPath()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	lock, err := runlock.AcquireContext(ctx, lockPath)
 	if err != nil {
 		return err
 	}
@@ -2670,9 +2710,18 @@ func oneLine(value string) string {
 }
 
 func detectProjectRoot() string {
-	if _, file, _, ok := runtime.Caller(0); ok {
+	if executable, err := os.Executable(); err == nil {
+		if path, err := filepath.EvalSymlinks(executable); err == nil {
+			bin := filepath.Dir(path)
+			root := filepath.Dir(bin)
+			if filepath.Base(path) == "telegram-harvest" && filepath.Base(bin) == "bin" && isProjectRoot(root) {
+				return root
+			}
+		}
+	}
+	if _, file, _, ok := runtime.Caller(0); ok && filepath.IsAbs(file) {
 		root := filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
-		if fileExists(filepath.Join(root, "go.mod")) {
+		if isProjectRoot(root) {
 			return root
 		}
 	}
@@ -2683,21 +2732,18 @@ func detectProjectRoot() string {
 	return cwd
 }
 
+func isProjectRoot(path string) bool {
+	data, err := os.ReadFile(filepath.Join(path, "go.mod"))
+	if err != nil {
+		return false
+	}
+	firstLine, _, _ := strings.Cut(string(data), "\n")
+	fields := strings.Fields(firstLine)
+	return len(fields) == 2 && fields[0] == "module" && fields[1] == "github.com/chupakobra6/telegram-harvest"
+}
+
 func loadToolDotEnv(projectRoot string) error {
-	cwd, err := os.Getwd()
-	if err == nil {
-		if err := config.LoadDotEnv(filepath.Join(cwd, ".env")); err != nil {
-			return err
-		}
-	}
-	if projectRoot == "" {
-		return nil
-	}
-	rootEnv := filepath.Join(projectRoot, ".env")
-	if err == nil && samePath(cwd, projectRoot) {
-		return nil
-	}
-	return config.LoadDotEnv(rootEnv)
+	return config.LoadDotEnv(filepath.Join(projectRoot, ".env"))
 }
 
 func fileExists(path string) bool {
