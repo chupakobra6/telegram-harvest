@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -119,6 +121,11 @@ type savedLocalFileWire struct {
 	sentName     string
 	sends        int
 	mutate       func(*tg.Message)
+	nativeVideo  bool
+	files        map[int64][]byte
+	sentMedia    *tg.InputMediaUploadedDocument
+	sendErr      error
+	afterUpload  func()
 }
 
 func (f *savedLocalFileWire) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
@@ -132,6 +139,13 @@ func (f *savedLocalFileWire) Invoke(_ context.Context, input bin.Encoder, output
 		}
 	case *tg.UploadSaveFilePartRequest:
 		f.upload = append(f.upload, req.Bytes...)
+		if f.files == nil {
+			f.files = map[int64][]byte{}
+		}
+		f.files[req.FileID] = append(f.files[req.FileID], req.Bytes...)
+		if f.afterUpload != nil {
+			f.afterUpload()
+		}
 		output.(*tg.BoolBox).Bool = &tg.BoolTrue{}
 	case *tg.MessagesSendMediaRequest:
 		f.sends++
@@ -147,14 +161,21 @@ func (f *savedLocalFileWire) Invoke(_ context.Context, input bin.Encoder, output
 			return fmt.Errorf("unexpected recipient %T", wire.Peer)
 		}
 		media, ok := wire.Media.(*tg.InputMediaUploadedDocument)
-		if !ok || !media.ForceFile {
-			return fmt.Errorf("expected plain uploaded document, got %T", wire.Media)
+		if !ok || media.ForceFile == f.nativeVideo {
+			return fmt.Errorf("unexpected uploaded document kind, got %T", wire.Media)
 		}
+		f.sentMedia = media
+		if f.sendErr != nil {
+			return f.sendErr
+		}
+		var fileID int64
 		switch file := media.File.(type) {
 		case *tg.InputFile:
 			f.uploadedName = file.Name
+			fileID = file.ID
 		case *tg.InputFileBig:
 			f.uploadedName = file.Name
+			fileID = file.ID
 		default:
 			return fmt.Errorf("unexpected uploaded file %T", media.File)
 		}
@@ -173,7 +194,7 @@ func (f *savedLocalFileWire) Invoke(_ context.Context, input bin.Encoder, output
 		}
 		readbackMedia := &tg.MessageMediaDocument{}
 		readbackMedia.SetDocument(&tg.Document{
-			ID: 456, MimeType: media.MimeType, Size: int64(len(f.upload)), Attributes: attributes,
+			ID: 456, MimeType: media.MimeType, Size: int64(len(f.files[fileID])), Attributes: attributes,
 		})
 		f.message = &tg.Message{
 			ID: 123, PeerID: &tg.PeerUser{UserID: 42}, Message: wire.Message, Media: readbackMedia,
@@ -188,6 +209,179 @@ func (f *savedLocalFileWire) Invoke(_ context.Context, input bin.Encoder, output
 		return fmt.Errorf("unexpected RPC %T", input)
 	}
 	return nil
+}
+
+func TestSendSavedLocalVideoPreparesPreviewAndPreservesBytes(t *testing.T) {
+	video := localReplacementVideo(t)
+	opts, metadata, err := normalizeSendSavedOptions(SendSavedOptions{FilePath: video.Path, Caption: "  Доклад\n00:00 Начало  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, dir, err := prepareSavedLocalVideo(context.Background(), metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if !reflect.DeepEqual(*f, video) {
+		t.Fatalf("prepared metadata = %+v, want %+v", f, video)
+	}
+	preview, err := os.Open(filepath.Join(dir, "preview.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preview.Close()
+	config, format, err := image.DecodeConfig(preview)
+	if err != nil || format != "jpeg" || config.Width > 320 || config.Height > 320 {
+		t.Fatalf("preview = %+v, %s, %v", config, format, err)
+	}
+	for _, scenario := range []string{"missing-preview", "unknown-outcome", "changed-during-upload"} {
+		t.Run(scenario, func(t *testing.T) {
+			wire := &savedLocalFileWire{nativeVideo: true}
+			if scenario == "unknown-outcome" {
+				wire.sendErr = errors.New("connection lost")
+			}
+			if scenario == "changed-during-upload" {
+				original, err := os.ReadFile(video.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer os.WriteFile(video.Path, original, 0o600)
+				wire.afterUpload = func() {
+					changed := append([]byte(nil), original...)
+					changed[len(changed)-1] ^= 1
+					if err := os.WriteFile(video.Path, changed, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			session := &Session{raw: tg.NewClient(wire)}
+			result, err := session.sendSaved(context.Background(), opts, metadata)
+			if err == nil || result.Verified {
+				t.Fatalf("unverified video accepted: %+v, %v", result, err)
+			}
+			if scenario == "changed-during-upload" {
+				if wire.sends != 0 || !strings.Contains(err.Error(), "SHA-256 mismatch") {
+					t.Fatalf("changed bytes dispatched: sends=%d err=%v", wire.sends, err)
+				}
+				return
+			}
+			if wire.sends != 1 || !strings.Contains(err.Error(), "do not retry blindly") {
+				t.Fatalf("sends=%d err=%v", wire.sends, err)
+			}
+			media := wire.sentMedia
+			if media.Thumb == nil || media.MimeType != "video/mp4" || media.NosoundVideo {
+				t.Fatalf("native video media = %+v", media)
+			}
+			attrs := media.Attributes
+			if len(attrs) != 2 || attrs[0].(*tg.DocumentAttributeFilename).FileName != video.Filename {
+				t.Fatalf("attributes = %+v", attrs)
+			}
+			v := attrs[1].(*tg.DocumentAttributeVideo)
+			if v.Duration != video.Duration || v.W != video.Width || v.H != video.Height || v.Nosound || !v.SupportsStreaming || v.RoundMessage {
+				t.Fatalf("video attributes = %+v", v)
+			}
+			data, readErr := os.ReadFile(video.Path)
+			if readErr != nil || !bytes.Equal(wire.files[media.File.(*tg.InputFile).ID], data) {
+				t.Fatalf("uploaded video bytes changed: %v", readErr)
+			}
+			if scenario == "missing-preview" && (!strings.Contains(err.Error(), "preview readback failed") || wire.message.Message != "Доклад\n00:00 Начало") {
+				t.Fatalf("caption/thumbnail guard: %+v, %v", wire.message, err)
+			}
+		})
+	}
+}
+
+func TestSendSavedLocalVideoRejectsInvalidMP4BeforeUpload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.mp4")
+	if err := os.WriteFile(path, []byte("not a video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, metadata, err := normalizeSendSavedOptions(SendSavedOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := &savedLocalFileWire{nativeVideo: true}
+	_, err = (&Session{raw: tg.NewClient(wire)}).sendSaved(context.Background(), opts, metadata)
+	if err == nil || len(wire.upload) != 0 || wire.sends != 0 {
+		t.Fatalf("invalid MP4 dispatched: upload=%d sends=%d err=%v", len(wire.upload), wire.sends, err)
+	}
+}
+
+func TestSendSavedLocalVideoSilentAndAudioOnly(t *testing.T) {
+	video := localReplacementVideo(t)
+	for _, audioOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("audio-only=%t", audioOnly), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "fixture.MP4")
+			remove := "-an"
+			if audioOnly {
+				remove = "-vn"
+			}
+			if b, err := exec.Command("ffmpeg", "-v", "error", "-i", video.Path, remove, "-c", "copy", "-y", path).CombinedOutput(); err != nil {
+				t.Fatalf("remux fixture: %s: %v", b, err)
+			}
+			opts, metadata, err := normalizeSendSavedOptions(SendSavedOptions{FilePath: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire := &savedLocalFileWire{nativeVideo: true, sendErr: errors.New("connection lost")}
+			result, err := (&Session{raw: tg.NewClient(wire)}).sendSaved(context.Background(), opts, metadata)
+			if err == nil || result.Verified {
+				t.Fatalf("unexpected verification: %+v, %v", result, err)
+			}
+			if audioOnly {
+				if wire.sends != 0 || len(wire.upload) != 0 || !strings.Contains(err.Error(), "must contain a video stream") {
+					t.Fatalf("audio-only MP4 dispatched: sends=%d err=%v", wire.sends, err)
+				}
+				return
+			}
+			if wire.sends != 1 || !wire.sentMedia.NosoundVideo || !wire.sentMedia.Attributes[1].(*tg.DocumentAttributeVideo).Nosound {
+				t.Fatalf("silent video metadata: media=%+v sends=%d err=%v", wire.sentMedia, wire.sends, err)
+			}
+		})
+	}
+}
+
+func TestSendSavedLocalVideoPreviewLimitedRangeHEVC(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " unavailable")
+		}
+	}
+	path := filepath.Join(t.TempDir(), "limited-hevc.mp4")
+	args := []string{"-v", "error", "-f", "lavfi", "-i", "color=size=128x72:rate=4:duration=1", "-an",
+		"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1:log-level=error",
+		"-pix_fmt", "yuv420p", "-color_range", "tv", "-tag:v", "hvc1", "-movflags", "+faststart", "-y", path}
+	if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
+		t.Fatalf("HEVC fixture: %s: %v", b, err)
+	}
+	stream, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,color_range", "-of", "default=nw=1", path).Output()
+	if err != nil || !strings.Contains(string(stream), "codec_name=hevc") || !strings.Contains(string(stream), "color_range=tv") {
+		t.Fatalf("fixture is not limited-range HEVC: %s: %v", stream, err)
+	}
+	_, metadata, err := normalizeSendSavedOptions(SendSavedOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, dir, err := prepareSavedLocalVideo(context.Background(), metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if f.Width != 128 || f.Height != 72 || f.HasAudio || f.Duration != 1 {
+		t.Fatalf("HEVC metadata = %+v", f)
+	}
+	preview, err := os.Open(filepath.Join(dir, "preview.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preview.Close()
+	img, format, err := image.Decode(preview)
+	if err != nil || format != "jpeg" || img.Bounds().Dx() <= 0 || img.Bounds().Dy() <= 0 {
+		t.Fatalf("generated HEVC preview is not a readable JPEG: %s: %v", format, err)
+	}
+	if err := verifyPublishFile(context.Background(), f); err != nil {
+		t.Fatalf("HEVC source bytes changed during preview generation: %v", err)
+	}
 }
 
 func TestSendSavedLocalFileUsesExactOutgoingFilename(t *testing.T) {

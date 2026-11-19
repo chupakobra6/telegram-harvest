@@ -13,7 +13,7 @@ import (
 
 func TestAccountOrganizationRejectsWrongModeAndManifestBeforeRuntime(t *testing.T) {
 	dir := t.TempDir()
-	manifest := mtproto.AccountOrganizeManifest{Profile: "work", AccountID: 99, FolderName: mtproto.CompletedWorkFolder, Peers: []mtproto.AccountOrganizePeer{{UserID: 11, LastMessageID: 10}}}
+	manifest := mtproto.AccountOrganizeManifest{Action: "close", Profile: "work", AccountID: 99, FolderName: mtproto.CompletedWorkFolder, Peers: []mtproto.AccountOrganizePeer{{UserID: 11, LastMessageID: 10}}}
 	path := filepath.Join(dir, "review.json")
 	encoded, _ := json.Marshal(manifest)
 	if err := os.WriteFile(path, encoded, 0o600); err != nil {

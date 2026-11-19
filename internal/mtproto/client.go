@@ -311,6 +311,12 @@ func (s *Session) ListAllDialogs(ctx context.Context) ([]harvest.Chat, error) {
 }
 
 func (s *Session) loadAllDialogsFolder(ctx context.Context, folderID int) ([]harvest.Chat, error) {
+	return s.loadDialogsFolderUntil(ctx, folderID, "")
+}
+
+// An exact typed peer needs no evidence from later pages once it is found.
+// An empty target retains the full-folder completeness contract.
+func (s *Session) loadDialogsFolderUntil(ctx context.Context, folderID int, target string) ([]harvest.Chat, error) {
 	const pageSize = defaultDialogBatchSize
 	all := make([]harvest.Chat, 0, pageSize)
 	offsetPeer := tg.InputPeerClass(&tg.InputPeerEmpty{})
@@ -363,6 +369,9 @@ func (s *Session) loadAllDialogsFolder(ctx context.Context, folderID int) ([]har
 			}
 			all = append(all, chat)
 			s.cacheTarget(chat, inputPeer)
+			if target != "" && harvest.AccountChatKey(chat) == target {
+				return all, nil
+			}
 		}
 		messages := modified.GetMessages()
 		if len(messages) == 0 {
@@ -1661,11 +1670,13 @@ func (s *Session) resolveTarget(ctx context.Context, raw string) (resolvedTarget
 	}
 	if peerType, _, hasType := strings.Cut(raw, ":"); hasType &&
 		(peerType == "user" || peerType == "basic_group" || peerType == "supergroup" || peerType == "channel") {
-		if _, err := s.ListAllDialogs(ctx); err != nil {
-			return resolvedTarget{}, err
-		}
-		if cached, ok := s.dialogCache[raw]; ok {
-			return cached, nil
+		for _, folderID := range []int{0, 1} {
+			if _, err := s.loadDialogsFolderUntil(ctx, folderID, raw); err != nil {
+				return resolvedTarget{}, err
+			}
+			if cached, ok := s.dialogCache[raw]; ok {
+				return cached, nil
+			}
 		}
 		return resolvedTarget{}, fmt.Errorf("peer %q was not found in account dialogs", raw)
 	}
@@ -2202,14 +2213,11 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 		attachments := extractAttachments(msg.Media)
 		links := mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media))
 		if rich, present := msg.GetRichMessage(); present {
-			text, richLinks, err := richMessageContent(rich)
+			text, richLinks, err := richMessageBody(msg.Message, rich)
 			if err != nil {
 				return harvest.MessageRecord{}, false
 			}
-			if body != "" && !strings.Contains(text, body) {
-				text = body + "\n\n" + text
-			}
-			body = strings.TrimSpace(text)
+			body = text
 			links = mergeLinks(links, richLinks)
 			media, err := richMessageMedia(rich)
 			if err != nil {

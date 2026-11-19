@@ -60,6 +60,9 @@ func (s *Session) planRecordMediaDownloads(
 		return
 	}
 	ensureDailyAttachments(msgClass, record)
+	if opts.MediaSenderID != 0 && record.Sender.ID != opts.MediaSenderID {
+		return
+	}
 	if len(record.Attachments) == 0 {
 		return
 	}
@@ -279,6 +282,8 @@ func (d *savedMediaDownload) publish() {
 		}
 		if err := publishMediaFileAtomic(d.sourcePath, target.path); err != nil {
 			target.attachment.DownloadError = fmt.Sprintf("publish downloaded media: %v", err)
+		} else {
+			target.attachment.LocalPath = target.path
 		}
 	}
 }
@@ -299,6 +304,41 @@ func (s *Session) planAttachmentTranscription(
 	if !transcriptMediaKind(attachment.Kind) {
 		return
 	}
+	var retainedName string
+	if opts.KeepTranscribedMedia {
+		identity := mediaCacheIdentityHash(transcriptCacheKey(*record, index, *attachment))
+		retainedName = identity[:16] + "-" + fileName
+	}
+	planOriginal := func() {
+		if retainedName == "" || mediaSizeLimitExceeded(record, index, opts) {
+			return
+		}
+		target := mediaTargetPath(opts.MediaDir, *record, index, retainedName)
+		info, err := os.Lstat(target)
+		if err == nil {
+			if !info.Mode().IsRegular() || info.Size() == 0 || (attachment.Size > 0 && info.Size() != attachment.Size) {
+				attachment.DownloadError = "existing transcription media differs from the expected file"
+			} else {
+				attachment.LocalPath = target
+			}
+			return
+		}
+		if !os.IsNotExist(err) {
+			attachment.DownloadError = fmt.Sprintf("inspect retained transcription media: %v", err)
+			return
+		}
+		tempPath, err := createTemporaryMediaPath(opts.MediaDir, fileName)
+		if err != nil {
+			attachment.DownloadError = fmt.Sprintf("prepare temporary media: %v", err)
+			return
+		}
+		download := savedMediaDownload{
+			session: s, location: location, expectedBytes: attachment.Size,
+			sourcePath: tempPath, removeSource: true,
+			targets: []savedMediaTarget{{attachment: attachment, path: target}}, downloadTiming: opts.DownloadTiming,
+		}
+		plan.add(download.task())
+	}
 	transcribeOpts := transcribeOptions(opts)
 	transcriptPath := transcriptCachePath(opts.TranscriptDir, transcribeOpts.CacheIdentity(), *record, index, *attachment)
 	attachment.TranscriptPath = transcriptPath
@@ -307,6 +347,7 @@ func (s *Session) planAttachmentTranscription(
 		attachment.TranscriptCached = true
 		touchTranscriptFile(transcriptPath)
 		emitASRLog(opts, asrLogEvent("cache_hit", "", "", *record, index, *attachment))
+		planOriginal()
 		return
 	}
 	if !opts.TranscribeMedia {
@@ -317,6 +358,9 @@ func (s *Session) planAttachmentTranscription(
 	if ok, reason := genericVideoTranscriptAllowed(*attachment, opts); !ok {
 		attachment.TranscriptError = reason
 		emitASRLog(opts, asrLogEvent("skip", "policy", reason, *record, index, *attachment))
+		if attachment.NoAudio {
+			planOriginal()
+		}
 		return
 	}
 	if mediaSizeLimitExceeded(record, index, opts) {
@@ -360,6 +404,14 @@ func (s *Session) planAttachmentTranscription(
 		},
 		Fail: func(err error) { transferErr = err },
 		After: func() {
+			if transferErr == nil && retainedName != "" {
+				target := mediaTargetPath(opts.MediaDir, *record, index, retainedName)
+				if err := publishMediaFileAtomic(tempPath, target); err != nil {
+					transferErr = fmt.Errorf("retain transcription media: %w", err)
+				} else {
+					attachment.LocalPath = target
+				}
+			}
 			finishTranscriptionDownload(record, index, attachment, pipeline, opts, transcribeOpts, transcriptPath, tempPath, downloadSeconds, startEvent, transferErr)
 		},
 		Cancel: func(err error) {

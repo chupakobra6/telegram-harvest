@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -196,6 +197,21 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 			return printError(stderr, 1, err)
 		}
 		return 0
+	case "direct-reply":
+		if err := runDirectReply(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "message":
+		if err := runMessage(cfg, client, args[1:], stdout, stderr); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
+	case "print-shop-publish":
+		if err := runPrintShopPublish(cfg, client, args[1:], stdout); err != nil {
+			return printError(stderr, 1, err)
+		}
+		return 0
 	case "interview-topic-publish":
 		if err := runInterviewTopicPublish(cfg, client, args[1:], stdout); err != nil {
 			return printError(stderr, 1, err)
@@ -226,7 +242,7 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 func knownCommand(command string) bool {
 	switch command {
 	case "print-config", "doctor", "login", "daily", "daily-catchup", "daily-download-media",
-		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "account-folders", "account-organize", "interview-topic-update", "interview-topic-publish", "interview-topic-replace-video", "compact", "agent-view", "transcribe-file", "send-saved":
+		"me", "chats", "topics", "dump", "download-media", "sync", "account-sync", "account-folders", "account-organize", "interview-topic-update", "interview-topic-publish", "print-shop-publish", "direct-reply", "interview-topic-replace-video", "compact", "agent-view", "transcribe-file", "send-saved", "message":
 		return true
 	default:
 		return false
@@ -312,9 +328,9 @@ func loadProfileConfig(profile string) (config.Config, error) {
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "usage: telegram-harvest account add --name <name> --api-profile main|study")
 	fmt.Fprintln(out, "       telegram-harvest account list")
-	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|account-folders|account-organize|interview-topic-update|interview-topic-publish|interview-topic-replace-video|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved> [options]")
+	fmt.Fprintln(out, "       telegram-harvest --profile main|study|<account-name> <doctor|print-config|login|me|chats|topics|dump|sync|account-sync|account-folders|account-organize|interview-topic-update|interview-topic-publish|print-shop-publish|direct-reply|interview-topic-replace-video|download-media|compact|agent-view|daily|daily-catchup|daily-download-media|transcribe-file|send-saved|message> [options]")
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Harvesting operations are read-only; writes are limited to send-saved, account-organize --apply metadata, interview-topic-update --apply, interview-topic-publish --apply, and interview-topic-replace-video --apply")
+	fmt.Fprintln(out, "Harvesting operations are read-only; writes are limited to send-saved, account-organize --apply metadata, interview-topic-update --apply, interview-topic-publish --apply, print-shop-publish --apply, direct-reply --apply, interview-topic-replace-video --apply, and message send/draft --apply")
 	fmt.Fprintln(out, "  --profile main|study|<account-name>  # required account profile")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Primary daily workflow:")
@@ -333,8 +349,12 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  topics --chat <allowed-id-or-username> --limit 200 [--json]")
 	fmt.Fprintln(out, "  account-sync  # registered accounts only; resume/update all available dialogs")
 	fmt.Fprintln(out, "  account-folders  # registered bound account; read existing folder filters as private JSON")
-	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; only Отработка membership + archive")
+	fmt.Fprintln(out, "  account-organize --manifest <private.json> [--apply]  # dry-run by default; Отработка membership + archive or restore")
 	fmt.Fprintln(out, "  interview-topic-replace-video --manifest <private.json> [--apply]  # audio 2362/2365 -> video, same message IDs")
+	fmt.Fprintln(out, "  direct-reply --manifest /absolute/private.json [--apply]  # main only; authorized text, XLSX or ZIP reply to exact user message")
+	fmt.Fprintln(out, "    Add --details to direct-reply or print-shop-publish to include full text in apply receipts.")
+	printMessageUsage(out)
+	fmt.Fprintln(out, "  print-shop-publish --manifest <private.json> [--apply]  # main only; text/PDF/MP4 in fixed Igor-Arina print-shop group")
 	fmt.Fprintln(out, "  interview-topic-publish --manifest <private.json> [--apply]  # main only; new text/media in fixed interview topic")
 	fmt.Fprintln(out, "  interview-topic-update --manifest <private.json> [--apply]  # main only; own edits and backed-up ZIP removal in fixed interview topic")
 	fmt.Fprintln(out, "  send-saved --text <message> [--json]  # @Pheik13 main session -> InputPeerSelf only")
@@ -343,7 +363,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Low-level agent primitives:")
 	fmt.Fprintln(out, "  Relative input/output paths below are resolved inside the selected profile state directory")
-	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media] [--transcribe --asr-log asr.jsonl]")
+	fmt.Fprintln(out, "  dump --chat <allowed-id-or-username> --from 2026-06-11 --to 2026-06-22 --all --out hse-main.jsonl [--download-media --media-dir media --media-sender-id ID] [--transcribe --retain-transcription-media --asr-log asr.jsonl]")
 	fmt.Fprintln(out, "  sync --chat <allowed-id-or-username> --name hse-main [--all --reset] [--merged-out messages.jsonl] [--download-media --media-dir media]")
 	fmt.Fprintln(out, "  download-media --chat <allowed-id-or-username> --message-id 123 --index 1 [--out-dir media-manual]")
 	fmt.Fprintln(out, "  compact --in messages.jsonl --out messages.toon [--since 2026-05-01] [--limit 500]")
@@ -715,7 +735,17 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	topicTitle := fs.String("topic-title", "", "optional topic title stored in output metadata")
 	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while exporting")
 	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
-	transcribeMedia := fs.Bool("transcribe", false, "transcribe voice/audio/video media; cached transcripts skip media download")
+	var mediaSenderID int64
+	fs.Func("media-sender-id", "process attachments only from this sender ID while exporting all messages", func(value string) error {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			return fmt.Errorf("sender ID must be positive")
+		}
+		mediaSenderID = id
+		return nil
+	})
+	transcribeMedia := fs.Bool("transcribe", false, "transcribe voice/audio/video media and reuse cached transcripts")
+	retainTranscriptionMedia := fs.Bool("retain-transcription-media", false, "keep the original transcription media in media-dir")
 	transcribeVideo := fs.String("transcribe-video", harvest.VideoTranscribePhone, "generic video transcription mode: phone, all, or off")
 	whisperCommand := fs.String("whisper-command", defaults.WhisperCommand, "whisper.cpp Metal server command")
 	whisperModelPath := fs.String("whisper-model", defaults.WhisperModelPath, "whisper.cpp large-v3-turbo q5_0 model file")
@@ -746,22 +776,30 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 	if *transcribeMedia && cfg.Mode != config.ModeMain {
 		return fmt.Errorf("dump --transcribe is supported only for profile main")
 	}
+	if *retainTranscriptionMedia && (!*downloadMedia || !*transcribeMedia) {
+		return fmt.Errorf("--retain-transcription-media requires --download-media and --transcribe")
+	}
+	if mediaSenderID > 0 && !*downloadMedia {
+		return fmt.Errorf("--media-sender-id requires --download-media")
+	}
 	outputPath := resolveOutputPath(cfg.StateDir, *output)
 	history := harvest.HistoryOptions{
-		Limit:               *limit,
-		BatchSize:           config.DefaultBatchSize,
-		MinID:               *sinceID,
-		Start:               start,
-		End:                 end,
-		All:                 *all,
-		TopicID:             *topicID,
-		TopicTitle:          *topicTitle,
-		TranscribeMedia:     *transcribeMedia,
-		VideoTranscribeMode: *transcribeVideo,
-		WhisperCommand:      *whisperCommand,
-		WhisperModelPath:    *whisperModelPath,
-		WhisperGateFilePath: *whisperGateFilePath,
-		FFmpegCommand:       *ffmpegCommand,
+		Limit:                *limit,
+		BatchSize:            config.DefaultBatchSize,
+		MinID:                *sinceID,
+		Start:                start,
+		End:                  end,
+		All:                  *all,
+		TopicID:              *topicID,
+		TopicTitle:           *topicTitle,
+		TranscribeMedia:      *transcribeMedia,
+		KeepTranscribedMedia: *retainTranscriptionMedia,
+		MediaSenderID:        mediaSenderID,
+		VideoTranscribeMode:  *transcribeVideo,
+		WhisperCommand:       *whisperCommand,
+		WhisperModelPath:     *whisperModelPath,
+		WhisperGateFilePath:  *whisperGateFilePath,
+		FFmpegCommand:        *ffmpegCommand,
 	}
 	if *downloadMedia {
 		history.DownloadMedia = true
@@ -837,94 +875,29 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 }
 
 func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	fs.SetOutput(out)
-	chat := fs.String("chat", "", "chat id or @username")
-	name := fs.String("name", "", "local stream name")
-	refreshFrom := fs.String("refresh-from", "", "reconcile new, missing and edited messages from YYYY-MM-DD (without resetting history)")
-	mergedOut := fs.String("merged-out", "", "optional append-only merged JSONL output, relative to state dir unless absolute")
-	all := fs.Bool("all", false, "sync all available history")
-	reset := fs.Bool("reset", false, "truncate this stream and reset its state before syncing")
-	resetMerged := fs.Bool("reset-merged", false, "truncate merged output before writing")
-	topicID := fs.Int("topic", 0, "forum topic id to sync via replies")
-	topicTitle := fs.String("topic-title", "", "optional topic title stored in state metadata")
-	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while syncing")
-	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
-	mediaLimits := addMediaLimitFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	opts, err := parseSyncOptions(cfg, args, out)
+	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(*chat) == "" {
-		return fmt.Errorf("--chat is required")
-	}
-	if err := ensureAllowedChat(cfg, *chat); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*name) == "" {
-		return fmt.Errorf("--name is required")
-	}
-	var refreshStart time.Time
-	if *refreshFrom != "" {
-		if *all || *reset || *resetMerged {
-			return fmt.Errorf("--refresh-from cannot be combined with --all or reset flags")
-		}
-		var err error
-		refreshStart, err = time.ParseInLocation("2006-01-02", *refreshFrom, time.FixedZone("Europe/Moscow", 3*60*60))
-		if err != nil {
-			return fmt.Errorf("--refresh-from: %w", err)
-		}
-	}
-	streamPath := filepath.Join(cfg.StateDir, *name+".jsonl")
-	statePath := filepath.Join(cfg.StateDir, *name+".state.json")
-	mergedPath := ""
-	if strings.TrimSpace(*mergedOut) != "" {
-		mergedPath = resolveOutputPath(cfg.StateDir, *mergedOut)
-	}
-	history := harvest.HistoryOptions{
-		BatchSize:  config.DefaultBatchSize,
-		All:        *all,
-		TopicID:    *topicID,
-		TopicTitle: *topicTitle,
-		Start:      refreshStart,
-	}
-	if *downloadMedia {
-		history.DownloadMedia = true
-		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
-		applyMediaLimits(&history, mediaLimits)
-		history.ManualDownloadCommand = "telegram-harvest download-media"
-	}
-	if *all {
-		history.Limit = 0
-		history.MaxBatches = 0
+	opts.Progress = func(progress harvest.SyncProgress) {
+		printSyncProgress(out, progress)
 	}
 	return withRuntimeLock(cfg, func() error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
-			result, err := harvest.RunSync(ctx, session, harvest.SyncOptions{
-				Chat:        *chat,
-				StreamPath:  streamPath,
-				StatePath:   statePath,
-				MergedPath:  mergedPath,
-				History:     history,
-				Reset:       *reset,
-				ResetMerged: *resetMerged,
-				Progress: func(progress harvest.SyncProgress) {
-					printSyncProgress(out, progress)
-				},
-			})
+			result, err := harvest.RunSync(ctx, session, opts)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					printInterruptedSync(out, statePath)
-					return err
+					printInterruptedSync(out, opts.StatePath)
 				}
 				return err
 			}
 			mode := "incremental"
-			if *all {
+			if opts.History.All {
 				mode = "all"
 			}
-			if *all && result.State.Backfill != nil {
+			if opts.History.All && result.State.Backfill != nil {
 				fmt.Fprintf(out, "mode=%s complete=%t synced=%d total_records=%d stream=%s state=%s last_id=%d next_offset_id=%d batches=%d flood_waits=%d\n",
 					mode,
 					result.State.Backfill.Complete,
@@ -951,6 +924,78 @@ func runSync(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 			return nil
 		})
 	})
+}
+
+func parseSyncOptions(cfg config.Config, args []string, out io.Writer) (harvest.SyncOptions, error) {
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	fs.SetOutput(out)
+	chat := fs.String("chat", "", "chat id or @username")
+	name := fs.String("name", "", "local stream name")
+	refreshFrom := fs.String("refresh-from", "", "reconcile new, missing and edited messages from YYYY-MM-DD (without resetting history)")
+	mergedOut := fs.String("merged-out", "", "optional append-only merged JSONL output, relative to state dir unless absolute")
+	all := fs.Bool("all", false, "sync all available history")
+	reset := fs.Bool("reset", false, "truncate this stream and reset its state before syncing")
+	resetMerged := fs.Bool("reset-merged", false, "truncate merged output before writing")
+	topicID := fs.Int("topic", 0, "forum topic id to sync via replies")
+	topicTitle := fs.String("topic-title", "", "optional topic title stored in state metadata")
+	downloadMedia := fs.Bool("download-media", false, "download supported photo/document attachments while syncing")
+	mediaDir := fs.String("media-dir", "media", "media output directory, relative to state dir unless absolute")
+	mediaLimits := addMediaLimitFlags(fs)
+	transcription := addSyncTranscriptionFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return harvest.SyncOptions{}, err
+	}
+	if strings.TrimSpace(*chat) == "" {
+		return harvest.SyncOptions{}, fmt.Errorf("--chat is required")
+	}
+	if err := ensureAllowedChat(cfg, *chat); err != nil {
+		return harvest.SyncOptions{}, err
+	}
+	if strings.TrimSpace(*name) == "" {
+		return harvest.SyncOptions{}, fmt.Errorf("--name is required")
+	}
+	var refreshStart time.Time
+	if *refreshFrom != "" {
+		if *all || *reset || *resetMerged {
+			return harvest.SyncOptions{}, fmt.Errorf("--refresh-from cannot be combined with --all or reset flags")
+		}
+		var err error
+		refreshStart, err = time.ParseInLocation("2006-01-02", *refreshFrom, time.FixedZone("Europe/Moscow", 3*60*60))
+		if err != nil {
+			return harvest.SyncOptions{}, fmt.Errorf("--refresh-from: %w", err)
+		}
+	}
+	streamPath := filepath.Join(cfg.StateDir, *name+".jsonl")
+	statePath := filepath.Join(cfg.StateDir, *name+".state.json")
+	mergedPath := ""
+	if strings.TrimSpace(*mergedOut) != "" {
+		mergedPath = resolveOutputPath(cfg.StateDir, *mergedOut)
+	}
+	history := harvest.HistoryOptions{
+		BatchSize:  config.DefaultBatchSize,
+		All:        *all,
+		TopicID:    *topicID,
+		TopicTitle: *topicTitle,
+		Start:      refreshStart,
+	}
+	if *downloadMedia {
+		history.DownloadMedia = true
+		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
+		applyMediaLimits(&history, mediaLimits)
+		history.ManualDownloadCommand = "telegram-harvest download-media"
+	}
+	if err := transcription.apply(cfg, &history); err != nil {
+		return harvest.SyncOptions{}, err
+	}
+	return harvest.SyncOptions{
+		Chat:        *chat,
+		StreamPath:  streamPath,
+		StatePath:   statePath,
+		MergedPath:  mergedPath,
+		History:     history,
+		Reset:       *reset,
+		ResetMerged: *resetMerged,
+	}, nil
 }
 
 func runAccountSync(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {

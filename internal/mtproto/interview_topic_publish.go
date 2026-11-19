@@ -19,8 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/chupakobra6/telegram-harvest/internal/harvest"
-	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/unpack"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
 
@@ -70,6 +70,7 @@ type topicPublishReceipt struct {
 	Hash    string `json:"hash"`
 	ID      int    `json:"id,omitempty"`
 	Pending bool   `json:"pending"`
+	Batch   string `json:"batch,omitempty"`
 }
 type topicPublishJournal map[string]topicPublishReceipt
 
@@ -182,14 +183,67 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 		return fmt.Errorf("local SHA-256 mismatch")
 	}
 	if f.Kind == "document" {
-		if f.MIME == "application/pdf" {
-			b := make([]byte, 5)
-			if _, err = file.ReadAt(b, 0); err != nil || string(b) != "%PDF-" {
-				return fmt.Errorf("invalid PDF header")
-			}
-		}
-		return nil
+		return verifyLocalPublicationDocument(file, info.Size(), f.MIME)
 	}
+	probe, err := probeLocalPublishMedia(ctx, f.Path)
+	if err != nil {
+		return err
+	}
+	return verifyPublicationMediaProbe(f, probe)
+}
+
+func verifyLocalPublicationDocument(file io.ReaderAt, size int64, mime string) error {
+	switch mime {
+	case docxMIME:
+		return verifyDOCXPackage(file, size)
+	case pptxMIME:
+		return verifyPPTXPackage(file, size)
+	case xlsxMIME:
+		return verifyXLSXPackage(file, size)
+	case zipMIME:
+		return verifyZIPPackage(file, size)
+	case "application/pdf":
+		b := make([]byte, 5)
+		if _, err := file.ReadAt(b, 0); err != nil || string(b) != "%PDF-" {
+			return fmt.Errorf("invalid PDF header")
+		}
+	}
+	return nil
+}
+
+func verifyPublicationMediaProbe(f *InterviewTopicFile, probe localPublishMedia) error {
+	duration, hasAudio, w, hgt := probe.Duration, probe.HasAudio, probe.Width, probe.Height
+	expectedDuration := duration
+	if f.Kind == "audio" {
+		expectedDuration = math.Ceil(duration)
+	}
+	if math.Abs(expectedDuration-f.Duration) > 0.1 || hasAudio != f.HasAudio || w != f.Width || hgt != f.Height {
+		return fmt.Errorf("local media streams/duration differ from manifest")
+	}
+	if f.Kind == "audio" {
+		formatOK := f.MIME == "audio/mp4" && strings.Contains(","+probe.FormatName+",", ",m4a,") || f.MIME == "audio/mpeg" && probe.FormatName == "mp3"
+		if !formatOK {
+			return fmt.Errorf("audio container differs from declared MIME")
+		}
+	}
+	if f.Kind == "video" {
+		brand := probe.Brand
+		allowedBrand := map[string]bool{"isom": true, "iso2": true, "iso3": true, "iso4": true, "iso5": true, "iso6": true, "mp41": true, "mp42": true, "avc1": true, "dash": true, "M4V": true, "MSNV": true}
+		if strings.ToLower(filepath.Ext(f.Filename)) != ".mp4" || !strings.Contains(","+probe.FormatName+",", ",mp4,") || !allowedBrand[brand] {
+			return fmt.Errorf("video is not an allowed MP4 container/major_brand")
+		}
+	}
+	return nil
+}
+
+type localPublishMedia struct {
+	Duration          float64
+	Width, Height     int
+	HasAudio          bool
+	FormatName, Brand string
+}
+
+func probeLocalPublishMedia(ctx context.Context, path string) (localPublishMedia, error) {
 	var probe struct {
 		Streams []struct {
 			CodecType string `json:"codec_type"`
@@ -202,16 +256,16 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 			Tags       map[string]string `json:"tags"`
 		} `json:"format"`
 	}
-	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration,format_name:format_tags=major_brand", "-of", "json", f.Path).Output()
+	b, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration,format_name:format_tags=major_brand", "-of", "json", path).Output()
 	if err != nil {
-		return fmt.Errorf("ffprobe failed: %w", err)
+		return localPublishMedia{}, fmt.Errorf("ffprobe failed: %w", err)
 	}
 	if err = json.Unmarshal(b, &probe); err != nil {
-		return err
+		return localPublishMedia{}, err
 	}
 	var duration float64
 	if _, err = fmt.Sscan(probe.Format.Duration, &duration); err != nil {
-		return err
+		return localPublishMedia{}, err
 	}
 	hasAudio := false
 	w, hgt := 0, 0
@@ -224,27 +278,11 @@ func verifyPublishFile(ctx context.Context, f *InterviewTopicFile) error {
 			hgt = s.Height
 		}
 	}
-	expectedDuration := duration
-	if f.Kind == "audio" {
-		expectedDuration = math.Ceil(duration)
+	if duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
+		return localPublishMedia{}, fmt.Errorf("invalid local media duration")
 	}
-	if math.Abs(expectedDuration-f.Duration) > 0.1 || hasAudio != f.HasAudio || w != f.Width || hgt != f.Height {
-		return fmt.Errorf("local media streams/duration differ from manifest")
-	}
-	if f.Kind == "audio" {
-		formatOK := f.MIME == "audio/mp4" && strings.Contains(","+probe.Format.FormatName+",", ",m4a,") || f.MIME == "audio/mpeg" && probe.Format.FormatName == "mp3"
-		if !formatOK {
-			return fmt.Errorf("audio container differs from declared MIME")
-		}
-	}
-	if f.Kind == "video" {
-		brand := strings.TrimSpace(probe.Format.Tags["major_brand"])
-		allowedBrand := map[string]bool{"isom": true, "iso2": true, "iso3": true, "iso4": true, "iso5": true, "iso6": true, "mp41": true, "mp42": true, "avc1": true, "dash": true, "M4V": true, "MSNV": true}
-		if strings.ToLower(filepath.Ext(f.Filename)) != ".mp4" || !strings.Contains(","+probe.Format.FormatName+",", ",mp4,") || !allowedBrand[brand] {
-			return fmt.Errorf("video is not an allowed MP4 container/major_brand")
-		}
-	}
-	return nil
+	return localPublishMedia{Duration: duration, HasAudio: hasAudio, Width: w, Height: hgt,
+		FormatName: probe.Format.FormatName, Brand: strings.TrimSpace(probe.Format.Tags["major_brand"])}, nil
 }
 
 type topicPublishSource interface {
@@ -266,6 +304,15 @@ func verifyPublishedPost(m *tg.Message, p InterviewTopicPost, parent int) error 
 	if reply != parent {
 		return fmt.Errorf("reply parent mismatch")
 	}
+	return verifyPublishedContent(m, p)
+}
+
+// Shared content verification does not authorize any destination or operation.
+func verifyPublishedContent(m *tg.Message, p InterviewTopicPost) error {
+	return verifyPublishedContentWithSilentVideoNormalization(m, p, false)
+}
+
+func verifyPublishedContentWithSilentVideoNormalization(m *tg.Message, p InterviewTopicPost, allowClearedNosound bool) error {
 	entities, err := topicEntities(p.Text, p.Entities)
 	if err != nil {
 		return err
@@ -282,17 +329,21 @@ func verifyPublishedPost(m *tg.Message, p InterviewTopicPost, parent int) error 
 		}
 		return nil
 	}
-	media, ok := m.Media.(*tg.MessageMediaDocument)
+	_, err = verifyPublishedDocument(m.Media, p.File, allowClearedNosound)
+	return err
+}
+
+func verifyPublishedDocument(mediaClass tg.MessageMediaClass, f *InterviewTopicFile, allowClearedNosound bool) (*tg.Document, error) {
+	media, ok := mediaClass.(*tg.MessageMediaDocument)
 	if !ok {
-		return fmt.Errorf("document media missing")
+		return nil, fmt.Errorf("document media missing")
 	}
 	d, ok := media.Document.(*tg.Document)
 	if !ok {
-		return fmt.Errorf("document missing")
+		return nil, fmt.Errorf("document missing")
 	}
-	f := p.File
 	if d.MimeType != f.MIME || d.Size != f.Size || documentFileName(d) != f.Filename {
-		return fmt.Errorf("filename/MIME/size mismatch")
+		return nil, fmt.Errorf("filename/MIME/size mismatch")
 	}
 	audio, video := false, false
 	for _, a := range d.Attributes {
@@ -300,19 +351,19 @@ func verifyPublishedPost(m *tg.Message, p InterviewTopicPost, parent int) error 
 		case *tg.DocumentAttributeAudio:
 			audio = true
 			if f.Kind != "audio" || a.Voice || float64(a.Duration) != f.Duration {
-				return fmt.Errorf("audio attributes mismatch")
+				return nil, fmt.Errorf("audio attributes mismatch")
 			}
 		case *tg.DocumentAttributeVideo:
 			video = true
-			if f.Kind != "video" || a.RoundMessage || !a.SupportsStreaming || a.Nosound == f.HasAudio || math.Abs(a.Duration-f.Duration) > 0.1 || a.W != f.Width || a.H != f.Height {
-				return fmt.Errorf("video attributes mismatch")
+			if f.Kind != "video" || a.RoundMessage || !a.SupportsStreaming || (a.Nosound == f.HasAudio && !(allowClearedNosound && !f.HasAudio && !a.Nosound)) || math.Abs(a.Duration-f.Duration) > 0.1 || a.W != f.Width || a.H != f.Height {
+				return nil, fmt.Errorf("video attributes mismatch: server round=%t streaming=%t nosound=%t duration=%v width=%d height=%d; expected audio=%t duration=%v width=%d height=%d", a.RoundMessage, a.SupportsStreaming, a.Nosound, a.Duration, a.W, a.H, f.HasAudio, f.Duration, f.Width, f.Height)
 			}
 		}
 	}
 	if audio != (f.Kind == "audio") || video != (f.Kind == "video") {
-		return fmt.Errorf("playable media kind mismatch")
+		return nil, fmt.Errorf("playable media kind mismatch")
 	}
-	return nil
+	return d, nil
 }
 func checkPublishIdentity(ctx context.Context, s topicPublishSource) error {
 	self, err := s.SelfProfile(ctx)
@@ -511,6 +562,10 @@ func (s *Session) PublishInterviewTopic(ctx context.Context, m InterviewTopicPub
 	return publishInterviewTopic(ctx, &interviewTopicSession{Session: s}, m, j, save, apply)
 }
 func loadPublishJournal(journalPath string) (topicPublishJournal, error) {
+	return loadPublicationJournal(journalPath, InterviewTopicID)
+}
+
+func loadPublicationJournal(journalPath string, minimumID int) (topicPublishJournal, error) {
 	j := topicPublishJournal{}
 	f, err := os.Open(journalPath)
 	if err == nil {
@@ -533,7 +588,8 @@ func loadPublishJournal(journalPath string) (topicPublishJournal, error) {
 			return nil, fmt.Errorf("journal must contain one non-null object")
 		}
 		for _, receipt := range j {
-			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= InterviewTopicID {
+			if !validSHA256(receipt.Hash) || receipt.ID < 0 || receipt.ID > 0 && receipt.ID <= minimumID ||
+				receipt.Batch != "" && (minimumID != 0 || !validSHA256(receipt.Batch)) {
 				return nil, fmt.Errorf("invalid receipt")
 			}
 		}
@@ -658,8 +714,85 @@ func (s *interviewTopicSession) publishSend(ctx context.Context, p InterviewTopi
 }
 
 func (s *interviewTopicSession) uploadInterviewFile(ctx context.Context, f *InterviewTopicFile) (tg.InputMediaClass, error) {
-	uploaded, e := message.NewSender(s.raw).Self().Upload(message.FromPath(f.Path)).AsInputFile(ctx)
+	return s.Session.uploadPublishFile(ctx, f)
+}
+
+// Upload only a verified private snapshot; keep checking the source descriptor and path.
+func (s *Session) uploadPublishFile(ctx context.Context, f *InterviewTopicFile) (*tg.InputMediaUploadedDocument, error) {
+	file, e := os.Open(f.Path)
 	if e != nil {
+		return nil, e
+	}
+	defer file.Close()
+	check := func() error {
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() != f.Size {
+			return fmt.Errorf("upload file size/type changed")
+		}
+		pathInfo, err := os.Stat(f.Path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(info, pathInfo) {
+			return fmt.Errorf("upload source path changed")
+		}
+		if _, err = file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		h := sha256.New()
+		if _, err = io.Copy(h, file); err != nil {
+			return err
+		}
+		if hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
+			return fmt.Errorf("upload SHA-256 mismatch")
+		}
+		_, err = file.Seek(0, io.SeekStart)
+		return err
+	}
+	if e = check(); e != nil {
+		return nil, e
+	}
+	if e = verifyPublishFile(ctx, f); e != nil {
+		return nil, e
+	}
+	dir, e := os.MkdirTemp("", "telegram-publish-snapshot-*")
+	if e != nil {
+		return nil, e
+	}
+	defer os.RemoveAll(dir)
+	snapshotPath := filepath.Join(dir, "snapshot")
+	snapshot, e := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if e != nil {
+		return nil, e
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(snapshot, h), io.LimitReader(file, f.Size+1))
+	closeErr := snapshot.Close()
+	if e = errors.Join(copyErr, closeErr); e != nil {
+		return nil, e
+	}
+	if n != f.Size || hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
+		return nil, fmt.Errorf("upload snapshot size or SHA-256 mismatch")
+	}
+	if e = check(); e != nil {
+		return nil, e
+	}
+	snapshot, e = os.Open(snapshotPath)
+	if e != nil {
+		return nil, e
+	}
+	defer snapshot.Close()
+	if e = os.Remove(snapshotPath); e != nil {
+		return nil, e
+	}
+	uploaded, e := uploader.NewUploader(s.raw).Upload(ctx, uploader.NewUpload(f.Filename, snapshot, f.Size))
+	if e != nil {
+		return nil, e
+	}
+	if e = check(); e != nil {
 		return nil, e
 	}
 	if e = verifyPublishFile(ctx, f); e != nil {

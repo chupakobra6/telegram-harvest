@@ -563,9 +563,17 @@ func (s *interviewTopicSession) interviewTopicPrepare(ctx context.Context) error
 }
 
 func (s *interviewTopicSession) interviewTopicRead(ctx context.Context, id int) (*tg.Message, error) {
-	peer := s.target.InputPeer.(*tg.InputPeerChannel)
+	return s.Session.readPublicationMessage(ctx, s.target, id)
+}
+
+// The caller owns destination authorization and verifies returned content.
+func (s *Session) readPublicationMessage(ctx context.Context, target resolvedTarget, id int) (*tg.Message, error) {
+	peer, ok := target.InputPeer.(*tg.InputPeerChannel)
+	if !ok {
+		return nil, fmt.Errorf("publication read requires channel peer")
+	}
 	var result tg.MessagesMessagesClass
-	err := s.performRPC(ctx, "read_interview_topic_message", func(ctx context.Context) error {
+	err := s.performRPC(ctx, "read_publication_message", func(ctx context.Context) error {
 		var err error
 		result, err = s.raw.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{Channel: &tg.InputChannel{ChannelID: peer.ChannelID, AccessHash: peer.AccessHash}, ID: []tg.InputMessageClass{&tg.InputMessageID{ID: id}}})
 		return err
