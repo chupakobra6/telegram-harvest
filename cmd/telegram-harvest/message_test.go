@@ -153,7 +153,7 @@ func TestMessageRejectsUnsafeInputsBeforeTelegram(t *testing.T) {
 		{"unknown flag", cfg, []string{"send", "--to", "@other", "--manifest", path}, "flag provided but not defined"},
 		{"prepare cannot apply", cfg, []string{"prepare", "--apply"}, "flag provided but not defined"},
 		{"empty intent", cfg, []string{"prepare", "--intent="}, "intent key is empty"},
-		{"study", config.Config{Mode: config.ModeStudy}, append([]string{"send", "--apply"}, manifestArgs...), "read-only study"},
+		{"wrong study profile", config.Config{Mode: config.ModeStudy}, append([]string{"send", "--apply"}, manifestArgs...), "manifest account differs"},
 		{"wrong account", config.Config{Mode: config.ModeAccount, AccountName: "work", BoundAccountID: 500}, append([]string{"send", "--apply"}, manifestArgs...), "manifest account differs"},
 		{"wrong profile for same ID", config.Config{Mode: config.ModeAccount, AccountName: "work", BoundAccountID: account.ID}, append([]string{"send", "--apply"}, manifestArgs...), "manifest account differs"},
 		{"unbound", config.Config{Mode: config.ModeAccount, AccountName: "work"}, append([]string{"send", "--apply"}, manifestArgs...), "bound by login"},
@@ -183,8 +183,20 @@ func TestRunMessageRoutesWithoutConnectingToTelegram(t *testing.T) {
 		t.Fatalf("offline show: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	code, stdout, stderr = runCommand(t, []string{"--profile", "study", "message", "send", "--manifest", path, "--apply"}, nil)
-	if code == 0 || stdout != "" || !strings.Contains(stderr, "read-only study") {
+	if code == 0 || stdout != "" || !strings.Contains(stderr, "manifest account differs") {
 		t.Fatalf("study apply: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	studyPath := filepath.Join(t.TempDir(), "study-review.json")
+	study, err := messageAccount(config.Config{Mode: config.ModeStudy})
+	if err != nil || study.Profile != "study" || study.Username != "Pheik15" || study.ID != 6889183661 {
+		t.Fatalf("study account = %+v, %v", study, err)
+	}
+	if err := writeNewMessageManifest(studyPath, testMessageManifest(t, study, "study text", false)); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runCommand(t, []string{"--profile", "main", "message", "send", "--manifest", studyPath, "--apply"}, nil)
+	if code == 0 || stdout != "" || !strings.Contains(stderr, "manifest account differs") {
+		t.Fatalf("main cannot send study manifest: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 

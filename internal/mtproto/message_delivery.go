@@ -93,15 +93,25 @@ func messageResult(m MessageManifest, apply bool) MessageResult {
 		TopicID: m.TopicID, ReplyTo: m.ReplyTo, DryRun: !apply, Status: "blocked"}
 }
 
-const readOnlyStudyAccountID int64 = 6889183661
+const (
+	StudyAccountID       int64 = 6889183661
+	StudyAccountUsername       = "Pheik15"
+)
 
-func readOnlyStudyIdentity(id int64, username string) bool {
-	return id == readOnlyStudyAccountID || strings.EqualFold(username, "Pheik15")
+func isStudyIdentity(id int64, username string) bool {
+	return id == StudyAccountID || strings.EqualFold(username, StudyAccountUsername)
 }
 
 func validateMessageAccount(a MessageAccount) error {
-	if a.Profile == "" || a.Profile == "study" || a.ID <= 0 || readOnlyStudyIdentity(a.ID, a.Username) {
-		return fmt.Errorf("message operations require main or a bound registered account; study is read-only")
+	if a.Profile == "" || a.ID <= 0 {
+		return fmt.Errorf("message operations require a bound Telegram account")
+	}
+	if a.Profile == "study" {
+		if a.ID != StudyAccountID || !strings.EqualFold(a.Username, StudyAccountUsername) {
+			return fmt.Errorf("study must be bound to @%s", StudyAccountUsername)
+		}
+	} else if isStudyIdentity(a.ID, a.Username) {
+		return fmt.Errorf("@%s requires the study profile", StudyAccountUsername)
 	}
 	if a.Profile == "main" && (a.ID != InterviewTopicAccountID || !strings.EqualFold(a.Username, SavedMessagesMainUsername)) {
 		return fmt.Errorf("main must be bound to @Pheik13")

@@ -61,7 +61,7 @@ func (s *Session) checkMessageAccount(ctx context.Context, account MessageAccoun
 	if err != nil {
 		return MessageAccount{}, err
 	}
-	if self.ID != account.ID || readOnlyStudyIdentity(self.ID, self.Username) ||
+	if self.ID != account.ID || (account.Profile != "study" && isStudyIdentity(self.ID, self.Username)) ||
 		(account.Username != "" && !strings.EqualFold(self.Username, account.Username)) {
 		return MessageAccount{}, fmt.Errorf("active Telegram account differs from selected writable identity")
 	}

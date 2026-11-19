@@ -31,13 +31,15 @@ func messageAccount(cfg config.Config) (mtproto.MessageAccount, error) {
 	switch cfg.Mode {
 	case config.ModeMain:
 		return mtproto.MessageAccount{Profile: "main", ID: mtproto.InterviewTopicAccountID, Username: mtproto.SavedMessagesMainUsername}, nil
+	case config.ModeStudy:
+		return mtproto.MessageAccount{Profile: "study", ID: mtproto.StudyAccountID, Username: mtproto.StudyAccountUsername}, nil
 	case config.ModeAccount:
 		if cfg.BoundAccountID > 0 && cfg.AccountName != "" {
 			return mtproto.MessageAccount{Profile: cfg.AccountName, ID: cfg.BoundAccountID}, nil
 		}
 		return mtproto.MessageAccount{}, fmt.Errorf("message requires a registered profile bound by login")
 	default:
-		return mtproto.MessageAccount{}, fmt.Errorf("message is unavailable for the read-only study profile")
+		return mtproto.MessageAccount{}, fmt.Errorf("message requires main, study or a bound registered profile")
 	}
 }
 
@@ -79,7 +81,7 @@ func printMessageUsage(out io.Writer) {
 	fmt.Fprintln(out, "  message show --manifest /absolute/private.json  # exact offline review, including text and attachments")
 	fmt.Fprintln(out, "  message send --manifest /absolute/private.json [--apply]  # dry-run; apply only after explicit send authorization")
 	fmt.Fprintln(out, "  message draft --manifest /absolute/private.json [--apply]  # dry-run; apply saves a native text draft; never sends")
-	fmt.Fprintln(out, "  Use main or a bound registered profile. To prepare a native text draft, add --draft and omit attachments.")
+	fmt.Fprintln(out, "  Use study for coursework, main for personal messages, or the intended bound registered profile. To prepare a native text draft, add --draft and omit attachments.")
 	fmt.Fprintln(out, "  Use --intent KEY only to prepare a separate, deliberately repeated delivery. Reuse that manifest when checking its outcome.")
 }
 

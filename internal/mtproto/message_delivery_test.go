@@ -423,7 +423,7 @@ func TestMessageDeliveryChangedParentAndStudyGuards(t *testing.T) {
 		t.Fatalf("accepted edited parent: %+v, %v", r, err)
 	}
 	if _, err := (&Session{}).PrepareMessage(t.Context(), input, MessageAccount{Profile: "study", ID: 17}); err == nil {
-		t.Fatal("study should fail before connecting")
+		t.Fatal("incorrect study identity should fail before connecting")
 	}
 	if _, err := (&Session{}).PrepareMessage(t.Context(), input, MessageAccount{Profile: "alias", ID: 6889183661}); err == nil {
 		t.Fatal("canonical study ID should fail before connecting, even without its original username")
@@ -431,6 +431,26 @@ func TestMessageDeliveryChangedParentAndStudyGuards(t *testing.T) {
 	w.account.Username = "Pheik15"
 	if _, err := s.PrepareMessage(t.Context(), input, MessageAccount{Profile: "alias", ID: 17}); err == nil {
 		t.Fatal("registered alias of study identity accepted")
+	}
+}
+
+func TestMessageDeliveryStudyAccount(t *testing.T) {
+	s, w, _ := newMessageWire(t)
+	w.account.ID = StudyAccountID
+	w.account.Username = StudyAccountUsername
+	account := MessageAccount{Profile: "study", ID: StudyAccountID, Username: StudyAccountUsername}
+	m, err := s.PrepareMessage(t.Context(), MessagePrepareInput{To: "@colleague", Text: "Coursework"}, account)
+	if err != nil || m.Account != account {
+		t.Fatalf("prepare study message: account=%+v, err=%v", m.Account, err)
+	}
+	dir := t.TempDir()
+	preview, err := s.DeliverMessage(t.Context(), m, account, dir, false)
+	if err != nil || !preview.Ready || w.sendCount != 0 {
+		t.Fatalf("preview study message: %+v, %v, sends=%d", preview, err, w.sendCount)
+	}
+	result, err := s.DeliverMessage(t.Context(), m, account, dir, true)
+	if err != nil || !result.Complete || w.sendCount != 1 {
+		t.Fatalf("deliver study message: %+v, %v, sends=%d", result, err, w.sendCount)
 	}
 }
 
