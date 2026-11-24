@@ -163,6 +163,7 @@ type HistoryOptions struct {
 	MaxVideoBytes         int64
 	MaxGenericVideoBytes  int64
 	ManualDownloadCommand string
+	ManualDownloadChat    string
 	TranscribeMedia       bool
 	KeepTranscribedMedia  bool
 	VideoTranscribeMode   string

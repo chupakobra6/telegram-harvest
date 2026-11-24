@@ -70,17 +70,14 @@ func (s *Session) planRecordMediaDownloads(
 	if !ok {
 		return
 	}
-	s.planMediaDownloads(msg.Media, record, 0, opts, pipeline, plan)
-	if rich, present := msg.GetRichMessage(); present {
-		media, err := richMessageMedia(rich)
-		if err != nil {
-			return
-		}
-		index := len(extractAttachments(msg.Media))
-		for _, item := range media {
-			s.planMediaDownloads(item, record, index, opts, pipeline, plan)
-			index += len(extractAttachments(item))
-		}
+	media, err := messageMediaItems(msg)
+	if err != nil {
+		return
+	}
+	index := 0
+	for _, item := range media {
+		s.planMediaDownloads(item, record, index, opts, pipeline, plan)
+		index += len(extractAttachments(item))
 	}
 }
 

@@ -48,14 +48,8 @@ func runReadPost(cfg config.Config, client *mtproto.Client, args []string, out i
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return client.RunAuthorized(ctx, func(ctx context.Context, session *mtproto.Session) error {
-			if cfg.Mode == config.ModeAccount {
-				self, err := session.SelfProfile(ctx)
-				if err != nil {
-					return fmt.Errorf("identify authorized account: %w", err)
-				}
-				if self.ID != cfg.BoundAccountID {
-					return fmt.Errorf("authorized Telegram session differs from the registered account")
-				}
+			if err := verifyRegisteredReadAccount(ctx, cfg, session); err != nil {
+				return err
 			}
 			var err error
 			result, err = session.ReadPost(ctx, link, func(chat harvest.Chat) error {

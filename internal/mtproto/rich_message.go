@@ -298,6 +298,18 @@ func richTableText(table *tg.PageBlockTable, text func(tg.RichTextClass) (string
 
 // Reuse the ordinary media path, including download limits, cache and ASR.
 // Container resources stay in their source order even when a block has no caption.
+func messageMediaItems(msg *tg.Message) ([]tg.MessageMediaClass, error) {
+	media := []tg.MessageMediaClass{msg.Media}
+	if rich, present := msg.GetRichMessage(); present {
+		items, err := richMessageMedia(rich)
+		if err != nil {
+			return nil, err
+		}
+		media = append(media, items...)
+	}
+	return media, nil
+}
+
 func richMessageMedia(rich tg.RichMessage) ([]tg.MessageMediaClass, error) {
 	var media []tg.MessageMediaClass
 	for _, value := range rich.Photos {

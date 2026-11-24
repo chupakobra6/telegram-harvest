@@ -1476,7 +1476,8 @@ func TestMediaSizeLimitExceededWritesActionableHint(t *testing.T) {
 	}
 	if !mediaSizeLimitExceeded(&record, 0, harvest.HistoryOptions{
 		MaxDocumentBytes:      10 * 1024 * 1024,
-		ManualDownloadCommand: "telegram-harvest download-media",
+		ManualDownloadCommand: "telegram-harvest --profile study download-media",
+		ManualDownloadChat:    "supergroup:123",
 	}) {
 		t.Fatalf("expected size limit to be exceeded")
 	}
@@ -1484,10 +1485,7 @@ func TestMediaSizeLimitExceededWritesActionableHint(t *testing.T) {
 	if attachment.DownloadError == "" || !strings.Contains(attachment.DownloadError, "document cap") {
 		t.Fatalf("download error = %q", attachment.DownloadError)
 	}
-	if attachment.DownloadHint == "" ||
-		!strings.Contains(attachment.DownloadHint, "--chat 123") ||
-		!strings.Contains(attachment.DownloadHint, "--message-id 77") ||
-		!strings.Contains(attachment.DownloadHint, "--index 1") {
+	if !strings.Contains(attachment.DownloadHint, "telegram-harvest --profile study download-media --chat supergroup:123 --message-id 77 --index 1") {
 		t.Fatalf("download hint = %q", attachment.DownloadHint)
 	}
 }

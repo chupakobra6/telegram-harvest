@@ -825,7 +825,8 @@ func runDump(cfg config.Config, client *mtproto.Client, args []string, out io.Wr
 		history.DownloadMedia = true
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
 		applyMediaLimits(&history, mediaLimits)
-		history.ManualDownloadCommand = "telegram-harvest download-media"
+		history.ManualDownloadCommand = "telegram-harvest --profile " + cfg.ProfileName() + " download-media"
+		history.ManualDownloadChat = *chat
 	}
 	if *transcribeMedia {
 		history.TranscriptDir = resolveOutputPath(cfg.StateDir, *transcriptDir)
@@ -1002,7 +1003,8 @@ func parseSyncOptions(cfg config.Config, args []string, out io.Writer) (harvest.
 		history.DownloadMedia = true
 		history.MediaDir = resolveOutputPath(cfg.StateDir, *mediaDir)
 		applyMediaLimits(&history, mediaLimits)
-		history.ManualDownloadCommand = "telegram-harvest download-media"
+		history.ManualDownloadCommand = "telegram-harvest --profile " + cfg.ProfileName() + " download-media"
+		history.ManualDownloadChat = *chat
 	}
 	if err := transcription.apply(cfg, &history); err != nil {
 		return harvest.SyncOptions{}, err
@@ -1563,7 +1565,7 @@ func dailyHistoryOptions(cfg config.Config, opts dailyOptions) harvest.HistoryOp
 		MaxGenericVideoBytes: opts.MaxGenericVideoBytes,
 		VideoTranscribeMode:  opts.VideoTranscribeMode,
 	}
-	history.ManualDownloadCommand = "telegram-harvest daily-download-media"
+	history.ManualDownloadCommand = "telegram-harvest --profile " + cfg.ProfileName() + " daily-download-media"
 	if opts.DownloadMedia {
 		history.MediaDir = resolveOutputPath(cfg.StateDir, opts.MediaDir)
 	}
@@ -2019,9 +2021,9 @@ func applyMediaLimits(opts *harvest.HistoryOptions, limits mediaLimitFlags) {
 func runDownloadMedia(cfg config.Config, client *mtproto.Client, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("download-media", flag.ContinueOnError)
 	fs.SetOutput(out)
-	chat := fs.String("chat", "", "chat id or @username")
+	chat := fs.String("chat", "", "typed chat ID, numeric chat ID or @username")
 	messageID := fs.Int("message-id", 0, "Telegram message id")
-	index := fs.Int("index", 1, "1-based attachment index")
+	index := fs.Int("index", 1, "1-based index in the message's attachments")
 	outDir := fs.String("out-dir", "media-manual", "download output directory, relative to state dir unless absolute")
 	overwrite := fs.Bool("overwrite", false, "replace an existing downloaded file")
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -2042,10 +2044,16 @@ func runDownloadMedia(cfg config.Config, client *mtproto.Client, args []string, 
 	if *index <= 0 {
 		return fmt.Errorf("--index must be > 0")
 	}
+	if cfg.Mode == config.ModeAccount && cfg.BoundAccountID <= 0 {
+		return fmt.Errorf("account %q is not authorized; run `%s` first", cfg.AccountName, cfg.LoginCommand())
+	}
 	mediaDir := resolveOutputPath(cfg.StateDir, *outDir)
 	var result mtproto.DownloadMediaResult
 	if err := withReadRuntimeLock(cfg, func() error {
 		return client.RunAuthorized(context.Background(), func(ctx context.Context, session *mtproto.Session) error {
+			if err := verifyRegisteredReadAccount(ctx, cfg, session); err != nil {
+				return err
+			}
 			var err error
 			result, err = session.DownloadMessageMedia(ctx, *chat, *messageID, mtproto.DownloadMediaOptions{
 				MediaDir:  mediaDir,
@@ -2225,6 +2233,20 @@ func ensureAllowedChat(cfg config.Config, chat string) error {
 		return nil
 	}
 	return fmt.Errorf("chat %q is outside %s; refusing to read outside study scope", chat, cfg.EnvNames("ALLOWED_CHATS"))
+}
+
+func verifyRegisteredReadAccount(ctx context.Context, cfg config.Config, session *mtproto.Session) error {
+	if cfg.Mode != config.ModeAccount {
+		return nil
+	}
+	self, err := session.SelfProfile(ctx)
+	if err != nil {
+		return fmt.Errorf("identify authorized account: %w", err)
+	}
+	if self.ID != cfg.BoundAccountID {
+		return fmt.Errorf("authorized Telegram session differs from the registered account")
+	}
+	return nil
 }
 
 func withRuntimeLock(cfg config.Config, fn func() error) (err error) {

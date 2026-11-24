@@ -583,33 +583,37 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 	if !ok {
 		return DownloadMediaResult{}, fmt.Errorf("message %d is not downloadable", messageID)
 	}
+	chatType := target.Chat.Type
+	if chatType == "supergroup" {
+		chatType = "channel"
+	}
+	if msg.ID != messageID || peerClassID(msg.PeerID) != target.Chat.ID || peerType(msg.PeerID) != chatType {
+		return DownloadMediaResult{}, fmt.Errorf("received a Telegram message outside the requested chat and id")
+	}
 	if err := s.prepareRichMessage(ctx, target, msg); err != nil {
 		return DownloadMediaResult{}, err
 	}
 	record, ok := normalizeRecord(msg, target.Chat, entities)
 	if !ok {
-		record = harvest.MessageRecord{
-			Source:    "telegram",
-			SourceURL: messageURL(target.Chat, msg.ID),
-			Chat:      target.Chat,
-			MessageID: msg.ID,
-			Date:      time.Unix(int64(msg.Date), 0).UTC(),
-			Outgoing:  msg.Out,
-			Kind:      messageKind(msg.Media),
-		}
+		return DownloadMediaResult{}, fmt.Errorf("could not normalize Telegram message %d", messageID)
 	}
-	attachment, location, fileName, ok := downloadableMedia(msg.Media, record.MessageID)
-	if !ok {
-		return DownloadMediaResult{}, fmt.Errorf("message %d has no downloadable media", messageID)
-	}
-	record.Attachments = []harvest.Attachment{attachment}
 	index := opts.Index
 	if index <= 0 {
 		index = 1
 	}
-	if index != 1 {
-		return DownloadMediaResult{}, fmt.Errorf("attachment index %d is unavailable; message has 1 downloadable attachment", index)
+	if index > len(record.Attachments) {
+		return DownloadMediaResult{}, fmt.Errorf("attachment index %d is unavailable; message %d has %d attachments", index, messageID, len(record.Attachments))
 	}
+	media, err := messageMediaItems(msg)
+	if err != nil {
+		return DownloadMediaResult{}, err
+	}
+	item := mediaAtAttachmentIndex(media, index-1)
+	attachment, location, fileName, ok := downloadableMedia(item, record.MessageID)
+	if !ok {
+		return DownloadMediaResult{}, fmt.Errorf("attachment %d in message %d has no downloadable media", index, messageID)
+	}
+	record.Attachments[index-1] = attachment
 	mediaDir := opts.MediaDir
 	if strings.TrimSpace(mediaDir) == "" {
 		mediaDir = "media-manual"
@@ -617,7 +621,7 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 	s.saveAttachmentFile(
 		ctx,
 		&record,
-		0,
+		index-1,
 		location,
 		fileName,
 		mediaDir,
@@ -626,7 +630,7 @@ func (s *Session) DownloadMessageMedia(ctx context.Context, chat string, message
 		opts.DownloadTiming,
 		opts.DownloadQueueTiming,
 	)
-	result := DownloadMediaResult{Record: record, Attachment: record.Attachments[0]}
+	result := DownloadMediaResult{Record: record, Attachment: record.Attachments[index-1]}
 	if result.Attachment.DownloadError != "" {
 		return result, errors.New(result.Attachment.DownloadError)
 	}
@@ -2218,7 +2222,6 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 	switch msg := msgClass.(type) {
 	case *tg.Message:
 		body := strings.TrimSpace(msg.Message)
-		attachments := extractAttachments(msg.Media)
 		links := mergeLinks(extractLinks(msg.Message, msg.Entities), extractMediaLinks(msg.Media))
 		if rich, present := msg.GetRichMessage(); present {
 			text, richLinks, err := richMessageBody(msg.Message, rich)
@@ -2227,13 +2230,14 @@ func normalizeRecord(msgClass tg.MessageClass, chat harvest.Chat, entities peer.
 			}
 			body = text
 			links = mergeLinks(links, richLinks)
-			media, err := richMessageMedia(rich)
-			if err != nil {
-				return harvest.MessageRecord{}, false
-			}
-			for _, item := range media {
-				attachments = append(attachments, extractAttachments(item)...)
-			}
+		}
+		media, err := messageMediaItems(msg)
+		if err != nil {
+			return harvest.MessageRecord{}, false
+		}
+		var attachments []harvest.Attachment
+		for _, item := range media {
+			attachments = append(attachments, extractAttachments(item)...)
 		}
 		record := harvest.MessageRecord{
 			Source:      "telegram",
@@ -2448,6 +2452,17 @@ func extractAttachments(media tg.MessageMediaClass) []harvest.Attachment {
 	default:
 		return nil
 	}
+}
+
+func mediaAtAttachmentIndex(media []tg.MessageMediaClass, index int) tg.MessageMediaClass {
+	for _, item := range media {
+		count := len(extractAttachments(item))
+		if index < count {
+			return item
+		}
+		index -= count
+	}
+	return nil
 }
 
 func ensureDailyAttachments(msgClass tg.MessageClass, record *harvest.MessageRecord) {
@@ -2894,7 +2909,7 @@ func mediaSizeLimitExceeded(record *harvest.MessageRecord, index int, opts harve
 		return false
 	}
 	attachment.DownloadError = fmt.Sprintf("skipped: %s size %s exceeds %s cap %s", attachment.Kind, formatBytes(attachment.Size), label, formatBytes(limit))
-	attachment.DownloadHint = manualDownloadHint(*record, index, opts.ManualDownloadCommand)
+	attachment.DownloadHint = manualDownloadHint(*record, index, opts.ManualDownloadCommand, opts.ManualDownloadChat)
 	return true
 }
 
@@ -2918,19 +2933,13 @@ func mediaLimitOrDefault(value int64, fallback int64) int64 {
 	return value
 }
 
-func manualDownloadHint(record harvest.MessageRecord, index int, command string) string {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		command = "telegram-harvest download-media"
+func manualDownloadHint(record harvest.MessageRecord, index int, command, chat string) string {
+	chat = strings.TrimSpace(chat)
+	if chat == "" && record.Chat.ID != 0 {
+		chat = harvest.AccountChatKey(record.Chat)
 	}
-	chat := record.Chat.Username
-	if chat != "" {
-		chat = "@" + chat
-	} else {
-		chat = strconv.FormatInt(record.Chat.ID, 10)
-	}
-	if chat == "" || record.MessageID == 0 {
-		return "manual download available with download-media using chat, message id, and attachment index"
+	if command == "" || chat == "" || record.MessageID == 0 {
+		return "manual download available with telegram-harvest download-media using the selected profile, chat, message id, and attachment index"
 	}
 	return fmt.Sprintf("to fetch manually without caps: %s --chat %s --message-id %d --index %d", command, shellArg(chat), record.MessageID, index+1)
 }

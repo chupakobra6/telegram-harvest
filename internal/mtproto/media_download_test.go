@@ -16,6 +16,76 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+func TestDownloadMessageMediaUsesReadPostIndexesAndExactChat(t *testing.T) {
+	const original = "fixture bytes"
+	document := func(id int64) *tg.Document {
+		return &tg.Document{
+			ID: id, Size: int64(len(original)), MimeType: "application/pdf",
+			Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "notes.pdf"}},
+		}
+	}
+	base := &tg.MessageMediaDocument{}
+	base.SetDocument(document(101))
+	msg := tg.Message{ID: 42, PeerID: &tg.PeerChannel{ChannelID: 100}, Date: 1700000000, Media: base}
+	msg.SetRichMessage(tg.RichMessage{
+		Documents: []tg.DocumentClass{document(202), document(303)},
+	})
+	wire := &readPostWire{t: t, msg: msg, channel: tg.Channel{ID: 100, Title: "News"}, username: "fixture_news"}
+	wire.channel.SetAccessHash(456)
+	wire.channel.SetUsername(wire.username)
+	var locations []int64
+	downloadWire := telegram.MiddlewareFunc(func(next tg.Invoker) telegram.InvokeFunc {
+		return func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+			req, ok := input.(*tg.UploadGetFileRequest)
+			if !ok || req.Offset != 0 {
+				return fmt.Errorf("unexpected RPC: %T", input)
+			}
+			location, ok := req.Location.(*tg.InputDocumentFileLocation)
+			if !ok {
+				return fmt.Errorf("unexpected file location: %T", req.Location)
+			}
+			locations = append(locations, location.ID)
+			output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileUnknown{}, Bytes: []byte(original)}
+			return nil
+		}
+	})
+	session := &Session{
+		raw: tg.NewClient(wire), dialogCache: make(map[string]resolvedTarget),
+		client: telegram.NewClient(1, "fixture", telegram.Options{Middlewares: []telegram.Middleware{downloadWire}}),
+	}
+	link, err := ParsePostLink("t.me/fixture_news/42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	post, err := session.ReadPost(t.Context(), link, func(harvest.Chat) error { return nil })
+	if err != nil || len(post.Record.Attachments) != 3 {
+		t.Fatalf("read-post attachments: %v, %v", post.Record.Attachments, err)
+	}
+	dir := t.TempDir()
+	for _, index := range []int{1, 2, 3} {
+		download, err := session.DownloadMessageMedia(t.Context(), "@fixture_news", 42, DownloadMediaOptions{Index: index, MediaDir: dir})
+		if err != nil || download.Attachment.MediaID != post.Record.Attachments[index-1].MediaID ||
+			download.Record.Attachments[index-1].LocalPath != download.Attachment.LocalPath {
+			t.Fatalf("index %d selected the wrong attachment: %+v, %v", index, download, err)
+		}
+		data, err := os.ReadFile(download.Attachment.LocalPath)
+		if err != nil || string(data) != original {
+			t.Fatalf("index %d bytes: %q, %v", index, data, err)
+		}
+	}
+	if _, err := session.DownloadMessageMedia(t.Context(), "@fixture_news", 42, DownloadMediaOptions{Index: 4, MediaDir: dir}); err == nil {
+		t.Fatal("accepted a nonexistent attachment")
+	}
+	wire.msg.PeerID = &tg.PeerChat{ChatID: 100}
+	if _, err := session.DownloadMessageMedia(t.Context(), "@fixture_news", 42, DownloadMediaOptions{Index: 2, MediaDir: dir}); err == nil ||
+		!strings.Contains(err.Error(), "outside the requested chat") {
+		t.Fatalf("accepted a different peer type with the same numeric id: %v", err)
+	}
+	if len(locations) != 3 || locations[0] != 101 || locations[1] != 202 || locations[2] != 303 {
+		t.Fatalf("unexpected Telegram file reads: %v", locations)
+	}
+}
+
 type originalMediaTestTranscriber struct {
 	input string
 	calls int
